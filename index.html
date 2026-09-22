@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Experimenteel dashboard voor automatische selectie en ritvoorstellen." />
+    <title>Vervoersplanning V2</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3029'/%3E%3Cpath d='M13 37h31l6 7v7H13z' fill='%23f3b43f'/%3E%3Ccircle cx='23' cy='51' r='6' fill='%23f7f3e8'/%3E%3Ccircle cx='45' cy='51' r='6' fill='%23f7f3e8'/%3E%3Cpath d='M18 14h28v21H18z' fill='%23f7f3e8'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand" aria-label="Vervoersplanning V2">
+        <span class="brand-mark">VR</span>
+        <span><strong>Vervoersplanning</strong><small>V2 experiment</small></span>
+      </div>
+      <div class="top-actions">
+        <span class="mode-pill"><span></span> Alleen-lezen</span>
+        <button id="refreshButton" class="button secondary" type="button">Nu verversen</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="intro" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">Automatische bezorgselectie</p>
+          <h1 id="page-title">Wat moet mee, en in welke rit?</h1>
+          <p class="intro-copy">V2 beoordeelt iedere order met vaste regels en maakt uitlegbare ritvoorstellen. Er wordt nog niets teruggeschreven.</p>
+        </div>
+        <div class="sync-card">
+          <span class="sync-dot" aria-hidden="true"></span>
+          <div><b>Gegevens actief</b><span id="syncText">Voorbeelddata wordt geladen…</span></div>
+        </div>
+      </section>
+
+      <section id="summary" class="summary" aria-label="Samenvatting"></section>
+
+      <section class="workspace">
+        <div class="panel orders-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Beslislijst</p>
+              <h2>Orders</h2>
+            </div>
+            <div class="filters">
+              <label class="search"><span>Zoeken</span><input id="searchInput" type="search" placeholder="Order, klant of plaats" /></label>
+              <label><span>Status</span><select id="decisionFilter"><option value="all">Alles</option><option value="include">Meenemen</option><option value="review">Controleren</option><option value="exclude">Niet meenemen</option></select></label>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Order</th><th>Plaats</th><th>Uiterlijk</th><th>Beslissing</th><th>Waarom</th></tr></thead>
+              <tbody id="ordersBody"></tbody>
+            </table>
+          </div>
+          <p id="emptyState" class="empty" hidden>Geen orders gevonden met deze filters.</p>
+        </div>
+
+        <aside class="panel route-panel" aria-labelledby="route-title">
+          <div class="panel-heading compact">
+            <div><p class="eyebrow">Automatisch voorstel</p><h2 id="route-title">Ritten</h2></div>
+          </div>
+          <div id="routes"></div>
+        </aside>
+      </section>
+
+      <section class="panel rules-panel" aria-labelledby="rules-title">
+        <div><p class="eyebrow">Transparante logica</p><h2 id="rules-title">Actieve selectieregels</h2></div>
+        <div class="rules-grid">
+          <article><b>Meenemen</b><p>Betaald, bezorgproduct, compleet adres, niet geannuleerd en nog niet bezorgd.</p></article>
+          <article><b>Controleren</b><p>Belangrijke informatie ontbreekt of een handmatige beslissing is nodig.</p></article>
+          <article><b>Niet meenemen</b><p>Afhalen, geannuleerd, niet betaald of al volledig bezorgd.</p></article>
+        </div>
+      </section>
+    </main>
+
+    <template id="routeTemplate">
+      <article class="route-card">
+        <div class="route-card-top"><span class="route-number"></span><div><b class="route-name"></b><span class="route-meta"></span></div></div>
+        <ol class="route-stops"></ol>
+        <div class="route-footer"><span class="route-load"></span><button class="button ghost" type="button" disabled>Experiment: niet opslaan</button></div>
+      </article>
+    </template>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
