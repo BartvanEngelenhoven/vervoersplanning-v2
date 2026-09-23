@@ -172,6 +172,10 @@ async function markDelivered(request, env) {
   if (userErrors.length) return json({ error: "Shopify fulfillment failed", userErrors }, 422, env);
 
   const fulfillment = result.data?.fulfillmentCreateV2?.fulfillment;
+  await appendOrderPlanningNote(shopDomain, token, shopifyOrderId, [
+    `Bezorgd gemeld via Vervoersplanning V2`,
+    `Tijd: ${new Date().toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam" })}`,
+  ]);
   await env.PLANNING_ORDERS.put(`delivered:${shopDomain}:${displayOrderId}`, JSON.stringify({
     id: displayOrderId,
     shopDomain,
@@ -244,6 +248,12 @@ async function setOwnDelivery(request, env) {
 
   const storageKey = `order:${shopDomain}:${displayOrderId}`;
   const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
+  await appendOrderPlanningNote(shopDomain, token, shopifyOrderId, [
+    `Handmatig gemarkeerd als eigen bezorging via Vervoersplanning V2`,
+    `Order: ${displayOrderId}`,
+    storedOrder?.dueDate ? `Uiterste leverdatum: ${storedOrder.dueDate}` : "",
+    storedOrder?.fullAddress ? `Adres: ${storedOrder.fullAddress}` : "",
+  ]);
   if (storedOrder) {
     await env.PLANNING_ORDERS.put(storageKey, JSON.stringify({
       ...storedOrder,
@@ -254,6 +264,30 @@ async function setOwnDelivery(request, env) {
   }
 
   return json({ ok: true, id: displayOrderId, tag: "eigen bezorging" }, 200, env);
+}
+
+async function appendOrderPlanningNote(shopDomain, token, shopifyOrderId, lines) {
+  try {
+    const noteLine = lines.filter(Boolean).join("\n");
+    const result = await shopifyGraphql(shopDomain, token, `
+      query OrderNote($id: ID!) {
+        order(id: $id) { id note }
+      }
+    `, { id: shopifyOrderId });
+    const currentNote = result.data?.order?.note || "";
+    const planningBlock = `[Vervoersplanning]\n${noteLine}`;
+    const nextNote = currentNote ? `${currentNote}\n\n${planningBlock}` : planningBlock;
+    await shopifyGraphql(shopDomain, token, `
+      mutation UpdateOrderNote($input: OrderInput!) {
+        orderUpdate(input: $input) {
+          order { id note }
+          userErrors { field message }
+        }
+      }
+    `, { input: { id: shopifyOrderId, note: nextNote } });
+  } catch {
+    // Planning notes are useful context, but should not block delivery actions.
+  }
 }
 
 async function estimateRoute(request, env) {
