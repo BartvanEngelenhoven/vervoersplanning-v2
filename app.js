@@ -263,7 +263,9 @@ function nearbySuggestions() {
     ? state.manualRoute.orders
     : selectedOrdersList().length
       ? selectedOrdersList()
-      : state.orders.filter((order) => forcedIncludes.has(orderKey(order)));
+      : state.orders.filter((order) => forcedIncludes.has(orderKey(order))).length
+        ? state.orders.filter((order) => forcedIncludes.has(orderKey(order)))
+        : state.routes.flatMap((route) => route.orders);
   if (!routeOrders.length) return [];
   const routeRegions = new Set(routeOrders.map(regionFor));
   const routePrefixes = new Set(routeOrders.map((order) => String(order.postcode || "").slice(0, 2)).filter(Boolean));
