@@ -271,6 +271,7 @@ function renderSuggestions() {
     <article>
       <span>${order.id} · ${order.city}</span>
       <small>${productSummary(order)}</small>
+      <em>+${order.extraMinutes} min geschat</em>
       <button class="button subtle-action add-suggestion" type="button" data-order-key="${orderKey(order)}">Voeg toe</button>
     </article>`).join("")}</div>`;
   holder.querySelectorAll(".add-suggestion").forEach((button) => {
@@ -288,14 +289,34 @@ function nearbySuggestions() {
         ? state.orders.filter((order) => forcedIncludes.has(orderKey(order)))
         : state.routes.flatMap((route) => route.orders);
   if (!routeOrders.length) return [];
-  const routeRegions = new Set(routeOrders.map(regionFor));
-  const routePrefixes = new Set(routeOrders.map((order) => String(order.postcode || "").slice(0, 2)).filter(Boolean));
   const routeKeys = new Set(routeOrders.map(orderKey));
   return state.decisions
     .filter((item) => !routeKeys.has(orderKey(item.order)) && item.decision !== "include" && !state.selected.has(orderKey(item.order)))
     .map((item) => item.order)
-    .filter((order) => routeRegions.has(regionFor(order)) || routePrefixes.has(String(order.postcode || "").slice(0, 2)))
-    .slice(0, 4);
+    .map((order) => ({ ...order, extraMinutes: estimatedExtraMinutes(routeOrders, order) }))
+    .filter((order) => order.extraMinutes <= 90)
+    .sort((a, b) => a.extraMinutes - b.extraMinutes)
+    .slice(0, 3);
+}
+
+function estimatedExtraMinutes(routeOrders, candidate) {
+  const candidatePrefix = postcodePrefix(candidate);
+  const closestPrefixDiff = Math.min(...routeOrders.map((order) => Math.abs(postcodePrefix(order) - candidatePrefix)).filter(Number.isFinite));
+  const sameCountryBonus = routeOrders.some((order) => countryName(order) === countryName(candidate)) ? 0 : 20;
+  const detourEstimate = Math.min(120, 10 + closestPrefixDiff * 3 + sameCountryBonus);
+  return Math.round(detourEstimate + deliveryMinutes(candidate));
+}
+
+function postcodePrefix(order) {
+  const match = String(order.postcode || "").match(/\d{2}/);
+  return match ? Number(match[0]) : 99;
+}
+
+function countryName(order) {
+  const address = String(order.fullAddress || "");
+  if (/belg/i.test(address)) return "BE";
+  if (/nederland|netherlands/i.test(address)) return "NL";
+  return "";
 }
 
 function toggleSelected(key, checked) {
