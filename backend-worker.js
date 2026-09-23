@@ -38,6 +38,10 @@ export default {
       return getOrders(env);
     }
 
+    if (request.method === "GET" && url.pathname === "/history") {
+      return getHistory(env);
+    }
+
     if (request.method === "GET" && url.pathname === "/auth/shopify") {
       return startShopifyOAuth(request, env);
     }
@@ -52,6 +56,10 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/actions/mark-delivered") {
       return markDelivered(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/actions/undo-delivered") {
+      return undoDelivered(request, env);
     }
 
     if (request.method === "POST" && url.pathname === "/routes/estimate") {
@@ -69,6 +77,15 @@ async function getOrders(env) {
   );
   orders.sort((a, b) => (a.dueDate || "9999-12-31").localeCompare(b.dueDate || "9999-12-31"));
   return json(orders, 200, env);
+}
+
+async function getHistory(env) {
+  const list = await env.PLANNING_ORDERS.list({ prefix: "delivered:" });
+  const entries = await Promise.all(
+    list.keys.map(async (key) => JSON.parse(await env.PLANNING_ORDERS.get(key.name)))
+  );
+  entries.sort((a, b) => String(b.deliveredAt || "").localeCompare(String(a.deliveredAt || "")));
+  return json(entries.slice(0, 50), 200, env);
 }
 
 async function receiveShopifyOrder(request, env) {
@@ -105,6 +122,9 @@ async function markDelivered(request, env) {
 
   if (!shopDomain || !shopifyOrderId) return json({ error: "shopDomain and shopifyOrderId are required" }, 400, env);
   if (!token) return json({ error: "Shopify Admin API token is not configured for this shop" }, 501, env);
+
+  const storageKey = `order:${shopDomain}:${displayOrderId}`;
+  const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
 
   const fulfillmentOrders = await shopifyGraphql(shopDomain, token, `
     query FulfillmentOrders($id: ID!) {
@@ -147,8 +167,51 @@ async function markDelivered(request, env) {
   const userErrors = result.data?.fulfillmentCreateV2?.userErrors || [];
   if (userErrors.length) return json({ error: "Shopify fulfillment failed", userErrors }, 422, env);
 
-  await env.PLANNING_ORDERS.delete(`order:${shopDomain}:${displayOrderId}`);
-  return json({ ok: true, id: displayOrderId, fulfillment: result.data?.fulfillmentCreateV2?.fulfillment }, 200, env);
+  const fulfillment = result.data?.fulfillmentCreateV2?.fulfillment;
+  await env.PLANNING_ORDERS.put(`delivered:${shopDomain}:${displayOrderId}`, JSON.stringify({
+    id: displayOrderId,
+    shopDomain,
+    shopifyOrderId,
+    order: storedOrder,
+    fulfillment,
+    deliveredAt: new Date().toISOString(),
+  }));
+  await env.PLANNING_ORDERS.delete(storageKey);
+  return json({ ok: true, id: displayOrderId, fulfillment }, 200, env);
+}
+
+async function undoDelivered(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
+  const payload = await request.json();
+  const shopDomain = normalizeShopDomain(payload.shopDomain);
+  const displayOrderId = payload.id;
+  if (!shopDomain || !displayOrderId) return json({ error: "shopDomain and id are required" }, 400, env);
+
+  const historyKey = `delivered:${shopDomain}:${displayOrderId}`;
+  const history = JSON.parse(await env.PLANNING_ORDERS.get(historyKey) || "null");
+  if (!history) return json({ error: "Historie-item niet gevonden" }, 404, env);
+
+  const token = await shopifyAdminToken(env, shopDomain);
+  const fulfillmentId = history.fulfillment?.id;
+  if (token && fulfillmentId) {
+    const result = await shopifyGraphql(shopDomain, token, `
+      mutation CancelFulfillment($id: ID!) {
+        fulfillmentCancel(id: $id) {
+          fulfillment { id status }
+          userErrors { field message }
+        }
+      }
+    `, { id: fulfillmentId });
+    const userErrors = result.data?.fulfillmentCancel?.userErrors || [];
+    if (userErrors.length) return json({ error: "Shopify terugdraaien mislukt", userErrors }, 422, env);
+  }
+
+  if (history.order) {
+    await env.PLANNING_ORDERS.put(`order:${shopDomain}:${displayOrderId}`, JSON.stringify({ ...history.order, fulfilled: false }));
+  }
+  await env.PLANNING_ORDERS.delete(historyKey);
+  return json({ ok: true, id: displayOrderId }, 200, env);
 }
 
 async function estimateRoute(request, env) {

@@ -8,7 +8,7 @@ const CONFIG = {
   nearlyOverMinutes: 15,
 };
 
-const state = { orders: [], decisions: [], routes: [] };
+const state = { orders: [], decisions: [], routes: [], history: [] };
 const decisionLabels = { include: "Meenemen", review: "Controleren", exclude: "Niet meenemen" };
 
 function decide(order) {
@@ -170,9 +170,30 @@ function renderRoutes() {
   });
 }
 
+function renderHistory() {
+  const holder = document.querySelector("#history");
+  if (!holder) return;
+  if (!state.history.length) {
+    holder.innerHTML = '<p class="empty">Nog geen bezorgde orders in de historie.</p>';
+    return;
+  }
+  holder.innerHTML = state.history.map((item) => `<article class="history-item">
+    <div><b>${item.id}</b><span>${item.order?.customer || "Onbekende klant"} · ${item.order?.webshop || item.shopDomain}</span><small>Bezorgd gemeld: ${formatDateTime(item.deliveredAt)}</small></div>
+    <button class="button ghost undo-delivered" type="button" data-order-id="${encodeURIComponent(item.id)}" data-shop-domain="${encodeURIComponent(item.shopDomain)}">Terugdraaien</button>
+  </article>`).join("");
+  holder.querySelectorAll(".undo-delivered").forEach((button) => {
+    button.addEventListener("click", () => undoDelivered(decodeURIComponent(button.dataset.orderId), decodeURIComponent(button.dataset.shopDomain), button));
+  });
+}
+
 function googleMapsUrl(orders) {
   const stops = [CONFIG.depot, ...orders.map((order) => `${order.postcode} ${order.city}`), CONFIG.depot];
   return `https://www.google.com/maps/dir/${stops.map((stop) => encodeURIComponent(stop)).join("/")}`;
+}
+
+function formatDateTime(value) {
+  if (!value) return "Onbekend";
+  return new Intl.DateTimeFormat("nl-NL", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
 }
 
 async function markDelivered(order, button) {
@@ -199,6 +220,31 @@ async function markDelivered(order, button) {
   }
 }
 
+async function undoDelivered(id, shopDomain, button) {
+  const operatorKey = window.prompt(`Terugdraaien voor ${id}. Operatorcode:`);
+  if (!operatorKey) return;
+  if (!window.confirm(`${id} terugzetten naar open en Shopify fulfillment proberen te annuleren?`)) return;
+  button.disabled = true;
+  button.textContent = "Bezig…";
+  try {
+    const response = await fetch(`${CONFIG.apiBaseUrl}/actions/undo-delivered`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-operator-key": operatorKey,
+      },
+      body: JSON.stringify({ id, shopDomain }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Terugdraaien mislukt");
+    await refreshData();
+  } catch (error) {
+    window.alert(error.message);
+    button.disabled = false;
+    button.textContent = "Terugdraaien";
+  }
+}
+
 async function refreshData() {
   const button = document.querySelector("#refreshButton");
   button.disabled = true;
@@ -208,17 +254,29 @@ async function refreshData() {
     const response = await fetch(`${CONFIG.dataUrl}${separator}t=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) throw new Error("Data kon niet worden geladen");
     state.orders = await response.json();
+    state.history = await fetchHistory();
     state.decisions = state.orders.map((order) => ({ order, ...decide(order) }));
     state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
     renderSummary();
     renderOrders();
     renderRoutes();
+    renderHistory();
     document.querySelector("#syncText").textContent = `Laatst ververst om ${new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date())}`;
   } catch (error) {
     document.querySelector("#syncText").textContent = "Verversen mislukt — bestaande gegevens blijven staan";
   } finally {
     button.disabled = false;
     button.textContent = "Nu verversen";
+  }
+}
+
+async function fetchHistory() {
+  try {
+    const response = await fetch(`${CONFIG.apiBaseUrl}/history?t=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) return [];
+    return await response.json();
+  } catch {
+    return [];
   }
 }
 
