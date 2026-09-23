@@ -105,30 +105,43 @@ Shopify webhooks:
 
 Na een nieuwe order schrijft Shopify naar de Worker. De Worker bewaart alleen het planningformaat. De V2-site leest elke minuut `/orders`.
 
-## Bezorgd melden naar Shopify
+## Shopify app toegang voor "Bezorgd"
 
-De V2-site kan een order pas als bezorgd markeren als de Worker extra secrets heeft. Deze blijven in Cloudflare en komen niet in GitHub of de browsercode.
+De V2-site kan een order pas als bezorgd markeren als de Worker Shopify Admin API toegang heeft. In de nieuwe Shopify Dev Dashboard-flow wordt die token niet meer los getoond. De Worker heeft daarom een OAuth-installatiestap.
 
 Benodigd per omgeving:
 
 - `OPERATOR_KEY`: korte interne code die de planner invult wanneer op **Bezorgd** wordt geklikt.
-- `SHOPIFY_ADMIN_TOKEN_<SHOP_DOMAIN>`: Admin API access token per Shopify shop. De shopdomain wordt met hoofdletters en underscores geschreven.
+- `SHOPIFY_CLIENT_ID`: Client ID uit Shopify Dev Dashboard.
+- `SHOPIFY_CLIENT_SECRET`: Secret uit Shopify Dev Dashboard.
+- `SHOPIFY_ADMIN_SCOPES`: optioneel, komma-gescheiden scopes. Zonder deze variabele gebruikt de Worker de standaard order/fulfillment scopes.
 
-Voorbeelden:
+Standaard gebruikt de Worker deze scopes:
 
 ```text
-SHOPIFY_ADMIN_TOKEN_SLOWFEEDER_SPECIALIST_MYSHOPIFY_COM
-SHOPIFY_ADMIN_TOKEN_DE_RIJPLATEN_SPECIALIST_MYSHOPIFY_COM
+read_orders,write_orders,read_fulfillments,write_fulfillments,read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders
 ```
 
-Het Shopify token heeft scopes nodig om orders en fulfillments te lezen en fulfillment aan te maken. Gebruik hiervoor een custom app in Shopify Admin.
+Zet in Shopify Dev Dashboard bij de app:
+
+- App URL: `https://<worker-url>/auth/shopify?shop=<shop>.myshopify.com`
+- Allowed redirection URL: `https://<worker-url>/auth/shopify/callback`
+
+Installeer daarna per shop via:
+
+```text
+https://<worker-url>/auth/shopify?shop=slowfeeder-specialist.myshopify.com
+https://<worker-url>/auth/shopify?shop=de-rijplaten-specialist.myshopify.com
+```
+
+De Worker bewaart de verkregen Admin API token veilig in `PLANNING_ORDERS`.
 
 Flow:
 
 1. Planner klikt op **Bezorgd** bij een order in V2.
 2. V2 vraagt om de operatorcode.
 3. Worker controleert `OPERATOR_KEY`.
-4. Worker gebruikt het juiste Shopify Admin token voor de shop.
+4. Worker gebruikt de opgeslagen Shopify Admin token voor de shop.
 5. Worker maakt de fulfillment aan in Shopify.
 6. Worker verwijdert de order uit `PLANNING_ORDERS`.
 

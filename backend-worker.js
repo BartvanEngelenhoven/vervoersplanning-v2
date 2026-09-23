@@ -13,7 +13,9 @@
  * - PLANNING_ORDERS: Cloudflare KV namespace
  * - CORS_ORIGIN: optional, for example https://bartvanengelenhoven.github.io
  * - OPERATOR_KEY: shared operator key required for write actions
- * - SHOPIFY_ADMIN_TOKEN_<SHOP_DOMAIN>: optional per-shop Admin API token for marking orders fulfilled
+ * - SHOPIFY_CLIENT_ID: Shopify app client ID, required for OAuth install
+ * - SHOPIFY_CLIENT_SECRET: Shopify app secret, required for OAuth install
+ * - SHOPIFY_ADMIN_TOKEN_<SHOP_DOMAIN>: optional legacy per-shop Admin API token for marking orders fulfilled
  * - GOOGLE_MAPS_API_KEY: optional Google Maps key for future precise route calculations
  */
 
@@ -32,6 +34,14 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/orders") {
       return getOrders(env);
+    }
+
+    if (request.method === "GET" && url.pathname === "/auth/shopify") {
+      return startShopifyOAuth(request, env);
+    }
+
+    if (request.method === "GET" && url.pathname === "/auth/shopify/callback") {
+      return finishShopifyOAuth(request, env);
     }
 
     if (request.method === "POST" && url.pathname === "/webhooks/shopify/orders") {
@@ -89,7 +99,7 @@ async function markDelivered(request, env) {
   const shopDomain = normalizeShopDomain(payload.shopDomain);
   const shopifyOrderId = payload.shopifyOrderId;
   const displayOrderId = payload.id;
-  const token = shopifyAdminToken(env, shopDomain);
+  const token = await shopifyAdminToken(env, shopDomain);
 
   if (!shopDomain || !shopifyOrderId) return json({ error: "shopDomain and shopifyOrderId are required" }, 400, env);
   if (!token) return json({ error: "Shopify Admin API token is not configured for this shop" }, 501, env);
@@ -170,9 +180,113 @@ function operatorAllowed(request, env) {
   return Boolean(configured) && timingSafeEqual(configured, provided);
 }
 
-function shopifyAdminToken(env, shopDomain) {
+async function startShopifyOAuth(request, env) {
+  const url = new URL(request.url);
+  const shopDomain = normalizeShopDomain(url.searchParams.get("shop"));
+  const clientId = env.SHOPIFY_CLIENT_ID;
+
+  if (!shopDomain.endsWith(".myshopify.com")) {
+    return html("Shopify shop ontbreekt. Open deze link met ?shop=jouw-shop.myshopify.com", 400);
+  }
+  if (!clientId || !env.SHOPIFY_CLIENT_SECRET) {
+    return html("SHOPIFY_CLIENT_ID en SHOPIFY_CLIENT_SECRET staan nog niet in Cloudflare.", 501);
+  }
+
+  const state = crypto.randomUUID();
+  await env.PLANNING_ORDERS.put(`oauth-state:${state}`, shopDomain, { expirationTtl: 600 });
+
+  const redirectUri = `${url.origin}/auth/shopify/callback`;
+  const scopes = env.SHOPIFY_ADMIN_SCOPES || [
+    "read_orders",
+    "write_orders",
+    "read_fulfillments",
+    "write_fulfillments",
+    "read_assigned_fulfillment_orders",
+    "write_assigned_fulfillment_orders",
+    "read_merchant_managed_fulfillment_orders",
+    "write_merchant_managed_fulfillment_orders",
+  ].join(",");
+
+  const installUrl = new URL(`https://${shopDomain}/admin/oauth/authorize`);
+  installUrl.searchParams.set("client_id", clientId);
+  installUrl.searchParams.set("scope", scopes);
+  installUrl.searchParams.set("redirect_uri", redirectUri);
+  installUrl.searchParams.set("state", state);
+
+  return Response.redirect(installUrl.toString(), 302);
+}
+
+async function finishShopifyOAuth(request, env) {
+  const url = new URL(request.url);
+  const shopDomain = normalizeShopDomain(url.searchParams.get("shop"));
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+
+  if (!(await verifyShopifyOAuthCallback(url, env.SHOPIFY_CLIENT_SECRET))) {
+    return html("Ongeldige Shopify OAuth callback.", 401);
+  }
+
+  const expectedShop = await env.PLANNING_ORDERS.get(`oauth-state:${state}`);
+  await env.PLANNING_ORDERS.delete(`oauth-state:${state}`);
+
+  if (!expectedShop || expectedShop !== shopDomain || !code) {
+    return html("OAuth sessie verlopen of ongeldig. Start de installatie opnieuw.", 400);
+  }
+
+  const response = await fetch(`https://${shopDomain}/admin/oauth/access_token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      client_id: env.SHOPIFY_CLIENT_ID,
+      client_secret: env.SHOPIFY_CLIENT_SECRET,
+      code,
+    }),
+  });
+  const data = await response.json();
+
+  if (!response.ok || !data.access_token) {
+    return html(`Shopify token ophalen mislukt: ${escapeHtml(JSON.stringify(data))}`, 502);
+  }
+
+  await env.PLANNING_ORDERS.put(adminTokenStorageKey(shopDomain), data.access_token);
+  await env.PLANNING_ORDERS.put(`shop-install:${shopDomain}`, JSON.stringify({
+    shopDomain,
+    scope: data.scope || "",
+    installedAt: new Date().toISOString(),
+  }));
+
+  return html(`Shopify koppeling is actief voor ${escapeHtml(shopDomain)}. Je kunt dit tabblad sluiten.`, 200);
+}
+
+async function verifyShopifyOAuthCallback(url, secret) {
+  const hmac = url.searchParams.get("hmac") || "";
+  if (!secret || !hmac) return false;
+
+  const pairs = [];
+  for (const [key, value] of url.searchParams.entries()) {
+    if (key !== "hmac" && key !== "signature") pairs.push(`${key}=${value}`);
+  }
+  pairs.sort();
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(pairs.join("&")));
+  const expected = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return timingSafeEqual(expected, hmac);
+}
+
+async function shopifyAdminToken(env, shopDomain) {
   const perShopKey = `SHOPIFY_ADMIN_TOKEN_${secretSuffix(shopDomain)}`;
-  return env[perShopKey] || env.SHOPIFY_ADMIN_TOKEN || "";
+  return env[perShopKey] || env.SHOPIFY_ADMIN_TOKEN || await env.PLANNING_ORDERS.get(adminTokenStorageKey(shopDomain)) || "";
+}
+
+function adminTokenStorageKey(shopDomain) {
+  return `shop-admin-token:${shopDomain}`;
 }
 
 export function mapShopifyOrder(order, shopDomain = "") {
@@ -364,6 +478,23 @@ function json(payload, status, env) {
     status,
     headers: { ...JSON_HEADERS, ...corsHeaders(env) },
   });
+}
+
+function html(message, status = 200) {
+  return new Response(`<!doctype html><html lang="nl"><meta charset="utf-8"><title>Vervoersplanning Shopify</title><body style="font-family: system-ui, sans-serif; max-width: 720px; margin: 48px auto; line-height: 1.5;"><h1>Vervoersplanning V2</h1><p>${message}</p></body></html>`, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+  });
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[char]);
 }
 
 function corsHeaders(env) {
