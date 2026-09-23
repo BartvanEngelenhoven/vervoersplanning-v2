@@ -58,8 +58,49 @@ De regelset moet samen met de planner worden vastgesteld voordat V2 echte beslis
 Controleer de frontend en Shopify mapping lokaal met:
 
 ```bash
-node --check app.js
-node --check backend-worker.js
-node --check config.js
-node test-backend-mapping.mjs
+npm install
+npm run check
 ```
+
+## Backend live zetten met Cloudflare Workers
+
+De V2-site is een statische GitHub Pages-site. Shopify webhooks kunnen daar niet rechtstreeks heen, omdat Shopify een veilige server nodig heeft die secrets bewaart en webhook-handtekeningen controleert. Gebruik daarom de Worker uit `backend-worker.js`.
+
+Eenmalige setup:
+
+```bash
+npm install
+npx wrangler login
+npx wrangler kv namespace create PLANNING_ORDERS
+```
+
+Kopieer daarna `wrangler.example.toml` naar `wrangler.toml` en vul de KV namespace-id in. `wrangler.toml` staat bewust in `.gitignore`, omdat dit lokale deploy-config is.
+
+Zet daarna de Shopify webhook secret als Worker secret:
+
+```bash
+npx wrangler secret put SHOPIFY_WEBHOOK_SECRET
+```
+
+Deploy de Worker:
+
+```bash
+npm run worker:deploy
+```
+
+Vul daarna in `config.js` de publieke Worker URL in, bijvoorbeeld:
+
+```js
+window.VERVOERSPLANNING_CONFIG = {
+  dataUrl: "https://vervoersplanning-v2-backend.<cloudflare-subdomain>.workers.dev/orders",
+};
+```
+
+Shopify webhooks:
+
+- maak in Shopify een webhook secret aan;
+- voeg order create/update/cancel/fulfilled webhooks toe;
+- gebruik als webhook URL: `https://<worker-url>/webhooks/shopify/orders`;
+- zet formaat op JSON.
+
+Na een nieuwe order schrijft Shopify naar de Worker. De Worker bewaart alleen het planningformaat. De V2-site leest elke minuut `/orders`.
