@@ -65,4 +65,28 @@ assert.equal(mapShopifyOrder(pickupOrder).requiresVanRoekelDelivery, false);
 assert.equal(mapShopifyOrder(pickupOrder).paid, false);
 assert.equal(mapShopifyOrder(pickupOrder).addressComplete, false);
 
+const rijplatenShippingOrder = {
+  id: 125,
+  name: "#DRS1",
+  financial_status: "pending",
+  created_at: "2026-09-23T15:30:00+02:00",
+  fulfillment_status: null,
+  cancelled_at: null,
+  tags: "",
+  shipping_address: {
+    first_name: "Test",
+    last_name: "Klant",
+    address1: "Goorsteeg 46",
+    city: "Ede",
+    zip: "6718 TA",
+    country_code: "NL",
+  },
+  shipping_lines: [{ title: "Shipping" }],
+  line_items: [{ title: "Gebruikte kunststof rijplaat", grams: 0, quantity: 1 }],
+};
+
+const mappedRijplatenOrder = mapShopifyOrder(rijplatenShippingOrder, "de-rijplaten-specialist.myshopify.com");
+assert.equal(mappedRijplatenOrder.requiresVanRoekelDelivery, true);
+assert.equal(mappedRijplatenOrder.dueDate, "2026-09-30");
+
 console.log("backend mapping tests passed");

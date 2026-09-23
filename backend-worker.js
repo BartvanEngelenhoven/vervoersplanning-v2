@@ -321,7 +321,7 @@ export function mapShopifyOrder(order, shopDomain = "") {
     cancelled: Boolean(order.cancelled_at),
     fulfilled: order.fulfillment_status === "fulfilled",
     deliveryMethod,
-    requiresVanRoekelDelivery: deliveryMethod === "delivery" && requiresOwnDelivery(order, tags),
+    requiresVanRoekelDelivery: deliveryMethod === "delivery" && requiresOwnDelivery(order, tags, shopDomain),
     addressComplete: Boolean(shipping.address1 && shipping.city && shipping.zip && shipping.country_code),
     deliveryAppointmentLocked: deliveryAppointmentLocked(order),
     deliveryMinutes: deliveryMinutes(lineItems),
@@ -416,8 +416,9 @@ function inferDeliveryMethod(order, tags) {
   return "delivery";
 }
 
-function requiresOwnDelivery(order, tags) {
+function requiresOwnDelivery(order, tags, shopDomain = "") {
   const shippingTitle = String(order.shipping_lines?.[0]?.title || "").toLowerCase();
+  if (shopDomain.includes("rijplaten")) return true;
   return tags.includes("eigen bezorging") || tags.includes("van roekel") || shippingTitle.includes("van roekel") || shippingTitle.includes("bezorg");
 }
 
