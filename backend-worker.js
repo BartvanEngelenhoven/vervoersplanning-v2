@@ -62,6 +62,10 @@ export default {
       return undoDelivered(request, env);
     }
 
+    if (request.method === "POST" && url.pathname === "/actions/set-own-delivery") {
+      return setOwnDelivery(request, env);
+    }
+
     if (request.method === "POST" && url.pathname === "/routes/estimate") {
       return estimateRoute(request, env);
     }
@@ -212,6 +216,44 @@ async function undoDelivered(request, env) {
   }
   await env.PLANNING_ORDERS.delete(historyKey);
   return json({ ok: true, id: displayOrderId }, 200, env);
+}
+
+async function setOwnDelivery(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
+  const payload = await request.json();
+  const shopDomain = normalizeShopDomain(payload.shopDomain);
+  const shopifyOrderId = payload.shopifyOrderId;
+  const displayOrderId = payload.id;
+  const token = await shopifyAdminToken(env, shopDomain);
+
+  if (!shopDomain || !shopifyOrderId || !displayOrderId) return json({ error: "id, shopDomain and shopifyOrderId are required" }, 400, env);
+  if (!token) return json({ error: "Shopify Admin API token is not configured for this shop" }, 501, env);
+
+  const result = await shopifyGraphql(shopDomain, token, `
+    mutation AddOwnDeliveryTag($id: ID!, $tags: [String!]!) {
+      tagsAdd(id: $id, tags: $tags) {
+        node { id }
+        userErrors { field message }
+      }
+    }
+  `, { id: shopifyOrderId, tags: ["eigen bezorging"] });
+
+  const userErrors = result.data?.tagsAdd?.userErrors || [];
+  if (userErrors.length) return json({ error: "Shopify tag toevoegen mislukt", userErrors }, 422, env);
+
+  const storageKey = `order:${shopDomain}:${displayOrderId}`;
+  const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
+  if (storedOrder) {
+    await env.PLANNING_ORDERS.put(storageKey, JSON.stringify({
+      ...storedOrder,
+      requiresVanRoekelDelivery: true,
+      deliveryMethod: storedOrder.deliveryMethod || "delivery",
+      routeOverride: true,
+    }));
+  }
+
+  return json({ ok: true, id: displayOrderId, tag: "eigen bezorging" }, 200, env);
 }
 
 async function estimateRoute(request, env) {

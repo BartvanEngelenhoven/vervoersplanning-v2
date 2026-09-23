@@ -8,7 +8,7 @@ const CONFIG = {
   nearlyOverMinutes: 15,
 };
 
-const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null };
+const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [] };
 const decisionLabels = { include: "Meenemen", review: "Controleren", exclude: "Niet meenemen" };
 const forcedIncludeKey = "vervoersplanning.forceInclude.v1";
 const businessClasses = {
@@ -215,6 +215,7 @@ function manualActionButton(item, key, isForced) {
 function renderRoutes() {
   const holder = document.querySelector("#routes");
   const template = document.querySelector("#routeTemplate");
+  renderSuggestions();
   holder.innerHTML = "";
   if (!state.routes.length) {
     holder.innerHTML = '<p class="empty">Nog geen geschikte orders voor een rit.</p>';
@@ -234,6 +235,39 @@ function renderRoutes() {
     });
     holder.appendChild(fragment);
   });
+}
+
+function renderSuggestions() {
+  const holder = document.querySelector("#suggestions");
+  if (!holder) return;
+  const suggestions = nearbySuggestions();
+  state.suggestions = suggestions;
+  if (!suggestions.length) {
+    holder.innerHTML = "";
+    return;
+  }
+  holder.innerHTML = `<div class="suggestion-box"><b>Mogelijk combineren</b><p>Deze orders liggen logisch bij je handmatige selectie of route.</p>${suggestions.map((order) => `
+    <article>
+      <span>${order.id} · ${order.city}</span>
+      <small>${productSummary(order)}</small>
+      <button class="button subtle-action add-suggestion" type="button" data-order-key="${orderKey(order)}">Voeg toe</button>
+    </article>`).join("")}</div>`;
+  holder.querySelectorAll(".add-suggestion").forEach((button) => {
+    const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
+    button.addEventListener("click", () => forceInclude(order));
+  });
+}
+
+function nearbySuggestions() {
+  const routeOrders = state.manualRoute?.orders?.length ? state.manualRoute.orders : selectedOrdersList();
+  if (!routeOrders.length) return [];
+  const routeRegions = new Set(routeOrders.map(regionFor));
+  const routePrefixes = new Set(routeOrders.map((order) => String(order.postcode || "").slice(0, 2)).filter(Boolean));
+  return state.decisions
+    .filter((item) => item.decision !== "include" && !state.selected.has(orderKey(item.order)))
+    .map((item) => item.order)
+    .filter((order) => routeRegions.has(regionFor(order)) || routePrefixes.has(String(order.postcode || "").slice(0, 2)))
+    .slice(0, 4);
 }
 
 function toggleSelected(key, checked) {
@@ -339,11 +373,27 @@ function saveForcedIncludes() {
   localStorage.setItem(forcedIncludeKey, JSON.stringify([...forcedIncludes]));
 }
 
-function forceInclude(order) {
+async function forceInclude(order) {
   if (!order) return;
-  forcedIncludes.add(orderKey(order));
-  saveForcedIncludes();
-  rebuildPlanning();
+  const operatorKey = window.prompt(`Operatorcode om ${order.id} als eigen bezorging te taggen in Shopify`);
+  if (!operatorKey) return;
+  try {
+    const response = await fetch(`${CONFIG.apiBaseUrl}/actions/set-own-delivery`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-operator-key": operatorKey,
+      },
+      body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Shopify tag toevoegen mislukt");
+    forcedIncludes.add(orderKey(order));
+    saveForcedIncludes();
+    await refreshData();
+  } catch (error) {
+    window.alert(error.message);
+  }
 }
 
 function clearForceInclude(order) {
