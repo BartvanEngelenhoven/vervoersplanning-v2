@@ -3,5 +3,5 @@
 // When the secure backend is live, fill in its /orders URL here.
 // Never put Shopify secrets or API keys in this file.
 window.VERVOERSPLANNING_CONFIG = {
-  dataUrl: "",
+  dataUrl: "https://vervoersplanning-v2-backend.bart-a5e.workers.dev/orders",
 };
