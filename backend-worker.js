@@ -375,6 +375,8 @@ export function mapShopifyOrder(order, shopDomain = "") {
     shopDomain,
     webshop: webshopName(shopDomain),
     customer: customerName(order, shipping),
+    addressLine: [shipping.address1, shipping.address2].filter(Boolean).join(" "),
+    fullAddress: fullAddress(shipping),
     city: shipping.city || "",
     postcode: normalizePostcode(shipping.zip),
     orderDate: extractOrderDate(order),
@@ -501,6 +503,14 @@ function totalWeightKg(lineItems) {
 function customerName(order, shipping) {
   const name = [shipping.first_name, shipping.last_name].filter(Boolean).join(" ").trim();
   return name || order.customer?.default_address?.name || order.customer?.email || "Onbekende klant";
+}
+
+function fullAddress(shipping) {
+  return [
+    [shipping.address1, shipping.address2].filter(Boolean).join(" "),
+    [shipping.zip, shipping.city].filter(Boolean).join(" "),
+    shipping.country || shipping.country_code,
+  ].filter(Boolean).join(", ");
 }
 
 function normalizePostcode(value) {

@@ -14,6 +14,10 @@
         <span class="brand-mark">VR</span>
         <span><strong>Vervoersplanning</strong><small>V2 experiment</small></span>
       </div>
+      <div class="business-logos" aria-label="Aangesloten webshops">
+        <span class="business-logo rijplaten">De Rijplaten Specialist</span>
+        <span class="business-logo slowfeeder">De Slowfeeder Specialist</span>
+      </div>
       <div class="top-actions">
         <span class="mode-pill"><span></span> Alleen-lezen</span>
         <button id="refreshButton" class="button secondary" type="button">Nu verversen</button>
@@ -47,12 +51,7 @@
               <label><span>Status</span><select id="decisionFilter"><option value="all">Alles</option><option value="include">Meenemen</option><option value="review">Controleren</option><option value="exclude">Niet meenemen</option></select></label>
             </div>
           </div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Order</th><th>Plaats</th><th>Uiterlijk</th><th>Beslissing</th><th>Waarom</th></tr></thead>
-              <tbody id="ordersBody"></tbody>
-            </table>
-          </div>
+          <div id="ordersBody" class="order-list"></div>
           <p id="emptyState" class="empty" hidden>Geen orders gevonden met deze filters.</p>
         </div>
 

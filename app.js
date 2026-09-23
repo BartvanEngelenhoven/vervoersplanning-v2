@@ -10,6 +10,10 @@ const CONFIG = {
 
 const state = { orders: [], decisions: [], routes: [], history: [] };
 const decisionLabels = { include: "Meenemen", review: "Controleren", exclude: "Niet meenemen" };
+const businessClasses = {
+  "De Rijplaten Specialist": "rijplaten",
+  "De Slowfeeder Specialist": "slowfeeder",
+};
 
 function decide(order) {
   if (order.cancelled) return { decision: "exclude", reason: "Order is geannuleerd" };
@@ -136,14 +140,29 @@ function renderOrders() {
     return (!term || haystack.includes(term)) && (filter === "all" || item.decision === filter);
   });
 
-  document.querySelector("#ordersBody").innerHTML = visible.map((item) => `<tr>
-    <td><span class="order-id">${item.order.id}</span><span class="subtle">${item.order.customer}${item.order.webshop ? ` · ${item.order.webshop}` : ""}</span></td>
-    <td>${item.order.city}<span class="subtle">${item.order.postcode}</span></td>
-    <td>${formatDate(item.order.dueDate)}</td>
-    <td><span class="badge ${item.decision}">${decisionLabels[item.decision]}</span></td>
-    <td class="reason">${item.reason}</td>
-  </tr>`).join("");
+  document.querySelector("#ordersBody").innerHTML = visible.map((item) => orderCard(item)).join("");
   document.querySelector("#emptyState").hidden = visible.length > 0;
+}
+
+function orderCard(item) {
+  const order = item.order;
+  return `<article class="order-card">
+    <div class="order-main">
+      <div class="order-title-row">
+        <span class="shop-chip ${businessClass(order)}">${order.webshop || "Webshop"}</span>
+        <span class="badge ${item.decision}">${decisionLabels[item.decision]}</span>
+      </div>
+      <h3>${order.id} · ${order.customer}</h3>
+      <p class="product-line">${productSummary(order)}</p>
+      <p class="address-line">${addressSummary(order)}</p>
+      <p class="reason">${item.reason}</p>
+    </div>
+    <div class="order-side">
+      <span><b>Uiterlijk</b>${formatDate(order.dueDate)}</span>
+      <span><b>Betaling</b>${order.paymentStatus || (order.paid ? "Betaald" : "In afwachting")}</span>
+      <a class="button ghost" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a>
+    </div>
+  </article>`;
 }
 
 function renderRoutes() {
@@ -161,7 +180,7 @@ function renderRoutes() {
     fragment.querySelector(".route-meta").textContent = `${CONFIG.depot} · ${route.orders.length} stops · ruwe rijtijd ${formatMinutes(route.driveMinutes)}`;
     fragment.querySelector(".route-load").textContent = `${route.load.toLocaleString("nl-NL")} kg · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)} · ${routeWarning(route)}`;
     fragment.querySelector(".route-map").href = googleMapsUrl(route.orders);
-    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><b>${order.city} · ${order.id}</b><span>${order.customer} · ${deliveryMinutes(order)} min lossen/laden <button class="mark-delivered" type="button" data-order-id="${encodeURIComponent(order.id)}">Bezorgd</button></span></li>`).join("");
+    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><b>${order.city} · ${order.id}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-id="${encodeURIComponent(order.id)}">Bezorgd</button></span></li>`).join("");
     fragment.querySelectorAll(".mark-delivered").forEach((button) => {
       const order = route.orders.find((item) => encodeURIComponent(item.id) === button.dataset.orderId);
       button.addEventListener("click", () => markDelivered(order, button));
@@ -187,8 +206,26 @@ function renderHistory() {
 }
 
 function googleMapsUrl(orders) {
-  const stops = [CONFIG.depot, ...orders.map((order) => `${order.postcode} ${order.city}`), CONFIG.depot];
+  const stops = [CONFIG.depot, ...orders.map((order) => order.fullAddress || `${order.postcode} ${order.city}`), CONFIG.depot];
   return `https://www.google.com/maps/dir/${stops.map((stop) => encodeURIComponent(stop)).join("/")}`;
+}
+
+function singleOrderMapsUrl(order) {
+  const destination = order.fullAddress || `${order.addressLine || ""} ${order.postcode || ""} ${order.city || ""}`.trim();
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(destination || order.city || "")}`;
+}
+
+function addressSummary(order) {
+  return order.fullAddress || [order.addressLine, [order.postcode, order.city].filter(Boolean).join(" ")].filter(Boolean).join(", ") || "Adres onbekend";
+}
+
+function productSummary(order) {
+  const products = Array.isArray(order.products) ? order.products.filter(Boolean) : [];
+  return products.length ? products.join(", ") : "Product onbekend";
+}
+
+function businessClass(order) {
+  return businessClasses[order.webshop] || "";
 }
 
 function formatDateTime(value) {

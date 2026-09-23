@@ -31,6 +31,8 @@ assert.deepEqual(mapShopifyOrder(deliveryOrder, "slowfeeder-specialist.myshopify
   shopDomain: "slowfeeder-specialist.myshopify.com",
   webshop: "De Slowfeeder Specialist",
   customer: "Jan Jansen",
+  addressLine: "Dorpsstraat 1",
+  fullAddress: "Dorpsstraat 1, 6718 TA Ede, NL",
   city: "Ede",
   postcode: "6718 TA",
   orderDate: "2026-09-17",
