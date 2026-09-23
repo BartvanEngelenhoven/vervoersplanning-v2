@@ -8,7 +8,8 @@
  * - expose sanitized planning data on /orders
  *
  * Required Worker bindings / secrets:
- * - SHOPIFY_WEBHOOK_SECRET: Shopify webhook signing secret
+ * - SHOPIFY_WEBHOOK_SECRET: fallback Shopify webhook signing secret
+ * - SHOPIFY_WEBHOOK_SECRET_<SHOP_DOMAIN>: optional per-shop secret, for example SHOPIFY_WEBHOOK_SECRET_SLOWFEEDER_SPECIALIST_MYSHOPIFY_COM
  * - PLANNING_ORDERS: Cloudflare KV namespace
  * - CORS_ORIGIN: optional, for example https://bartvanengelenhoven.github.io
  */
@@ -50,24 +51,27 @@ async function getOrders(env) {
 async function receiveShopifyOrder(request, env) {
   const rawBody = await request.text();
   const signature = request.headers.get("x-shopify-hmac-sha256") || "";
+  const shopDomain = normalizeShopDomain(request.headers.get("x-shopify-shop-domain"));
+  const webhookSecret = shopifyWebhookSecret(env, shopDomain);
 
-  if (!(await verifyShopifyWebhook(rawBody, signature, env.SHOPIFY_WEBHOOK_SECRET))) {
+  if (!(await verifyShopifyWebhook(rawBody, signature, webhookSecret))) {
     return json({ error: "Invalid Shopify signature" }, 401, env);
   }
 
   const shopifyOrder = JSON.parse(rawBody);
-  const planningOrder = mapShopifyOrder(shopifyOrder);
+  const planningOrder = mapShopifyOrder(shopifyOrder, shopDomain);
+  const storageKey = orderStorageKey(planningOrder);
 
   if (planningOrder.cancelled || planningOrder.fulfilled) {
-    await env.PLANNING_ORDERS.delete(`order:${planningOrder.id}`);
+    await env.PLANNING_ORDERS.delete(storageKey);
   } else {
-    await env.PLANNING_ORDERS.put(`order:${planningOrder.id}`, JSON.stringify(planningOrder));
+    await env.PLANNING_ORDERS.put(storageKey, JSON.stringify(planningOrder));
   }
 
   return json({ ok: true, id: planningOrder.id }, 200, env);
 }
 
-export function mapShopifyOrder(order) {
+export function mapShopifyOrder(order, shopDomain = "") {
   const shipping = order.shipping_address || {};
   const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
   const tags = String(order.tags || "").toLowerCase();
@@ -75,6 +79,7 @@ export function mapShopifyOrder(order) {
 
   return {
     id: order.name || String(order.id),
+    shopDomain,
     customer: customerName(order, shipping),
     city: shipping.city || "",
     postcode: normalizePostcode(shipping.zip),
@@ -121,6 +126,24 @@ function customerName(order, shipping) {
 
 function normalizePostcode(value) {
   return String(value || "").trim().toUpperCase();
+}
+
+function orderStorageKey(order) {
+  const shopPart = order.shopDomain || "unknown-shop";
+  return `order:${shopPart}:${order.id}`;
+}
+
+function shopifyWebhookSecret(env, shopDomain) {
+  const perShopKey = `SHOPIFY_WEBHOOK_SECRET_${secretSuffix(shopDomain)}`;
+  return env[perShopKey] || env.SHOPIFY_WEBHOOK_SECRET || "";
+}
+
+function normalizeShopDomain(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function secretSuffix(shopDomain) {
+  return normalizeShopDomain(shopDomain).replace(/[^a-z0-9]/g, "_").toUpperCase();
 }
 
 async function verifyShopifyWebhook(rawBody, signature, secret) {

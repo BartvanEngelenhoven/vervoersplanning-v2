@@ -24,8 +24,9 @@ const deliveryOrder = {
   ],
 };
 
-assert.deepEqual(mapShopifyOrder(deliveryOrder), {
+assert.deepEqual(mapShopifyOrder(deliveryOrder, "slowfeeder-specialist.myshopify.com"), {
   id: "#1001",
+  shopDomain: "slowfeeder-specialist.myshopify.com",
   customer: "Jan Jansen",
   city: "Ede",
   postcode: "6718 TA",
