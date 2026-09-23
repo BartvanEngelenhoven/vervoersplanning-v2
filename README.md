@@ -2,6 +2,8 @@
 
 Deze map bevat een losstaande proefversie. De bestaande GPT en V1-site worden niet gewijzigd.
 
+Live proefversie: https://bartvanengelenhoven.github.io/vervoersplanning-v2/
+
 ## Wat deze eerste versie doet
 
 - laadt automatisch ordergegevens uit een JSON-bron;
