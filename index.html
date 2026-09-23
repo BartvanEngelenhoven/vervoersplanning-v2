@@ -51,6 +51,14 @@
               <label><span>Status</span><select id="decisionFilter"><option value="all">Alles</option><option value="include">Meenemen</option><option value="review">Controleren</option><option value="exclude">Niet meenemen</option></select></label>
             </div>
           </div>
+          <div id="selectionBar" class="selection-bar" hidden>
+            <strong class="selection-count">0 geselecteerd</strong>
+            <div>
+              <button id="makeRouteButton" class="button manual-action" type="button">Maak route met selectie</button>
+              <button id="markSelectedDeliveredButton" class="button ghost" type="button">Selectie bezorgd</button>
+              <button id="clearSelectionButton" class="button subtle-action" type="button">Leeg selectie</button>
+            </div>
+          </div>
           <div id="ordersBody" class="order-list"></div>
           <p id="emptyState" class="empty" hidden>Geen orders gevonden met deze filters.</p>
         </div>

@@ -8,12 +8,14 @@ const CONFIG = {
   nearlyOverMinutes: 15,
 };
 
-const state = { orders: [], decisions: [], routes: [], history: [] };
+const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null };
 const decisionLabels = { include: "Meenemen", review: "Controleren", exclude: "Niet meenemen" };
+const forcedIncludeKey = "vervoersplanning.forceInclude.v1";
 const businessClasses = {
   "De Rijplaten Specialist": "rijplaten",
   "De Slowfeeder Specialist": "slowfeeder",
 };
+const forcedIncludes = new Set(JSON.parse(localStorage.getItem(forcedIncludeKey) || "[]"));
 
 function decide(order) {
   if (order.cancelled) return { decision: "exclude", reason: "Order is geannuleerd" };
@@ -24,6 +26,12 @@ function decide(order) {
   if (order.deliveryAppointmentLocked) return { decision: "review", reason: "Aflevermoment is afgestemd; niet verplaatsen zonder toestemming" };
   if (!order.paid) return { decision: "review", reason: "Betaling nog niet binnen; alleen optioneel meenemen als dit logisch op de route ligt" };
   return { decision: "include", reason: dueDateReason(order) };
+}
+
+function applyManualDecision(order, automatic) {
+  if (!forcedIncludes.has(orderKey(order))) return automatic;
+  if (order.cancelled || order.fulfilled || order.deliveryMethod === "pickup") return automatic;
+  return { decision: "include", reason: `Handmatig meegenomen. Systeemadvies: ${automatic.reason}` };
 }
 
 function dueDateReason(order) {
@@ -45,6 +53,9 @@ function regionFor(order) {
 }
 
 function buildRoutes(included) {
+  if (state.manualRoute?.orders?.length) {
+    return [routeSummary("Handmatige selectie", state.manualRoute.orders, state.manualRoute.load, state.manualRoute.deliveryMinutes)];
+  }
   const groups = new Map();
   for (const item of included) {
     const region = regionFor(item.order);
@@ -127,7 +138,7 @@ function renderSummary() {
     ["Binnengekomen", state.orders.length, "Alle actuele orders"],
     ["Meenemen", count("include"), "Automatisch geschikt"],
     ["Controleren", count("review"), "Menselijke beoordeling of optioneel"],
-    ["Ritvoorstellen", state.routes.length, `${state.routes.reduce((sum, route) => sum + route.orders.length, 0)} stops verdeeld`],
+    ["Geselecteerd", state.selected.size, "Handmatig gekozen orders"],
   ];
   document.querySelector("#summary").innerHTML = metrics.map(([label, value, text]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${text}</small></article>`).join("");
 }
@@ -141,14 +152,29 @@ function renderOrders() {
   });
 
   document.querySelector("#ordersBody").innerHTML = visible.map((item) => orderCard(item)).join("");
+  renderSelectionBar();
+  document.querySelectorAll(".order-select").forEach((input) => {
+    input.addEventListener("change", () => toggleSelected(input.dataset.orderKey, input.checked));
+  });
+  document.querySelectorAll(".force-include").forEach((button) => {
+    const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
+    button.addEventListener("click", () => forceInclude(order));
+  });
+  document.querySelectorAll(".clear-force-include").forEach((button) => {
+    const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
+    button.addEventListener("click", () => clearForceInclude(order));
+  });
   document.querySelector("#emptyState").hidden = visible.length > 0;
 }
 
 function orderCard(item) {
   const order = item.order;
+  const key = orderKey(order);
+  const isForced = forcedIncludes.has(key);
   return `<article class="order-card">
     <div class="order-main">
       <div class="order-title-row">
+        <label class="select-order"><input class="order-select" type="checkbox" data-order-key="${key}" ${state.selected.has(key) ? "checked" : ""} /><span>Selecteer</span></label>
         <span class="shop-chip ${businessClass(order)}">${order.webshop || "Webshop"}</span>
         <span class="badge ${item.decision}">${decisionLabels[item.decision]}</span>
       </div>
@@ -161,8 +187,29 @@ function orderCard(item) {
       <span><b>Uiterlijk</b>${formatDate(order.dueDate)}</span>
       <span><b>Betaling</b>${order.paymentStatus || (order.paid ? "Betaald" : "In afwachting")}</span>
       <a class="button ghost" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a>
+      ${manualActionButton(item, key, isForced)}
     </div>
   </article>`;
+}
+
+function renderSelectionBar() {
+  const bar = document.querySelector("#selectionBar");
+  if (!bar) return;
+  const selectedOrders = selectedOrdersList();
+  bar.hidden = selectedOrders.length === 0;
+  if (!selectedOrders.length) return;
+  bar.querySelector(".selection-count").textContent = `${selectedOrders.length} geselecteerd`;
+}
+
+function selectedOrdersList() {
+  return state.orders.filter((order) => state.selected.has(orderKey(order)));
+}
+
+function manualActionButton(item, key, isForced) {
+  if (item.order.cancelled || item.order.fulfilled || item.order.deliveryMethod === "pickup") return "";
+  if (isForced) return `<button class="button subtle-action clear-force-include" type="button" data-order-key="${key}">Automatisch advies</button>`;
+  if (item.decision === "include") return "";
+  return `<button class="button manual-action force-include" type="button" data-order-key="${key}">Toch zelf bezorgen</button>`;
 }
 
 function renderRoutes() {
@@ -189,6 +236,56 @@ function renderRoutes() {
   });
 }
 
+function toggleSelected(key, checked) {
+  if (checked) state.selected.add(key);
+  else state.selected.delete(key);
+  renderSelectionBar();
+}
+
+function clearSelection() {
+  state.selected.clear();
+  state.manualRoute = null;
+  rebuildPlanning();
+}
+
+function makeRouteFromSelection() {
+  const orders = selectedOrdersList();
+  if (!orders.length) return;
+  const load = orders.reduce((sum, order) => sum + Number(order.weightKg || 0), 0);
+  const deliveryTotal = orders.reduce((sum, order) => sum + deliveryMinutes(order), 0);
+  for (const order of orders) forcedIncludes.add(orderKey(order));
+  saveForcedIncludes();
+  state.manualRoute = { orders, load, deliveryMinutes: deliveryTotal };
+  rebuildPlanning();
+}
+
+async function markSelectedDelivered() {
+  const orders = selectedOrdersList();
+  if (!orders.length) return;
+  const operatorKey = window.prompt(`Operatorcode voor ${orders.length} geselecteerde orders`);
+  if (!operatorKey) return;
+  if (!window.confirm(`${orders.length} geselecteerde orders als bezorgd melden?`)) return;
+
+  for (const order of orders) {
+    const response = await fetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-operator-key": operatorKey,
+      },
+      body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      window.alert(`${order.id}: ${payload.error || "Bezorgd melden mislukt"}`);
+      break;
+    }
+  }
+  state.selected.clear();
+  state.manualRoute = null;
+  await refreshData();
+}
+
 function renderHistory() {
   const holder = document.querySelector("#history");
   if (!holder) return;
@@ -211,12 +308,18 @@ function googleMapsUrl(orders) {
 }
 
 function singleOrderMapsUrl(order) {
-  const destination = order.fullAddress || `${order.addressLine || ""} ${order.postcode || ""} ${order.city || ""}`.trim();
+  const destination = mapsAddress(order);
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(destination || order.city || "")}`;
 }
 
 function addressSummary(order) {
-  return order.fullAddress || [order.addressLine, [order.postcode, order.city].filter(Boolean).join(" ")].filter(Boolean).join(", ") || "Adres onbekend";
+  return mapsAddress(order) || "Adres onbekend";
+}
+
+function mapsAddress(order) {
+  return order.fullAddress
+    || [order.addressLine, [order.postcode, order.city].filter(Boolean).join(" "), order.country || "Nederland"].filter(Boolean).join(", ")
+    || [order.postcode, order.city, "Nederland"].filter(Boolean).join(", ");
 }
 
 function productSummary(order) {
@@ -226,6 +329,36 @@ function productSummary(order) {
 
 function businessClass(order) {
   return businessClasses[order.webshop] || "";
+}
+
+function orderKey(order) {
+  return `${order.shopDomain || ""}:${order.id}`;
+}
+
+function saveForcedIncludes() {
+  localStorage.setItem(forcedIncludeKey, JSON.stringify([...forcedIncludes]));
+}
+
+function forceInclude(order) {
+  if (!order) return;
+  forcedIncludes.add(orderKey(order));
+  saveForcedIncludes();
+  rebuildPlanning();
+}
+
+function clearForceInclude(order) {
+  if (!order) return;
+  forcedIncludes.delete(orderKey(order));
+  saveForcedIncludes();
+  rebuildPlanning();
+}
+
+function rebuildPlanning() {
+  state.decisions = state.orders.map((order) => ({ order, ...applyManualDecision(order, decide(order)) }));
+  state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
+  renderSummary();
+  renderOrders();
+  renderRoutes();
 }
 
 function formatDateTime(value) {
@@ -292,11 +425,7 @@ async function refreshData() {
     if (!response.ok) throw new Error("Data kon niet worden geladen");
     state.orders = await response.json();
     state.history = await fetchHistory();
-    state.decisions = state.orders.map((order) => ({ order, ...decide(order) }));
-    state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
-    renderSummary();
-    renderOrders();
-    renderRoutes();
+    rebuildPlanning();
     renderHistory();
     document.querySelector("#syncText").textContent = `Laatst ververst om ${new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date())}`;
   } catch (error) {
@@ -320,5 +449,8 @@ async function fetchHistory() {
 document.querySelector("#refreshButton").addEventListener("click", refreshData);
 document.querySelector("#searchInput").addEventListener("input", renderOrders);
 document.querySelector("#decisionFilter").addEventListener("change", renderOrders);
+document.querySelector("#makeRouteButton")?.addEventListener("click", makeRouteFromSelection);
+document.querySelector("#markSelectedDeliveredButton")?.addEventListener("click", markSelectedDelivered);
+document.querySelector("#clearSelectionButton")?.addEventListener("click", clearSelection);
 refreshData();
 setInterval(refreshData, CONFIG.refreshMs);
