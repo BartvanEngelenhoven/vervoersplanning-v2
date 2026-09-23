@@ -151,7 +151,7 @@ function renderOrders() {
     return (!term || haystack.includes(term)) && (filter === "all" || item.decision === filter);
   });
 
-  document.querySelector("#ordersBody").innerHTML = visible.map((item) => orderCard(item)).join("");
+  document.querySelector("#ordersBody").innerHTML = groupedOrderSections(visible);
   renderSelectionBar();
   document.querySelectorAll(".order-select").forEach((input) => {
     input.addEventListener("change", () => toggleSelected(input.dataset.orderKey, input.checked));
@@ -165,6 +165,27 @@ function renderOrders() {
     button.addEventListener("click", () => clearForceInclude(order));
   });
   document.querySelector("#emptyState").hidden = visible.length > 0;
+}
+
+function groupedOrderSections(items) {
+  const groups = [
+    ["include", "Meenemen", "Orders die automatisch of handmatig mee kunnen"],
+    ["review", "Controleren", "Orders met betaling, afspraak of ontbrekende info om te beoordelen"],
+    ["exclude", "Niet meenemen", "Orders die nu niet voor eigen bezorging of ritplanning gelden"],
+  ];
+  return groups
+    .map(([key, title, subtitle]) => {
+      const groupItems = items.filter((item) => item.decision === key);
+      if (!groupItems.length) return "";
+      return `<section class="order-group ${key}">
+        <div class="order-group-heading">
+          <div><h3>${title}</h3><p>${subtitle}</p></div>
+          <strong>${groupItems.length}</strong>
+        </div>
+        <div class="order-group-list">${groupItems.map((item) => orderCard(item)).join("")}</div>
+      </section>`;
+    })
+    .join("");
 }
 
 function orderCard(item) {
