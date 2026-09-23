@@ -104,3 +104,40 @@ Shopify webhooks:
 - zet formaat op JSON.
 
 Na een nieuwe order schrijft Shopify naar de Worker. De Worker bewaart alleen het planningformaat. De V2-site leest elke minuut `/orders`.
+
+## Bezorgd melden naar Shopify
+
+De V2-site kan een order pas als bezorgd markeren als de Worker extra secrets heeft. Deze blijven in Cloudflare en komen niet in GitHub of de browsercode.
+
+Benodigd per omgeving:
+
+- `OPERATOR_KEY`: korte interne code die de planner invult wanneer op **Bezorgd** wordt geklikt.
+- `SHOPIFY_ADMIN_TOKEN_<SHOP_DOMAIN>`: Admin API access token per Shopify shop. De shopdomain wordt met hoofdletters en underscores geschreven.
+
+Voorbeelden:
+
+```text
+SHOPIFY_ADMIN_TOKEN_SLOWFEEDER_SPECIALIST_MYSHOPIFY_COM
+SHOPIFY_ADMIN_TOKEN_DE_RIJPLATEN_SPECIALIST_MYSHOPIFY_COM
+```
+
+Het Shopify token heeft scopes nodig om orders en fulfillments te lezen en fulfillment aan te maken. Gebruik hiervoor een custom app in Shopify Admin.
+
+Flow:
+
+1. Planner klikt op **Bezorgd** bij een order in V2.
+2. V2 vraagt om de operatorcode.
+3. Worker controleert `OPERATOR_KEY`.
+4. Worker gebruikt het juiste Shopify Admin token voor de shop.
+5. Worker maakt de fulfillment aan in Shopify.
+6. Worker verwijdert de order uit `PLANNING_ORDERS`.
+
+## Google Maps routes
+
+V2 maakt nu per rit alvast een klikbare Google Maps route met start en einde `Goorsteeg 46, Ede`. Exacte rijtijd, afstand en optimale stopvolgorde vragen een Google Maps API key in Cloudflare:
+
+```text
+GOOGLE_MAPS_API_KEY
+```
+
+De API key hoort in Cloudflare als secret/env var, niet in `config.js`. De huidige ritduur is daarom nog een ruwe schatting: 35 minuten rijtijd per stop, minimaal 60 minuten, plus 20 minuten afleveringstijd of 90 minuten voor houten hooihuisjes.

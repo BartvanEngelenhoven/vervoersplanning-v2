@@ -12,6 +12,9 @@
  * - SHOPIFY_WEBHOOK_SECRET_<SHOP_DOMAIN>: optional per-shop secret, for example SHOPIFY_WEBHOOK_SECRET_SLOWFEEDER_SPECIALIST_MYSHOPIFY_COM
  * - PLANNING_ORDERS: Cloudflare KV namespace
  * - CORS_ORIGIN: optional, for example https://bartvanengelenhoven.github.io
+ * - OPERATOR_KEY: shared operator key required for write actions
+ * - SHOPIFY_ADMIN_TOKEN_<SHOP_DOMAIN>: optional per-shop Admin API token for marking orders fulfilled
+ * - GOOGLE_MAPS_API_KEY: optional Google Maps key for future precise route calculations
  */
 
 const JSON_HEADERS = {
@@ -33,6 +36,14 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/webhooks/shopify/orders") {
       return receiveShopifyOrder(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/actions/mark-delivered") {
+      return markDelivered(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/routes/estimate") {
+      return estimateRoute(request, env);
     }
 
     return json({ error: "Not found" }, 404, env);
@@ -71,6 +82,99 @@ async function receiveShopifyOrder(request, env) {
   return json({ ok: true, id: planningOrder.id }, 200, env);
 }
 
+async function markDelivered(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
+  const payload = await request.json();
+  const shopDomain = normalizeShopDomain(payload.shopDomain);
+  const shopifyOrderId = payload.shopifyOrderId;
+  const displayOrderId = payload.id;
+  const token = shopifyAdminToken(env, shopDomain);
+
+  if (!shopDomain || !shopifyOrderId) return json({ error: "shopDomain and shopifyOrderId are required" }, 400, env);
+  if (!token) return json({ error: "Shopify Admin API token is not configured for this shop" }, 501, env);
+
+  const fulfillmentOrders = await shopifyGraphql(shopDomain, token, `
+    query FulfillmentOrders($id: ID!) {
+      order(id: $id) {
+        fulfillmentOrders(first: 20) {
+          nodes {
+            id
+            status
+            lineItems(first: 100) {
+              nodes { id remainingQuantity }
+            }
+          }
+        }
+      }
+    }
+  `, { id: shopifyOrderId });
+
+  const nodes = fulfillmentOrders.data?.order?.fulfillmentOrders?.nodes || [];
+  const lineItemsByFulfillmentOrder = nodes
+    .filter((node) => !["CLOSED", "CANCELLED"].includes(node.status))
+    .map((node) => ({
+      fulfillmentOrderId: node.id,
+      fulfillmentOrderLineItems: (node.lineItems?.nodes || [])
+        .filter((item) => Number(item.remainingQuantity) > 0)
+        .map((item) => ({ id: item.id, quantity: Number(item.remainingQuantity) })),
+    }))
+    .filter((item) => item.fulfillmentOrderLineItems.length);
+
+  if (!lineItemsByFulfillmentOrder.length) return json({ error: "No open fulfillment lines found" }, 409, env);
+
+  const result = await shopifyGraphql(shopDomain, token, `
+    mutation Fulfill($fulfillment: FulfillmentV2Input!) {
+      fulfillmentCreateV2(fulfillment: $fulfillment) {
+        fulfillment { id status }
+        userErrors { field message }
+      }
+    }
+  `, { fulfillment: { lineItemsByFulfillmentOrder, notifyCustomer: false } });
+
+  const userErrors = result.data?.fulfillmentCreateV2?.userErrors || [];
+  if (userErrors.length) return json({ error: "Shopify fulfillment failed", userErrors }, 422, env);
+
+  await env.PLANNING_ORDERS.delete(`order:${shopDomain}:${displayOrderId}`);
+  return json({ ok: true, id: displayOrderId, fulfillment: result.data?.fulfillmentCreateV2?.fulfillment }, 200, env);
+}
+
+async function estimateRoute(request, env) {
+  if (!env.GOOGLE_MAPS_API_KEY) return json({ error: "Google Maps API key is not configured" }, 501, env);
+  const payload = await request.json();
+  const stops = Array.isArray(payload.stops) ? payload.stops : [];
+  if (!stops.length) return json({ error: "stops are required" }, 400, env);
+
+  // Placeholder endpoint: keeps the key server-side and gives the frontend a stable API surface.
+  // The next version can call Google Routes API here for exact duration, distance, and stop order.
+  return json({ error: "Google route calculation is not implemented yet", stops }, 501, env);
+}
+
+async function shopifyGraphql(shopDomain, token, query, variables) {
+  const response = await fetch(`https://${shopDomain}/admin/api/2026-07/graphql.json`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-shopify-access-token": token,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  const data = await response.json();
+  if (!response.ok || data.errors) throw new Error(JSON.stringify(data.errors || data));
+  return data;
+}
+
+function operatorAllowed(request, env) {
+  const configured = String(env.OPERATOR_KEY || "");
+  const provided = request.headers.get("x-operator-key") || "";
+  return Boolean(configured) && timingSafeEqual(configured, provided);
+}
+
+function shopifyAdminToken(env, shopDomain) {
+  const perShopKey = `SHOPIFY_ADMIN_TOKEN_${secretSuffix(shopDomain)}`;
+  return env[perShopKey] || env.SHOPIFY_ADMIN_TOKEN || "";
+}
+
 export function mapShopifyOrder(order, shopDomain = "") {
   const shipping = order.shipping_address || {};
   const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
@@ -79,20 +183,106 @@ export function mapShopifyOrder(order, shopDomain = "") {
 
   return {
     id: order.name || String(order.id),
+    shopifyOrderId: order.admin_graphql_api_id || (order.id ? `gid://shopify/Order/${order.id}` : null),
     shopDomain,
+    webshop: webshopName(shopDomain),
     customer: customerName(order, shipping),
     city: shipping.city || "",
     postcode: normalizePostcode(shipping.zip),
-    dueDate: extractDueDate(order),
+    orderDate: extractOrderDate(order),
+    dueDate: extractDueDate(order) || defaultDueDate(order, shopDomain),
     paid: order.financial_status === "paid" || order.financial_status === "partially_refunded",
+    paymentStatus: paymentStatus(order),
     cancelled: Boolean(order.cancelled_at),
     fulfilled: order.fulfillment_status === "fulfilled",
     deliveryMethod,
     requiresVanRoekelDelivery: deliveryMethod === "delivery" && requiresOwnDelivery(order, tags),
     addressComplete: Boolean(shipping.address1 && shipping.city && shipping.zip && shipping.country_code),
+    deliveryAppointmentLocked: deliveryAppointmentLocked(order),
+    deliveryMinutes: deliveryMinutes(lineItems),
     weightKg: totalWeightKg(lineItems),
     products: lineItems.map((item) => item.title).filter(Boolean),
   };
+}
+
+function webshopName(shopDomain) {
+  if (shopDomain.includes("rijplaten")) return "De Rijplaten Specialist";
+  if (shopDomain.includes("slowfeeder")) return "De Slowfeeder Specialist";
+  return shopDomain || "Onbekende webshop";
+}
+
+function extractOrderDate(order) {
+  const raw = order.created_at || order.processed_at;
+  return raw ? String(raw).slice(0, 10) : null;
+}
+
+function defaultDueDate(order, shopDomain) {
+  if (!shopDomain.includes("rijplaten")) return null;
+  const orderDate = extractOrderDate(order);
+  return orderDate ? addBusinessDays(orderDate, 5) : null;
+}
+
+function addBusinessDays(isoDate, days) {
+  const date = new Date(`${isoDate}T12:00:00`);
+  let added = 0;
+  while (added < days) {
+    date.setDate(date.getDate() + 1);
+    const day = date.getDay();
+    if (day !== 0 && day !== 6 && !isDutchHoliday(date)) added += 1;
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function isDutchHoliday(date) {
+  const fixed = `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  if (["01-01", "04-27", "12-25", "12-26"].includes(fixed)) return true;
+  const easter = easterDate(date.getFullYear());
+  const offsets = [1, 39, 50];
+  return offsets.some((offset) => sameDate(date, addDays(easter, offset)));
+}
+
+function easterDate(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31) - 1;
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month, day, 12);
+}
+
+function addDays(date, days) {
+  const copy = new Date(date);
+  copy.setDate(copy.getDate() + days);
+  return copy;
+}
+
+function sameDate(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function paymentStatus(order) {
+  if (order.financial_status === "paid" || order.financial_status === "partially_refunded") return "Betaald";
+  return "In afwachting van betaling";
+}
+
+function deliveryAppointmentLocked(order) {
+  const attributes = Array.isArray(order.note_attributes) ? order.note_attributes : [];
+  const text = [order.note, order.tags, ...attributes.map((item) => `${item.name}: ${item.value}`)].join(" ").toLowerCase();
+  return text.includes("aflevermoment afgestemd") || text.includes("afgesproken") || text.includes("klant geïnformeerd");
+}
+
+function deliveryMinutes(lineItems) {
+  const text = lineItems.map((item) => item.title).join(" ").toLowerCase();
+  return text.includes("houten hooihuisje") || text.includes("houten hoihuisje") ? 90 : 20;
 }
 
 function inferDeliveryMethod(order, tags) {
@@ -181,6 +371,6 @@ function corsHeaders(env) {
   return {
     "access-control-allow-origin": origin,
     "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "content-type, x-shopify-hmac-sha256",
+    "access-control-allow-headers": "content-type, x-shopify-hmac-sha256, x-operator-key",
   };
 }
