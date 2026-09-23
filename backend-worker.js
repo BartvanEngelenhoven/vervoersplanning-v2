@@ -15,6 +15,8 @@
  * - OPERATOR_KEY: shared operator key required for write actions
  * - SHOPIFY_CLIENT_ID: Shopify app client ID, required for OAuth install
  * - SHOPIFY_CLIENT_SECRET: Shopify app secret, required for OAuth install
+ * - SHOPIFY_CLIENT_ID_<SHOP_DOMAIN>: optional per-shop Shopify app client ID
+ * - SHOPIFY_CLIENT_SECRET_<SHOP_DOMAIN>: optional per-shop Shopify app secret
  * - SHOPIFY_ADMIN_TOKEN_<SHOP_DOMAIN>: optional legacy per-shop Admin API token for marking orders fulfilled
  * - GOOGLE_MAPS_API_KEY: optional Google Maps key for future precise route calculations
  */
@@ -183,13 +185,13 @@ function operatorAllowed(request, env) {
 async function startShopifyOAuth(request, env) {
   const url = new URL(request.url);
   const shopDomain = normalizeShopDomain(url.searchParams.get("shop"));
-  const clientId = env.SHOPIFY_CLIENT_ID;
+  const appCredentials = shopifyAppCredentials(env, shopDomain);
 
   if (!shopDomain.endsWith(".myshopify.com")) {
     return html("Shopify shop ontbreekt. Open deze link met ?shop=jouw-shop.myshopify.com", 400);
   }
-  if (!clientId || !env.SHOPIFY_CLIENT_SECRET) {
-    return html("SHOPIFY_CLIENT_ID en SHOPIFY_CLIENT_SECRET staan nog niet in Cloudflare.", 501);
+  if (!appCredentials.clientId || !appCredentials.clientSecret) {
+    return html("Shopify Client ID en Secret staan nog niet in Cloudflare voor deze shop.", 501);
   }
 
   const state = crypto.randomUUID();
@@ -208,7 +210,7 @@ async function startShopifyOAuth(request, env) {
   ].join(",");
 
   const installUrl = new URL(`https://${shopDomain}/admin/oauth/authorize`);
-  installUrl.searchParams.set("client_id", clientId);
+  installUrl.searchParams.set("client_id", appCredentials.clientId);
   installUrl.searchParams.set("scope", scopes);
   installUrl.searchParams.set("redirect_uri", redirectUri);
   installUrl.searchParams.set("state", state);
@@ -221,8 +223,9 @@ async function finishShopifyOAuth(request, env) {
   const shopDomain = normalizeShopDomain(url.searchParams.get("shop"));
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
+  const appCredentials = shopifyAppCredentials(env, shopDomain);
 
-  if (!(await verifyShopifyOAuthCallback(url, env.SHOPIFY_CLIENT_SECRET))) {
+  if (!(await verifyShopifyOAuthCallback(url, appCredentials.clientSecret))) {
     return html("Ongeldige Shopify OAuth callback.", 401);
   }
 
@@ -237,8 +240,8 @@ async function finishShopifyOAuth(request, env) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      client_id: env.SHOPIFY_CLIENT_ID,
-      client_secret: env.SHOPIFY_CLIENT_SECRET,
+      client_id: appCredentials.clientId,
+      client_secret: appCredentials.clientSecret,
       code,
     }),
   });
@@ -287,6 +290,14 @@ async function shopifyAdminToken(env, shopDomain) {
 
 function adminTokenStorageKey(shopDomain) {
   return `shop-admin-token:${shopDomain}`;
+}
+
+function shopifyAppCredentials(env, shopDomain) {
+  const suffix = secretSuffix(shopDomain);
+  return {
+    clientId: env[`SHOPIFY_CLIENT_ID_${suffix}`] || env.SHOPIFY_CLIENT_ID || "",
+    clientSecret: env[`SHOPIFY_CLIENT_SECRET_${suffix}`] || env.SHOPIFY_CLIENT_SECRET || "",
+  };
 }
 
 export function mapShopifyOrder(order, shopDomain = "") {
