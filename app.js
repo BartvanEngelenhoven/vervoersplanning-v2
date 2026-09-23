@@ -259,12 +259,17 @@ function renderSuggestions() {
 }
 
 function nearbySuggestions() {
-  const routeOrders = state.manualRoute?.orders?.length ? state.manualRoute.orders : selectedOrdersList();
+  const routeOrders = state.manualRoute?.orders?.length
+    ? state.manualRoute.orders
+    : selectedOrdersList().length
+      ? selectedOrdersList()
+      : state.orders.filter((order) => forcedIncludes.has(orderKey(order)));
   if (!routeOrders.length) return [];
   const routeRegions = new Set(routeOrders.map(regionFor));
   const routePrefixes = new Set(routeOrders.map((order) => String(order.postcode || "").slice(0, 2)).filter(Boolean));
+  const routeKeys = new Set(routeOrders.map(orderKey));
   return state.decisions
-    .filter((item) => item.decision !== "include" && !state.selected.has(orderKey(item.order)))
+    .filter((item) => !routeKeys.has(orderKey(item.order)) && item.decision !== "include" && !state.selected.has(orderKey(item.order)))
     .map((item) => item.order)
     .filter((order) => routeRegions.has(regionFor(order)) || routePrefixes.has(String(order.postcode || "").slice(0, 2)))
     .slice(0, 4);
