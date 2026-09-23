@@ -1,5 +1,5 @@
 const CONFIG = {
-  dataUrl: "data/demo-orders.json",
+  dataUrl: window.VERVOERSPLANNING_CONFIG?.dataUrl || "data/demo-orders.json",
   refreshMs: 60_000,
   depot: "Goorsteeg 46, Ede",
   vehicleCapacityKg: 3_500,
@@ -112,7 +112,8 @@ async function refreshData() {
   button.disabled = true;
   button.textContent = "Verversen…";
   try {
-    const response = await fetch(`${CONFIG.dataUrl}?t=${Date.now()}`, { cache: "no-store" });
+    const separator = CONFIG.dataUrl.includes("?") ? "&" : "?";
+    const response = await fetch(`${CONFIG.dataUrl}${separator}t=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) throw new Error("Data kon niet worden geladen");
     state.orders = await response.json();
     state.decisions = state.orders.map((order) => ({ order, ...decide(order) }));
