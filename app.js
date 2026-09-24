@@ -1,6 +1,9 @@
 const CONFIG = {
   dataUrl: window.VERVOERSPLANNING_CONFIG?.dataUrl || "data/demo-orders.json",
-  refreshMs: 60_000,
+  // Every open screen costs list operations on each refresh, and the Workers
+  // free plan allows 1,000 of those a day before everything fails until
+  // midnight UTC. Two minutes, and only while the screen is in view.
+  refreshMs: 120_000,
   depot: "Goorsteeg 46, Ede",
   vehicleCapacityKg: 3_500,
   apiBaseUrl: new URL(window.VERVOERSPLANNING_CONFIG?.dataUrl || "data/demo-orders.json", window.location.href).origin,
@@ -1801,7 +1804,10 @@ async function backendFetch(url, options = {}) {
   return response;
 }
 
-async function refreshData() {
+// full: also fetch the history and the planned routes. Each of those costs a
+// list operation, so the timer only asks for them every fifth tick; anything
+// the planner or driver does, and opening a route, always asks for everything.
+async function refreshData(full = true) {
   const button = document.querySelector("#refreshButton");
   button.disabled = true;
   button.textContent = "Bezig…";
@@ -1817,8 +1823,10 @@ async function refreshData() {
     // Before rebuildPlanning, because the travel budgets are judged against these.
     await fetchGeo(state.allOrders);
     state.driveMinutes = await fetchDriveMinutes(state.orders);
-    state.history = await fetchHistory();
-    state.plan = await fetchPlan();
+    if (full) {
+      state.history = await fetchHistory();
+      state.plan = await fetchPlan();
+    }
     if (!state.role) applyRole(await fetchRole());
     rebuildPlanning();
     renderHistory();
@@ -2107,4 +2115,14 @@ document.querySelectorAll(".nav-item").forEach((item) => {
 renderRules();
 ensureOperatorKey();
 refreshData();
-setInterval(refreshData, CONFIG.refreshMs);
+// A screen out of view (a phone in a pocket, a tab behind another) asks for
+// nothing. Coming back into view catches up at once.
+let refreshTick = 0;
+setInterval(() => {
+  if (document.visibilityState !== "visible") return;
+  refreshTick += 1;
+  refreshData(refreshTick % 5 === 0);
+}, CONFIG.refreshMs);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refreshData(true);
+});

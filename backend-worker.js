@@ -524,22 +524,20 @@ async function getPlan(request, env) {
   if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
 
   const from = new URL(request.url).searchParams.get("from");
-  const list = await env.PLANNING_ORDERS.list({ prefix: PLAN_PREFIX });
-  const wanted = list.keys
-    .map((key) => key.name)
-    .filter((name) => !isPlanDate(from) || name.slice(PLAN_PREFIX.length, PLAN_PREFIX.length + 10) >= from);
+  // One listing for routes and day notes together. The free plan allows 1,000
+  // list operations a day, and this runs on every refresh of every open screen.
+  const list = await env.PLANNING_ORDERS.list({ prefix: "plan" });
+  const na = (name, prefix) => !isPlanDate(from) || name.slice(prefix.length, prefix.length + 10) >= from;
+  const routeKeys = list.keys.map((key) => key.name).filter((name) => name.startsWith(PLAN_PREFIX) && na(name, PLAN_PREFIX));
+  const dayKeys = list.keys.map((key) => key.name).filter((name) => name.startsWith("plan-day:") && na(name, "plan-day:"));
 
-  const routes = (await Promise.all(wanted.map((name) => env.PLANNING_ORDERS.get(name, "json"))))
-    .filter(Boolean)
-    .sort((a, b) => `${a.date}${a.assignedAt}`.localeCompare(`${b.date}${b.assignedAt}`));
+  const [routes, dayNotes] = await Promise.all([
+    Promise.all(routeKeys.map((name) => env.PLANNING_ORDERS.get(name, "json"))),
+    Promise.all(dayKeys.map((name) => env.PLANNING_ORDERS.get(name, "json"))),
+  ]);
+  routes.sort((a, b) => `${a?.date}${a?.assignedAt}`.localeCompare(`${b?.date}${b?.assignedAt}`));
 
-  const dayList = await env.PLANNING_ORDERS.list({ prefix: "plan-day:" });
-  const dayNotes = (await Promise.all(dayList.keys
-    .filter((key) => !isPlanDate(from) || key.name.slice("plan-day:".length) >= from)
-    .map((key) => env.PLANNING_ORDERS.get(key.name, "json"))))
-    .filter(Boolean);
-
-  return json({ routes, dayNotes }, 200, env);
+  return json({ routes: routes.filter(Boolean), dayNotes: dayNotes.filter(Boolean) }, 200, env);
 }
 
 async function assignPlanRoute(request, env) {
