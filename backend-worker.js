@@ -415,7 +415,7 @@ async function finishShopifyOAuth(request, env) {
 
 async function registerShopifyWebhooks(shopDomain, token, origin) {
   const address = `${origin}/webhooks/shopify/orders`;
-  await Promise.all(["orders/create", "orders/updated"].map((topic) => createShopifyWebhook(shopDomain, token, topic, address)));
+  await Promise.all(["orders/create", "orders/updated", "orders/fulfilled"].map((topic) => createShopifyWebhook(shopDomain, token, topic, address)));
 }
 
 async function createShopifyWebhook(shopDomain, token, topic, address) {

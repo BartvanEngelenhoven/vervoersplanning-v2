@@ -697,12 +697,16 @@ function renderHistory() {
     return;
   }
   holder.innerHTML = state.history.map((item) => `<article class="history-item">
-    <div><b>${item.id}</b><span>${item.order?.customer || "Onbekende klant"} · ${item.order?.webshop || item.shopDomain}</span><small>Bezorgd gemeld: ${formatDateTime(item.deliveredAt)}</small></div>
+    <div><b>${item.id}</b><span>${item.order?.customer || "Onbekende klant"} · ${item.order?.webshop || item.shopDomain}</span><small>${historySourceLabel(item)}: ${formatDateTime(item.deliveredAt)}</small></div>
     <button class="button ghost undo-delivered" type="button" data-order-id="${encodeURIComponent(item.id)}" data-shop-domain="${encodeURIComponent(item.shopDomain)}">Terugdraaien</button>
   </article>`).join("");
   holder.querySelectorAll(".undo-delivered").forEach((button) => {
     button.addEventListener("click", () => undoDelivered(decodeURIComponent(button.dataset.orderId), decodeURIComponent(button.dataset.shopDomain), button));
   });
+}
+
+function historySourceLabel(item) {
+  return item.source === "shopify" ? "Fulfilled via Shopify" : "Bezorgd gemeld";
 }
 
 function googleMapsUrl(orders) {
