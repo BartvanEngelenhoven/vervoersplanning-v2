@@ -11,7 +11,15 @@ const CONFIG = {
 };
 
 const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [] };
-const decisionLabels = { include: "Meenemen", review: "Controleren", exclude: "Niet meenemen" };
+const decisionLabels = { include: "Meenemen", review: "Controleren", dhl: "DHL", far: "Te ver", exclude: "Niet meenemen" };
+
+// Minutes are round trips from the depot, because routeDriveMinutes drives out
+// and back. An order past directMinutes can still ride along when an existing
+// route absorbs it for extraMinutes or less; otherwise it lands in overflow.
+const transportRules = {
+  rijplaten: { label: "Rijplaten", directMinutes: 120, extraMinutes: 120, overflow: "far" },
+  xxl: { label: "XXL bak", directMinutes: 60, extraMinutes: 60, overflow: "dhl" },
+};
 const forcedIncludeKey = "vervoersplanning.forceInclude.v1";
 const operatorKeyStorageKey = "vervoersplanning.operatorKey.v1";
 const usesBackend = Boolean(window.VERVOERSPLANNING_CONFIG?.dataUrl);
@@ -32,15 +40,62 @@ let activeMapRouteIndex = 0;
 let activeLooseOrderKey = "";
 let allOrdersLeafletMap = null;
 
+function productText(order) {
+  return String((order.products || []).join(" ")).toLowerCase();
+}
+
+function isRijplatenOrder(order) {
+  return `${order.shopDomain || ""} ${order.webshop || ""}`.toLowerCase().includes("rijplaten");
+}
+
+function isHooihuisje(order) {
+  const text = productText(order);
+  return text.includes("hooihuisje") || text.includes("hoihuisje");
+}
+
+// "Slowfeeder XXL Pony Edition", "Slowfeeder XXL (1 kuub) GRIJS". The double X
+// keeps "Slowfeed Plus XL hooiruif" out, which ships through DHL.
+function isXxlBak(order) {
+  return productText(order).includes("xxl");
+}
+
+function transportPlan(order) {
+  if (isRijplatenOrder(order)) return { kind: "limited", rule: transportRules.rijplaten };
+  if (isHooihuisje(order)) return { kind: "always", label: "Hooihuisje" };
+  if (isXxlBak(order)) return { kind: "limited", rule: transportRules.xxl };
+  return { kind: "dhl" };
+}
+
 function decide(order) {
   if (order.cancelled) return { decision: "exclude", reason: "Order is geannuleerd" };
   if (order.fulfilled) return { decision: "exclude", reason: "Order is al volledig bezorgd" };
   if (order.deliveryMethod === "pickup") return { decision: "exclude", reason: "Klant haalt de bestelling af" };
-  if (!order.requiresVanRoekelDelivery) return { decision: "exclude", reason: "Geen eigen bezorging nodig" };
+
+  const plan = transportPlan(order);
+  if (plan.kind === "dhl") {
+    return { decision: "dhl", reason: "Geen hooihuisje en geen XXL bak; gaat als pakket via DHL" };
+  }
+
   if (!order.addressComplete) return { decision: "review", reason: "Bezorgadres is onvolledig" };
   if (order.deliveryAppointmentLocked) return { decision: "review", reason: "Aflevermoment is afgestemd; niet verplaatsen zonder toestemming" };
   if (!order.paid) return { decision: "review", reason: "Betaling nog niet binnen; alleen optioneel meenemen als dit logisch op de route ligt" };
-  return { decision: "include", reason: dueDateReason(order) };
+
+  if (plan.kind === "always") {
+    return { decision: "include", reason: `${plan.label}: altijd eigen bezorging. ${dueDateReason(order)}` };
+  }
+
+  const roundTrip = routeDriveMinutes([order]);
+  if (roundTrip <= plan.rule.directMinutes) {
+    return { decision: "include", reason: `${plan.rule.label} op ${formatMinutes(roundTrip)} heen/terug. ${dueDateReason(order)}` };
+  }
+
+  // Resolved in attachCombineCandidates, once the routes it could join exist.
+  return {
+    decision: "combine",
+    rule: plan.rule,
+    roundTrip,
+    reason: `${plan.rule.label} op ${formatMinutes(roundTrip)} heen/terug`,
+  };
 }
 
 function applyManualDecision(order, automatic) {
@@ -150,8 +205,9 @@ function routeSortScore(order) {
 
 function deliveryMinutes(order) {
   if (Number(order.deliveryMinutes)) return Number(order.deliveryMinutes);
-  const products = String((order.products || []).join(" ")).toLowerCase();
-  if (products.includes("houten hooihuisje") || products.includes("houten hoihuisje")) return 90;
+  // Matched "houten hooihuisje" before, which the Shopify titles never say, so
+  // every hay house was planned as a 20 minute drop.
+  if (isHooihuisje(order)) return 90;
   return 20;
 }
 
@@ -189,8 +245,10 @@ function renderSummary() {
   const count = (key) => state.decisions.filter((item) => item.decision === key).length;
   const metrics = [
     ["Binnengekomen", state.orders.length, "Alle actuele orders"],
-    ["Meenemen", count("include"), "Automatisch geschikt"],
+    ["Meenemen", count("include"), "Eigen vervoer"],
     ["Controleren", count("review"), "Menselijke beoordeling of optioneel"],
+    ["DHL", count("dhl"), "Gaan als pakket"],
+    ["Te ver", count("far"), "Passen op geen enkele rit"],
     ["Geselecteerd", state.selected.size, "Handmatig gekozen orders"],
   ];
   document.querySelector("#summary").innerHTML = metrics.map(([label, value, text]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${text}</small></article>`).join("");
@@ -303,6 +361,8 @@ function renderAllOrdersMap(holder) {
     <div class="map-legend">
       <span><i class="map-dot include"></i> Meenemen</span>
       <span><i class="map-dot review"></i> Controleren</span>
+      <span><i class="map-dot dhl"></i> DHL</span>
+      <span><i class="map-dot far"></i> Te ver</span>
       <span><i class="map-dot exclude"></i> Niet meenemen</span>
     </div>
   </div>`;
@@ -358,6 +418,8 @@ function renderLeafletOrderMap(openOrders) {
 function markerColor(decision) {
   if (decision === "include") return "#168a54";
   if (decision === "review") return "#c7810c";
+  if (decision === "dhl") return "#2f6fb3";
+  if (decision === "far") return "#6b5b95";
   return "#b94a3f";
 }
 
@@ -422,6 +484,8 @@ function groupedOrderSections(items) {
   const groups = [
     ["include", "Meenemen", "Orders die automatisch of handmatig mee kunnen"],
     ["review", "Controleren", "Orders met betaling, afspraak of ontbrekende info om te beoordelen"],
+    ["dhl", "DHL", "Slowfeeder-orders zonder hooihuisje of XXL bak, en XXL bakken die te ver liggen"],
+    ["far", "Te ver voor eigen vervoer", "Rijplaten buiten het bereik die op geen enkele rit passen"],
     ["exclude", "Niet meenemen", "Orders die nu niet voor eigen bezorging of ritplanning gelden"],
   ];
   return groups
@@ -689,10 +753,11 @@ function makeRouteFromSelection() {
 
 async function addOrderToActiveRoute(order) {
   if (!order || !state.routes[activeMapRouteIndex]) return;
-  if (!order.requiresVanRoekelDelivery) {
+  // Anything the rules did not already put on own transport gets tagged as own
+  // delivery in Shopify first, so the webshop and the planning agree.
+  if (state.decisions.find((item) => item.order === order)?.decision !== "include") {
     const tagged = await forceInclude(order);
     if (!tagged) return;
-    order.requiresVanRoekelDelivery = true;
     order.deliveryMethod = "delivery";
   }
   const route = state.routes[activeMapRouteIndex];
@@ -860,9 +925,35 @@ function clearForceInclude(order) {
   rebuildPlanning();
 }
 
+// An order too far to justify its own trip may still be worth taking when a
+// planned route passes near it. Each candidate joins the route it burdens least,
+// and the route is updated before the next candidate is measured against it.
+function attachCombineCandidates() {
+  for (const item of state.decisions.filter((entry) => entry.decision === "combine")) {
+    let best = null;
+    state.routes.forEach((route, index) => {
+      const merged = routeSummary(route.region, optimizedStopOrder([...route.orders, item.order]));
+      const extra = merged.totalMinutes - route.totalMinutes;
+      if (extra <= item.rule.extraMinutes && (!best || extra < best.extra)) best = { index, extra, merged };
+    });
+
+    if (best) {
+      state.routes[best.index] = best.merged;
+      item.decision = "include";
+      item.reason = `${item.rule.label} op ${formatMinutes(item.roundTrip)} heen/terug, maar kost ${formatMinutes(best.extra)} extra op rit ${best.merged.region}. ${dueDateReason(item.order)}`;
+      continue;
+    }
+
+    item.decision = item.rule.overflow;
+    const tooFar = `${item.rule.label} op ${formatMinutes(item.roundTrip)} heen/terug, meer dan ${formatMinutes(item.rule.directMinutes)}, en past op geen enkele rit`;
+    item.reason = item.rule.overflow === "dhl" ? `${tooFar}; gaat als pakket via DHL` : tooFar;
+  }
+}
+
 function rebuildPlanning() {
   state.decisions = state.orders.map((order) => ({ order, ...applyManualDecision(order, decide(order)) }));
   state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
+  attachCombineCandidates();
   renderSummary();
   renderPlanningOverview();
   renderOrders();
