@@ -16,6 +16,8 @@ const businessClasses = {
   "De Slowfeeder Specialist": "slowfeeder",
 };
 const forcedIncludes = new Set(JSON.parse(localStorage.getItem(forcedIncludeKey) || "[]"));
+const DEPOT_POINT = { lat: 52.05, lon: 5.67 };
+const KM_TO_MINUTES = 1.15;
 
 function decide(order) {
   if (order.cancelled) return { decision: "exclude", reason: "Order is geannuleerd" };
@@ -45,16 +47,18 @@ function dueDateReason(order) {
 }
 
 function regionFor(order) {
-  const prefix = Number(String(order.postcode).slice(0, 2));
-  if (prefix >= 10 && prefix <= 39) return "West & Midden";
-  if (prefix >= 40 && prefix <= 59) return "Midden & Zuid";
-  if (prefix >= 60 && prefix <= 79) return "Oost";
-  return "Noord";
+  const point = orderPoint(order);
+  const bearing = bearingFromDepot(point);
+  if (countryName(order) === "BE") return point.lon < 4.7 ? "België west" : "België oost";
+  if (bearing >= 315 || bearing < 45) return "Noord";
+  if (bearing >= 45 && bearing < 135) return "Oost";
+  if (bearing >= 135 && bearing < 225) return "Zuid";
+  return "West";
 }
 
 function buildRoutes(included) {
   if (state.manualRoute?.orders?.length) {
-    return [routeSummary("Handmatige selectie", state.manualRoute.orders, state.manualRoute.load, state.manualRoute.deliveryMinutes)];
+    return [routeSummary("Handmatige selectie", optimizedStopOrder(state.manualRoute.orders))];
   }
   const groups = new Map();
   for (const item of included) {
@@ -65,29 +69,29 @@ function buildRoutes(included) {
 
   const routes = [];
   for (const [region, orders] of groups) {
-    orders.sort((a, b) => (a.dueDate || "9999").localeCompare(b.dueDate || "9999") || deliveryMinutes(b) - deliveryMinutes(a));
+    orders.sort((a, b) => routeSortScore(a) - routeSortScore(b));
     let current = [];
-    let load = 0;
-    let deliveryTotal = 0;
     for (const order of orders) {
-      const weight = Number(order.weightKg || 0);
-      if (current.length && load + weight > CONFIG.vehicleCapacityKg) {
-        routes.push(routeSummary(region, current, load, deliveryTotal));
-        current = [];
-        load = 0;
-        deliveryTotal = 0;
+      const candidate = optimizedStopOrder([...current, order]);
+      const candidateSummary = routeSummary(region, candidate);
+      const loadTooHigh = candidateSummary.load > CONFIG.vehicleCapacityKg;
+      const routeTooLong = candidateSummary.totalMinutes > CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
+      if (current.length && (loadTooHigh || routeTooLong)) {
+        routes.push(routeSummary(region, optimizedStopOrder(current)));
+        current = [order];
+      } else {
+        current = candidate;
       }
-      current.push(order);
-      load += weight;
-      deliveryTotal += deliveryMinutes(order);
     }
-    if (current.length) routes.push(routeSummary(region, current, load, deliveryTotal));
+    if (current.length) routes.push(routeSummary(region, optimizedStopOrder(current)));
   }
   return routes;
 }
 
-function routeSummary(region, orders, load, deliveryMinutesTotal) {
-  const driveEstimate = Math.max(60, orders.length * 35);
+function routeSummary(region, orders) {
+  const deliveryMinutesTotal = orders.reduce((sum, order) => sum + deliveryMinutes(order), 0);
+  const load = orders.reduce((sum, order) => sum + Number(order.weightKg || 0), 0);
+  const driveEstimate = routeDriveMinutes(orders);
   const totalMinutes = driveEstimate + deliveryMinutesTotal;
   return {
     region,
@@ -100,6 +104,23 @@ function routeSummary(region, orders, load, deliveryMinutesTotal) {
   };
 }
 
+function routeDriveMinutes(orders) {
+  if (!orders.length) return 0;
+  const points = orders.map(orderPoint);
+  const legs = [DEPOT_POINT, ...points, DEPOT_POINT];
+  const km = legs.slice(1).reduce((sum, point, index) => sum + distanceKm(legs[index], point), 0);
+  return Math.max(20, Math.round(km * KM_TO_MINUTES));
+}
+
+function optimizedStopOrder(orders) {
+  return [...orders].sort((a, b) => routeSortScore(a) - routeSortScore(b));
+}
+
+function routeSortScore(order) {
+  const point = orderPoint(order);
+  return bearingFromDepot(point) * 10 + distanceKm(DEPOT_POINT, point) / 10;
+}
+
 function deliveryMinutes(order) {
   if (Number(order.deliveryMinutes)) return Number(order.deliveryMinutes);
   const products = String((order.products || []).join(" ")).toLowerCase();
@@ -108,6 +129,7 @@ function deliveryMinutes(order) {
 }
 
 function routeWarning(route) {
+  if (route.load > CONFIG.vehicleCapacityKg) return `Let op laadcapaciteit: ${route.load.toLocaleString("nl-NL")} kg`;
   if (!route.overByMinutes) return "Binnen 5:30 uur op basis van ruwe schatting";
   if (route.overByMinutes <= CONFIG.nearlyOverMinutes) return `Bijna passend: ${route.overByMinutes} min boven 5:30 uur`;
   return `Te lang: ${route.overByMinutes} min boven 5:30 uur; apart plannen of uitzondering bespreken`;
@@ -271,7 +293,7 @@ function renderSuggestions() {
     <article>
       <span>${order.id} · ${order.city}</span>
       <small>${productSummary(order)}</small>
-      <em>+${order.extraMinutes} min geschat</em>
+      <em>+${order.extraMinutes} min geschat · route wordt ${formatMinutes(order.routeWouldBeMinutes)}</em>
       <button class="button subtle-action add-suggestion" type="button" data-order-key="${orderKey(order)}">Voeg toe</button>
     </article>`).join("")}</div>`;
   holder.querySelectorAll(".add-suggestion").forEach((button) => {
@@ -290,33 +312,101 @@ function nearbySuggestions() {
         : state.routes.flatMap((route) => route.orders);
   if (!routeOrders.length) return [];
   const routeKeys = new Set(routeOrders.map(orderKey));
+  const currentRouteMinutes = routeSummary("huidige route", optimizedStopOrder(routeOrders)).totalMinutes;
   return state.decisions
-    .filter((item) => !routeKeys.has(orderKey(item.order)) && item.decision !== "include" && !state.selected.has(orderKey(item.order)))
+    .filter((item) => suggestionCandidate(item, routeKeys))
     .map((item) => item.order)
-    .map((order) => ({ ...order, extraMinutes: estimatedExtraMinutes(routeOrders, order) }))
-    .filter((order) => order.extraMinutes <= 90)
+    .map((order) => {
+      const nextRoute = routeSummary("suggestie", optimizedStopOrder([...routeOrders, order]));
+      return {
+        ...order,
+        extraMinutes: Math.max(0, nextRoute.totalMinutes - currentRouteMinutes),
+        routeWouldBeMinutes: nextRoute.totalMinutes,
+      };
+    })
+    .filter((order) => order.extraMinutes <= 120)
     .sort((a, b) => a.extraMinutes - b.extraMinutes)
     .slice(0, 3);
 }
 
-function estimatedExtraMinutes(routeOrders, candidate) {
-  const candidatePrefix = postcodePrefix(candidate);
-  const closestPrefixDiff = Math.min(...routeOrders.map((order) => Math.abs(postcodePrefix(order) - candidatePrefix)).filter(Number.isFinite));
-  const sameCountryBonus = routeOrders.some((order) => countryName(order) === countryName(candidate)) ? 0 : 20;
-  const detourEstimate = Math.min(120, 10 + closestPrefixDiff * 3 + sameCountryBonus);
-  return Math.round(detourEstimate + deliveryMinutes(candidate));
-}
-
-function postcodePrefix(order) {
-  const match = String(order.postcode || "").match(/\d{2}/);
-  return match ? Number(match[0]) : 99;
+function suggestionCandidate(item, routeKeys) {
+  const order = item.order;
+  if (routeKeys.has(orderKey(order)) || state.selected.has(orderKey(order))) return false;
+  if (order.cancelled || order.fulfilled || order.deliveryMethod === "pickup") return false;
+  if (!order.addressComplete || !order.paid) return false;
+  return item.decision !== "include";
 }
 
 function countryName(order) {
-  const address = String(order.fullAddress || "");
-  if (/belg/i.test(address)) return "BE";
-  if (/nederland|netherlands/i.test(address)) return "NL";
+  const text = [order.country, order.fullAddress].filter(Boolean).join(" ");
+  if (/belg|\bbe\b/i.test(text)) return "BE";
+  if (/nederland|netherlands|\bnl\b/i.test(text)) return "NL";
   return "";
+}
+
+function orderPoint(order) {
+  const postcode = String(order.postcode || "").replace(/\s+/g, "").toUpperCase();
+  const country = countryName(order);
+  const number = Number((postcode.match(/\d+/) || [0])[0]);
+  if (country === "BE" || number < 1000) return belgiumPoint(number, order);
+  return netherlandsPoint(number, order);
+}
+
+function netherlandsPoint(number, order) {
+  const prefix = Math.floor(number / 100);
+  if (prefix >= 10 && prefix <= 29) return { lat: 52.25, lon: 4.75 };
+  if (prefix >= 30 && prefix <= 33) return { lat: 51.92, lon: 4.45 };
+  if (prefix >= 34 && prefix <= 39) return { lat: 52.08, lon: 5.18 };
+  if (prefix >= 40 && prefix <= 49) return { lat: 51.75, lon: 5.15 };
+  if (prefix >= 50 && prefix <= 59) return { lat: 51.48, lon: 5.35 };
+  if (prefix >= 60 && prefix <= 64) return { lat: 51.05, lon: 5.85 };
+  if (prefix >= 65 && prefix <= 69) return { lat: 51.93, lon: 5.90 };
+  if (prefix >= 70 && prefix <= 75) return { lat: 52.12, lon: 6.35 };
+  if (prefix >= 76 && prefix <= 79) return { lat: 52.45, lon: 6.55 };
+  if (prefix >= 80 && prefix <= 83) return { lat: 52.55, lon: 5.70 };
+  if (prefix >= 84 && prefix <= 99) return { lat: 53.05, lon: 6.35 };
+  if (/ede/i.test(order.city || "")) return DEPOT_POINT;
+  return DEPOT_POINT;
+}
+
+function belgiumPoint(number, order) {
+  if (number >= 1000 && number <= 1299) return { lat: 50.85, lon: 4.35 };
+  if (number >= 1300 && number <= 1499) return { lat: 50.70, lon: 4.50 };
+  if (number >= 1500 && number <= 1999) return { lat: 50.80, lon: 4.05 };
+  if (number >= 2000 && number <= 2999) return { lat: 51.22, lon: 4.40 };
+  if (number >= 3000 && number <= 3499) return { lat: 50.90, lon: 4.80 };
+  if (number >= 3500 && number <= 3999) return { lat: 50.95, lon: 5.35 };
+  if (number >= 4000 && number <= 4999) return { lat: 50.60, lon: 5.55 };
+  if (number >= 5000 && number <= 5999) return { lat: 50.35, lon: 4.85 };
+  if (number >= 6000 && number <= 6599) return { lat: 50.40, lon: 4.45 };
+  if (number >= 6600 && number <= 6999) return { lat: 50.15, lon: 5.60 };
+  if (number >= 7000 && number <= 7999) return { lat: 50.45, lon: 3.90 };
+  if (number >= 8000 && number <= 8999) return { lat: 51.05, lon: 3.20 };
+  if (number >= 9000 && number <= 9999) return { lat: 51.05, lon: 3.75 };
+  if (/antwerpen/i.test(order.city || "")) return { lat: 51.22, lon: 4.40 };
+  if (/tollembeek|tollenbeek/i.test(order.city || "")) return { lat: 50.75, lon: 4.00 };
+  return { lat: 50.85, lon: 4.35 };
+}
+
+function distanceKm(a, b) {
+  const latKm = (a.lat - b.lat) * 111;
+  const lonKm = (a.lon - b.lon) * 70;
+  return Math.sqrt(latKm ** 2 + lonKm ** 2);
+}
+
+function bearingFromDepot(point) {
+  const y = Math.sin(toRad(point.lon - DEPOT_POINT.lon)) * Math.cos(toRad(point.lat));
+  const x = Math.cos(toRad(DEPOT_POINT.lat)) * Math.sin(toRad(point.lat))
+    - Math.sin(toRad(DEPOT_POINT.lat)) * Math.cos(toRad(point.lat)) * Math.cos(toRad(point.lon - DEPOT_POINT.lon));
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+function toRad(value) {
+  return value * Math.PI / 180;
+}
+
+function toDeg(value) {
+  return value * 180 / Math.PI;
 }
 
 function toggleSelected(key, checked) {
