@@ -359,7 +359,12 @@ function markerColor(decision) {
 }
 
 function orderTooltip(order) {
-  return `<b>${order.id} · ${order.customer || "Onbekende klant"}</b><br>${productSummary(order)}<br>${addressSummary(order)}<br>${order.paymentStatus || (order.paid ? "Betaald" : "In afwachting")} · uiterlijk ${formatDate(order.dueDate)}`;
+  return `<div class="map-tooltip-content">
+    <b>${order.id} · ${order.customer || "Onbekende klant"}</b>
+    <span>${productSummary(order)}</span>
+    <span>${addressSummary(order)}</span>
+    <small>${order.paymentStatus || (order.paid ? "Betaald" : "In afwachting")} · uiterlijk ${formatDate(order.dueDate)}</small>
+  </div>`;
 }
 
 function renderRoutesOverview() {
