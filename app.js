@@ -288,17 +288,82 @@ function startOfDay(date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
+// Three counters the planner acts on, as buttons that filter the order list.
+// Everything that needs no decision today is named once in a quiet line below,
+// so it is accounted for without competing for attention.
 function renderSummary() {
   const count = (key) => state.decisions.filter((item) => item.decision === key).length;
-  const metrics = [
-    ["Binnengekomen", state.orders.length, "Alle actuele orders"],
-    ["Meenemen", count("include"), "Eigen vervoer"],
-    ["Controleren", count("review"), "Menselijke beoordeling of optioneel"],
-    ["DHL", count("dhl"), "Gaan als pakket"],
-    ["Te ver", count("far"), "Passen op geen enkele rit"],
-    ["Geselecteerd", state.selected.size, "Handmatig gekozen orders"],
+  const stops = state.routes.reduce((sum, route) => sum + route.orders.length, 0);
+  const urgent = state.decisions.filter((item) => {
+    if (item.decision !== "include" && item.decision !== "review") return false;
+    if (!item.order.dueDate) return false;
+    return Math.ceil((dateFromIso(item.order.dueDate) - startOfDay(new Date())) / 86_400_000) <= 0;
+  }).length;
+
+  const dagLine = document.querySelector("#dayLine");
+  if (dagLine) {
+    const dag = new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(new Date());
+    const rit = state.routes.length === 1 ? "1 rit" : `${state.routes.length} ritten`;
+    dagLine.textContent = state.routes.length
+      ? `${dag} · ${rit} met ${stops} ${stops === 1 ? "stop" : "stops"}`
+      : `${dag} · nog geen rit gepland`;
+  }
+
+  const vandaag = document.querySelector("#todayLabel");
+  if (vandaag) vandaag.textContent = new Intl.DateTimeFormat("nl-NL", { day: "numeric", month: "long" }).format(new Date());
+
+  const tellers = [
+    { key: "include", label: "Meenemen", value: count("include"), sub: "gaan met de bus" },
+    { key: "review", label: "Controleren", value: count("review"), sub: "wachten op jou" },
+    { key: "urgent", label: "Vandaag of te laat", value: urgent, sub: "deadline verstreken of nu" },
   ];
-  document.querySelector("#summary").innerHTML = metrics.map(([label, value, text]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${text}</small></article>`).join("");
+  document.querySelector("#summary").innerHTML = tellers.map((t) => `
+    <button class="metric ${t.key}${t.value ? "" : " leeg"}" type="button" data-filter="${t.key}">
+      <strong>${t.value}</strong><span>${t.label}</span><small>${t.sub}</small>
+    </button>`).join("");
+
+  document.querySelectorAll("#summary .metric").forEach((button) => {
+    button.addEventListener("click", () => {
+      const filter = button.dataset.filter;
+      const select = document.querySelector("#decisionFilter");
+      if (select) select.value = filter === "urgent" ? "all" : filter;
+      renderOrders();
+      document.querySelector(".orders-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+
+  const rest = document.querySelector("#summaryRest");
+  if (rest) {
+    const delen = [
+      count("dhl") ? `${count("dhl")} via DHL` : "",
+      count("far") ? `${count("far")} te ver` : "",
+      count("exclude") ? `${count("exclude")} vervallen of opgehaald` : "",
+      state.selected.size ? `${state.selected.size} geselecteerd` : "",
+    ].filter(Boolean);
+    rest.textContent = delen.length ? `Verder: ${delen.join(" · ")}.` : "";
+  }
+}
+
+// The reference block is built from the rules themselves, so it cannot drift
+// away from what the planning actually does the way a written list did.
+function renderRules() {
+  const holder = document.querySelector("#rulesBody");
+  if (!holder) return;
+  const budget = (rule) => rule.budgetMinutes === Infinity ? "hoe ver ook" : `tot ${formatMinutes(rule.budgetMinutes)} heen/terug`;
+  const kaarten = [
+    ["Rijplaten", `Altijd eigen bezorging ${budget(transportRules.rijplaten)}. Orders dezelfde kant op tellen hun tijd bij elkaar op, dus samen mogen ze verder.`],
+    ["Grote slowfeeders", `${alwaysOwnTransportProducts.length} producttitels uit de vaste lijst gaan altijd zelf, ${budget(transportRules.alwaysOwn)}.`],
+    ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld.`],
+    ["Al het andere", "Gaat als pakket via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit " + formatMinutes(CONFIG.packageDetourMinutes) + " langer van worden."],
+    ["Net erover", `Zit een rit tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan komt hij bij Controleren te staan in plaats van dat hij afvalt.`],
+    ["Lengte van een dag", `Ritten starten en eindigen op ${CONFIG.depot}. Boven ${formatMinutes(CONFIG.maxRouteMinutes)} volgt een waarschuwing, en er liften geen pakketten meer bij.`],
+  ];
+  holder.innerHTML = kaarten.map(([titel, tekst]) => `<article><b>${titel}</b><p>${tekst}</p></article>`).join("");
+}
+
+function renderManualRouteBar() {
+  const bar = document.querySelector("#manualRouteBar");
+  if (bar) bar.hidden = !state.manualRoute?.orders?.length;
 }
 
 function renderPlanningOverview() {
@@ -1074,6 +1139,7 @@ function rebuildPlanning() {
   state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
   addNearbyPackages();
   renderSummary();
+  renderManualRouteBar();
   renderPlanningOverview();
   renderOrders();
   renderRoutes();
@@ -1179,7 +1245,7 @@ async function backendFetch(url, options = {}) {
 async function refreshData() {
   const button = document.querySelector("#refreshButton");
   button.disabled = true;
-  button.textContent = "Verversen…";
+  button.textContent = "Bezig…";
   try {
     const separator = CONFIG.dataUrl.includes("?") ? "&" : "?";
     const response = await backendFetch(`${CONFIG.dataUrl}${separator}t=${Date.now()}`, { cache: "no-store" });
@@ -1199,7 +1265,7 @@ async function refreshData() {
     document.querySelector("#syncText").textContent = `${error.message} — bestaande gegevens blijven staan`;
   } finally {
     button.disabled = false;
-    button.textContent = "Nu verversen";
+    button.textContent = "Ververs";
   }
 }
 
@@ -1276,6 +1342,20 @@ if (historyDetails) {
   });
 }
 
+document.querySelector("#backToAutoButton")?.addEventListener("click", () => {
+  state.manualRoute = null;
+  state.selected.clear();
+  activeMapRouteIndex = 0;
+  rebuildPlanning();
+});
+
+// Leaflet draws into a hidden box as zero by zero, so the map is resized the
+// moment its fold opens.
+document.querySelector("#mapDetails")?.addEventListener("toggle", () => {
+  if (document.querySelector("#mapDetails").open) renderPlanningOverview();
+});
+
+renderRules();
 ensureOperatorKey();
 refreshData();
 setInterval(refreshData, CONFIG.refreshMs);

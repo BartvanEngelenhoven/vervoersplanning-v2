@@ -3,109 +3,98 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Experimenteel dashboard voor automatische selectie en ritvoorstellen." />
-    <title>Vervoersplanning V2</title>
+    <meta name="description" content="Dagplanning voor eigen bezorging vanuit Shopify." />
+    <title>Vervoersplanning</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3029'/%3E%3Cpath d='M13 37h31l6 7v7H13z' fill='%23f3b43f'/%3E%3Ccircle cx='23' cy='51' r='6' fill='%23f7f3e8'/%3E%3Ccircle cx='45' cy='51' r='6' fill='%23f7f3e8'/%3E%3Cpath d='M18 14h28v21H18z' fill='%23f7f3e8'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header class="topbar">
-      <div class="brand" aria-label="Vervoersplanning V2">
-        <span class="brand-mark">VR</span>
-        <span><strong>Vervoersplanning</strong><small>V2 experiment</small></span>
-      </div>
-      <div class="business-logos" aria-label="Aangesloten webshops">
-        <span class="business-logo rijplaten" aria-label="De Rijplaten Specialist"><img src="assets/rijplaten-logo.svg" alt="" /></span>
-        <span class="business-logo slowfeeder" aria-label="De Slowfeeder Specialist"><img src="assets/slowfeeder-logo.png" alt="" /></span>
-      </div>
+      <div class="brand"><strong>Vervoersplanning</strong><span id="todayLabel"></span></div>
       <div class="top-actions">
-        <span class="mode-pill"><span></span> Alleen-lezen</span>
-        <button id="refreshButton" class="button secondary" type="button">Nu verversen</button>
+        <span id="syncText" class="sync-text">Gegevens laden…</span>
+        <button id="refreshButton" class="button secondary" type="button">Ververs</button>
       </div>
     </header>
 
     <main>
-      <section class="intro" aria-labelledby="page-title">
-        <div>
-          <p class="eyebrow">Automatische bezorgselectie</p>
-          <h1 id="page-title">Wat moet mee, en in welke rit?</h1>
-          <p class="intro-copy">V2 beoordeelt iedere order met vaste regels, maakt uitlegbare ritvoorstellen en kan na levering Shopify bijwerken.</p>
-        </div>
-        <div class="sync-card">
-          <span class="sync-dot" aria-hidden="true"></span>
-          <div><b>Gegevens actief</b><span id="syncText">Voorbeelddata wordt geladen…</span></div>
-        </div>
+      <section id="dayBar" class="day-bar">
+        <h1 id="dayLine" class="day-line">Planning laden…</h1>
+        <section id="summary" class="summary" aria-label="Wat er vandaag ligt"></section>
+        <p id="summaryRest" class="summary-rest"></p>
       </section>
 
-      <section id="summary" class="summary" aria-label="Samenvatting"></section>
+      <section id="manualRouteBar" class="notice-bar" hidden>
+        <p><strong>Je bewerkt één rit handmatig.</strong> De andere ritten zijn zolang verborgen. Handmatig toegevoegde orders blijven staan, ook hun tag in Shopify.</p>
+        <button id="backToAutoButton" class="button primary" type="button">Toon weer alle ritten</button>
+      </section>
 
-      <section class="panel planning-panel" aria-labelledby="planning-title">
+      <section class="panel route-panel" aria-labelledby="route-title">
+        <div class="panel-heading compact">
+          <div><p class="eyebrow">Stap 1</p><h2 id="route-title">Ritten van vandaag</h2></div>
+        </div>
+        <div id="suggestions" class="suggestions"></div>
+        <div id="routes"></div>
+      </section>
+
+      <section class="panel map-panel">
+        <details id="mapDetails">
+          <summary class="panel-heading compact">
+            <div><p class="eyebrow">Stap 2</p><h2>Op de kaart</h2></div>
+            <span class="fold-hint">kaart tonen</span>
+          </summary>
+          <div class="view-toggle" role="group" aria-label="Weergave kiezen">
+            <button id="showMapButton" class="active" type="button">Rit op kaart</button>
+            <button id="showAllOrdersMapButton" type="button">Alle orders</button>
+            <button id="showRoutesButton" type="button">Ritten naast elkaar</button>
+          </div>
+          <div id="mapView" class="map-view"></div>
+          <div id="routesOverview" class="routes-overview" hidden></div>
+        </details>
+      </section>
+
+      <section class="panel orders-panel">
         <div class="panel-heading">
           <div>
-            <p class="eyebrow">Overzicht</p>
-            <h2 id="planning-title">Kaart & ritten</h2>
+            <p class="eyebrow">Stap 3</p>
+            <h2>Alle orders</h2>
           </div>
-          <div class="view-toggle" role="group" aria-label="Weergave kiezen">
-            <button id="showMapButton" class="active" type="button">Kaart</button>
-            <button id="showAllOrdersMapButton" type="button">Alle orders</button>
-            <button id="showRoutesButton" type="button">Laat ritten zien</button>
+          <div class="filters">
+            <label class="search"><span>Zoeken</span><input id="searchInput" type="search" placeholder="Order, klant of plaats" /></label>
+            <label><span>Status</span><select id="decisionFilter"><option value="all">Alles</option><option value="include">Meenemen</option><option value="review">Controleren</option><option value="dhl">DHL</option><option value="far">Te ver</option><option value="exclude">Niet meenemen</option></select></label>
           </div>
         </div>
-        <div id="mapView" class="map-view"></div>
-        <div id="routesOverview" class="routes-overview" hidden></div>
-      </section>
-
-      <section class="workspace">
-        <div class="panel orders-panel">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Beslislijst</p>
-              <h2>Orders</h2>
-            </div>
-            <div class="filters">
-              <label class="search"><span>Zoeken</span><input id="searchInput" type="search" placeholder="Order, klant of plaats" /></label>
-              <label><span>Status</span><select id="decisionFilter"><option value="all">Alles</option><option value="include">Meenemen</option><option value="review">Controleren</option><option value="dhl">DHL</option><option value="far">Te ver</option><option value="exclude">Niet meenemen</option></select></label>
-            </div>
+        <div id="selectionBar" class="selection-bar" hidden>
+          <strong class="selection-count">0 geselecteerd</strong>
+          <div>
+            <button id="makeRouteButton" class="button manual-action" type="button">Maak rit met selectie</button>
+            <button id="markSelectedDeliveredButton" class="button ghost" type="button">Selectie bezorgd</button>
+            <button id="clearSelectionButton" class="button subtle-action" type="button">Leeg selectie</button>
           </div>
-          <div id="selectionBar" class="selection-bar" hidden>
-            <strong class="selection-count">0 geselecteerd</strong>
-            <div>
-              <button id="makeRouteButton" class="button manual-action" type="button">Maak route met selectie</button>
-              <button id="markSelectedDeliveredButton" class="button ghost" type="button">Selectie bezorgd</button>
-              <button id="clearSelectionButton" class="button subtle-action" type="button">Leeg selectie</button>
-            </div>
-          </div>
-          <div id="ordersBody" class="order-list"></div>
-          <p id="emptyState" class="empty" hidden>Geen orders gevonden met deze filters.</p>
         </div>
-
-        <aside class="panel route-panel" aria-labelledby="route-title">
-          <div class="panel-heading compact">
-            <div><p class="eyebrow">Automatisch voorstel</p><h2 id="route-title">Ritten</h2></div>
-          </div>
-          <div id="suggestions" class="suggestions"></div>
-          <div id="routes"></div>
-        </aside>
+        <div id="ordersBody" class="order-list"></div>
+        <p id="emptyState" class="empty" hidden>Geen orders gevonden met deze filters.</p>
       </section>
 
       <section class="panel history-panel" aria-labelledby="history-title">
         <details id="historyDetails">
           <summary class="panel-heading compact">
-            <div><p class="eyebrow">Historie</p><h2 id="history-title">Bezorgd gemeld</h2></div>
+            <div><p class="eyebrow">Achteraf</p><h2 id="history-title">Bezorgd gemeld</h2></div>
             <span class="history-count" id="historyCount"></span>
           </summary>
           <div id="history" class="history-list"></div>
         </details>
       </section>
 
-      <section class="panel rules-panel" aria-labelledby="rules-title">
-        <div><p class="eyebrow">Transparante logica</p><h2 id="rules-title">Actieve selectieregels</h2></div>
-        <div class="rules-grid">
-          <article><b>Meenemen</b><p>Betaald, bezorgproduct, compleet adres, niet geannuleerd en nog niet bezorgd.</p></article>
-          <article><b>Controleren</b><p>Ontbrekende info, onbetaald als optie, of afgestemde klantafspraak.</p></article>
-          <article><b>Routegrens</b><p>Ritten starten en eindigen in Ede. Boven 5:30 uur wordt actief gewaarschuwd.</p></article>
-        </div>
+      <section class="panel rules-panel">
+        <details id="rulesDetails">
+          <summary class="panel-heading compact">
+            <div><p class="eyebrow">Naslag</p><h2>Hoe de planning kiest</h2></div>
+            <span class="fold-hint">uitleg tonen</span>
+          </summary>
+          <div id="rulesBody" class="rules-grid"></div>
+        </details>
       </section>
     </main>
 

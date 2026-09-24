@@ -138,7 +138,7 @@ h2 { margin-bottom: 0; font-size: 1.35rem; letter-spacing: -.025em; }
 .route-overview-actions { display: flex; flex-wrap: wrap; gap: .45rem; }
 .route-overview-card .button { justify-self: start; }
 
-.workspace { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(320px, .8fr); gap: .8rem; align-items: start; }
+
 .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
 .panel-heading { display: flex; align-items: end; justify-content: space-between; gap: 1rem; padding: 1.2rem 1.25rem; border-bottom: 1px solid var(--line); }
 .panel-heading.compact { align-items: center; }
@@ -262,3 +262,59 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
 
 .mark-delivered { margin-left: .4rem; border: 1px solid var(--line); border-radius: 999px; background: white; color: var(--brand); padding: .2rem .55rem; font-size: .78rem; font-weight: 750; }
 .mark-delivered:disabled { opacity: .65; cursor: progress; }
+
+
+/* ---- Herontwerp: dagregel, tellers, stapblokken ---- */
+.topbar { min-height: 56px; }
+.brand { display: flex; align-items: baseline; gap: .6rem; }
+.brand strong { font-size: 1.05rem; }
+#todayLabel { color: #b9c9c2; font-size: .85rem; }
+.sync-text { color: #b9c9c2; font-size: .82rem; }
+
+.day-bar { padding: 1.1rem 0 .4rem; }
+.day-line { margin: 0 0 .9rem; font-size: clamp(1.25rem, 3.2vw, 1.8rem); line-height: 1.2; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .7rem; }
+.metric { display: flex; flex-direction: column; gap: .1rem; padding: .85rem 1rem; text-align: left;
+  border: 1px solid var(--line); border-left: 5px solid var(--line); border-radius: 12px;
+  background: var(--paper); cursor: pointer; font: inherit; color: inherit; }
+.metric:hover { border-color: var(--brand-2); }
+.metric strong { font-size: 1.9rem; line-height: 1.1; }
+.metric span { font-weight: 700; font-size: .92rem; }
+.metric small { color: var(--muted); font-size: .78rem; }
+.metric.include { border-left-color: var(--good); }
+.metric.review { border-left-color: var(--accent); }
+.metric.urgent { border-left-color: var(--bad); }
+.metric.leeg { opacity: .55; }
+.metric.leeg strong { color: var(--muted); }
+.summary-rest { margin: .7rem 0 0; color: var(--muted); font-size: .85rem; }
+
+.notice-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+  margin: 0 0 1rem; padding: .9rem 1.1rem; border-radius: 12px;
+  border: 1px solid #e6c766; background: #fdf6e0; }
+.notice-bar[hidden] { display: none; }
+.notice-bar p { margin: 0; font-size: .9rem; }
+
+.map-panel summary, .rules-panel summary { cursor: pointer; list-style: none; user-select: none; }
+.map-panel summary::-webkit-details-marker, .rules-panel summary::-webkit-details-marker { display: none; }
+.map-panel summary:hover, .rules-panel summary:hover { background: #f6f8f5; }
+.fold-hint { color: var(--muted); font-size: .85rem; font-weight: 650; white-space: nowrap; }
+.fold-hint::after { content: " ▾"; }
+details[open] > summary .fold-hint::after { content: " ▴"; }
+
+/* Raakvlakken die op een telefoon te raken zijn */
+.mark-delivered, .remove-route-stop, .force-include, .clear-force-include {
+  min-height: 40px; min-width: 40px; padding: .45rem .8rem; }
+.route-stops .mark-delivered { min-height: 44px; padding: .5rem 1rem; font-weight: 700; }
+
+/* Categorie ook zonder kleur herkenbaar */
+.badge::before { font-weight: 900; margin-right: .35rem; }
+.badge.include::before { content: "✓"; }
+.badge.review::before { content: "!"; }
+.badge.dhl::before { content: "▣"; }
+.badge.far::before { content: "»"; }
+.badge.exclude::before { content: "×"; }
+
+@media (max-width: 720px) {
+  .metric strong { font-size: 1.6rem; }
+  .notice-bar { flex-direction: column; align-items: stretch; }
+}
