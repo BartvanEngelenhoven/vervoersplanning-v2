@@ -27,8 +27,8 @@ button, select { cursor: pointer; }
 .brand small { color: #b9c8c3; font-size: .78rem; }
 .business-logos { gap: .5rem; margin-left: auto; }
 .business-logo, .shop-chip { display: inline-flex; align-items: center; gap: .45rem; border-radius: 999px; font-weight: 850; white-space: nowrap; }
-.business-logo { min-height: 44px; padding: .5rem .75rem; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.1); color: #eff7f4; font-size: .78rem; }
-.business-logo.slowfeeder { background: rgba(255,255,255,.94); border-color: rgba(255,255,255,.55); }
+.business-logo { min-height: 44px; padding: .5rem .75rem; border: 1px solid rgba(255,255,255,.28); background: #f8fbf9; color: #0d3029; font-size: .78rem; box-shadow: 0 10px 24px rgba(0,0,0,.1); }
+.business-logo.slowfeeder { background: #315322; border-color: rgba(255,255,255,.34); }
 .business-logo img, .shop-chip img { display: block; object-fit: contain; flex: 0 0 auto; }
 .business-logo img { width: auto; max-width: 168px; height: 28px; }
 .business-logo.slowfeeder img { height: 34px; max-width: 190px; }
@@ -152,8 +152,8 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
 .order-side { display: grid; align-content: start; gap: .55rem; }
 .order-side span { display: block; padding: .55rem .65rem; border-radius: 10px; background: #f4f7f4; color: var(--muted); font-size: .8rem; }
 .order-side b { display: block; color: var(--ink); font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; }
-.shop-chip { min-width: 88px; max-width: 130px; justify-content: center; padding: .28rem .5rem; background: #eef4f1; color: #234d42; font-size: .72rem; }
-.shop-chip.slowfeeder { background: #fff8e8; color: #664410; }
+.shop-chip { min-width: 88px; max-width: 130px; justify-content: center; padding: .28rem .5rem; background: #f8fbf9; color: #234d42; font-size: .72rem; }
+.shop-chip.slowfeeder { background: #315322; color: white; }
 .shop-chip img { max-width: 96px; height: 21px; }
 .shop-chip.slowfeeder img { max-width: 108px; height: 26px; }
 .subtle { display: block; color: var(--muted); font-size: .8rem; }
