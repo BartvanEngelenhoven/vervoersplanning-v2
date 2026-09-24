@@ -27,6 +27,7 @@ const KM_TO_MINUTES = 1.15;
 let planningView = "map";
 let activeMapRouteIndex = 0;
 let activeLooseOrderKey = "";
+let allOrdersLeafletMap = null;
 
 function decide(order) {
   if (order.cancelled) return { decision: "exclude", reason: "Order is geannuleerd" };
@@ -289,25 +290,7 @@ function renderAllOrdersMap(holder) {
     holder.innerHTML = '<p class="empty">Geen losse open orders om op Google Maps te tonen.</p>';
     return;
   }
-  const orderRows = openOrders.map((order) => {
-    const decision = state.decisions.find((item) => item.order === order)?.decision || "exclude";
-    const position = mapPosition(order);
-    return `<a class="map-pin order-map-point ${decision}" style="left:${position.x}%; top:${position.y}%;" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer" aria-label="${order.id} ${order.city || ""} bekijken in Google Maps">
-      <span class="order-point-popover">
-        <b>${order.id} · ${order.customer || "Onbekende klant"}</b>
-        <span>${productSummary(order)}</span>
-        <span>${addressSummary(order)}</span>
-        <small>${order.paymentStatus || (order.paid ? "Betaald" : "In afwachting")} · uiterlijk ${formatDate(order.dueDate)}</small>
-      </span>
-    </a>`;
-  }).join("");
-  const depot = mapPositionFromPoint(DEPOT_POINT);
-  holder.innerHTML = `<div class="map-board all-orders-board">
-    <span class="map-country nl">Nederland</span>
-    <span class="map-country be">België</span>
-    <span class="map-depot" style="left:${depot.x}%; top:${depot.y}%;">Ede</span>
-    ${orderRows}
-  </div>
+  holder.innerHTML = `<div id="allOrdersMap" class="real-orders-map" aria-label="Echte kaart met open orders"></div>
   <div class="map-side">
     <div class="map-route-summary">
       <b>Alle open orders op kaart</b>
@@ -320,6 +303,63 @@ function renderAllOrdersMap(holder) {
       <span><i class="map-dot exclude"></i> Niet meenemen</span>
     </div>
   </div>`;
+  renderLeafletOrderMap(openOrders);
+}
+
+function renderLeafletOrderMap(openOrders) {
+  const mapElement = document.querySelector("#allOrdersMap");
+  if (!mapElement || !window.L) {
+    mapElement.innerHTML = '<p class="empty">Kaart wordt geladen. Ververs als hij niet verschijnt.</p>';
+    return;
+  }
+  if (allOrdersLeafletMap) {
+    allOrdersLeafletMap.remove();
+    allOrdersLeafletMap = null;
+  }
+  allOrdersLeafletMap = L.map(mapElement, { scrollWheelZoom: false });
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 18,
+    attribution: "&copy; OpenStreetMap",
+  }).addTo(allOrdersLeafletMap);
+
+  const markerPoints = [[DEPOT_POINT.lat, DEPOT_POINT.lon]];
+  L.circleMarker([DEPOT_POINT.lat, DEPOT_POINT.lon], {
+    radius: 7,
+    color: "#ffffff",
+    weight: 2,
+    fillColor: "#0d3029",
+    fillOpacity: 1,
+  }).addTo(allOrdersLeafletMap).bindTooltip("Goorsteeg 46, Ede");
+
+  openOrders.forEach((order) => {
+    const point = orderPoint(order);
+    const decision = state.decisions.find((item) => item.order === order)?.decision || "exclude";
+    markerPoints.push([point.lat, point.lon]);
+    L.circleMarker([point.lat, point.lon], {
+      radius: 7,
+      color: "#ffffff",
+      weight: 2,
+      fillColor: markerColor(decision),
+      fillOpacity: 1,
+    }).addTo(allOrdersLeafletMap).bindTooltip(orderTooltip(order), {
+      direction: "top",
+      opacity: 1,
+      sticky: true,
+    });
+  });
+
+  allOrdersLeafletMap.fitBounds(markerPoints, { padding: [32, 32], maxZoom: 8 });
+  setTimeout(() => allOrdersLeafletMap?.invalidateSize(), 0);
+}
+
+function markerColor(decision) {
+  if (decision === "include") return "#168a54";
+  if (decision === "review") return "#c7810c";
+  return "#b94a3f";
+}
+
+function orderTooltip(order) {
+  return `<b>${order.id} · ${order.customer || "Onbekende klant"}</b><br>${productSummary(order)}<br>${addressSummary(order)}<br>${order.paymentStatus || (order.paid ? "Betaald" : "In afwachting")} · uiterlijk ${formatDate(order.dueDate)}`;
 }
 
 function renderRoutesOverview() {
