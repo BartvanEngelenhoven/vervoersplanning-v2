@@ -39,6 +39,21 @@
 
       <section id="summary" class="summary" aria-label="Samenvatting"></section>
 
+      <section class="panel planning-panel" aria-labelledby="planning-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Overzicht</p>
+            <h2 id="planning-title">Kaart & ritten</h2>
+          </div>
+          <div class="view-toggle" role="group" aria-label="Weergave kiezen">
+            <button id="showMapButton" class="active" type="button">Kaart</button>
+            <button id="showRoutesButton" type="button">Laat ritten zien</button>
+          </div>
+        </div>
+        <div id="mapView" class="map-view"></div>
+        <div id="routesOverview" class="routes-overview" hidden></div>
+      </section>
+
       <section class="workspace">
         <div class="panel orders-panel">
           <div class="panel-heading">

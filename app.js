@@ -20,6 +20,7 @@ const businessClasses = {
 const forcedIncludes = new Set(JSON.parse(localStorage.getItem(forcedIncludeKey) || "[]"));
 const DEPOT_POINT = { lat: 52.05, lon: 5.67 };
 const KM_TO_MINUTES = 1.15;
+let planningView = "map";
 
 function decide(order) {
   if (order.cancelled) return { decision: "exclude", reason: "Order is geannuleerd" };
@@ -151,6 +152,10 @@ function routeWarning(route) {
   return `Te lang: ${route.overByMinutes} min boven 5:30 uur; apart plannen of uitzondering bespreken`;
 }
 
+function routeMinutesFromDepot(order) {
+  return `heen/terug ca. ${formatMinutes(routeDriveMinutes([order]))}`;
+}
+
 function formatMinutes(minutes) {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
@@ -179,6 +184,69 @@ function renderSummary() {
     ["Geselecteerd", state.selected.size, "Handmatig gekozen orders"],
   ];
   document.querySelector("#summary").innerHTML = metrics.map(([label, value, text]) => `<article class="metric"><span>${label}</span><strong>${value}</strong><small>${text}</small></article>`).join("");
+}
+
+function renderPlanningOverview() {
+  renderPlanningMap();
+  renderRoutesOverview();
+  const mapView = document.querySelector("#mapView");
+  const routesOverview = document.querySelector("#routesOverview");
+  const showMapButton = document.querySelector("#showMapButton");
+  const showRoutesButton = document.querySelector("#showRoutesButton");
+  if (!mapView || !routesOverview || !showMapButton || !showRoutesButton) return;
+  mapView.hidden = planningView !== "map";
+  routesOverview.hidden = planningView !== "routes";
+  showMapButton.classList.toggle("active", planningView === "map");
+  showRoutesButton.classList.toggle("active", planningView === "routes");
+}
+
+function renderPlanningMap() {
+  const holder = document.querySelector("#mapView");
+  if (!holder) return;
+  if (!state.decisions.length) {
+    holder.innerHTML = '<p class="empty">Nog geen orders om op de kaart te tonen.</p>';
+    return;
+  }
+  const pins = state.decisions.map((item) => {
+    const position = mapPosition(item.order);
+    return `<button class="map-pin ${item.decision}" type="button" style="left:${position.x}%; top:${position.y}%;" title="${item.order.id} · ${item.order.city}">
+      <span>${pinLabel(item.order)}</span>
+    </button>`;
+  }).join("");
+  const list = state.decisions.map((item) => `<li>
+    <span class="map-dot ${item.decision}"></span>
+    <b>${item.order.id}</b>
+    <span>${item.order.city || "Plaats onbekend"}</span>
+    <small>${decisionLabels[item.decision]} · ${routeMinutesFromDepot(item.order)}</small>
+  </li>`).join("");
+  holder.innerHTML = `<div class="map-board" aria-label="Kaart met bestellingen">
+    <div class="map-country nl">Nederland</div>
+    <div class="map-country be">België</div>
+    <div class="map-depot" style="left:${mapPositionFromPoint(DEPOT_POINT).x}%; top:${mapPositionFromPoint(DEPOT_POINT).y}%;">Ede</div>
+    ${pins}
+  </div>
+  <div class="map-side">
+    <div class="map-legend">
+      <span><i class="map-dot include"></i>Meenemen</span>
+      <span><i class="map-dot review"></i>Controleren</span>
+      <span><i class="map-dot exclude"></i>Niet meenemen</span>
+    </div>
+    <ol class="map-order-list">${list}</ol>
+  </div>`;
+}
+
+function renderRoutesOverview() {
+  const holder = document.querySelector("#routesOverview");
+  if (!holder) return;
+  if (!state.routes.length) {
+    holder.innerHTML = '<p class="empty">Nog geen ritten om te tonen.</p>';
+    return;
+  }
+  holder.innerHTML = state.routes.map((route, index) => `<article class="route-overview-card">
+    <div><b>${index + 1}. ${route.region}</b><span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span></div>
+    <ol>${route.orders.map((order) => `<li>${order.city || "Plaats onbekend"} · ${order.id} · ${productSummary(order)}</li>`).join("")}</ol>
+    <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open in Maps</a>
+  </article>`).join("");
 }
 
 function renderOrders() {
@@ -414,6 +482,25 @@ function distanceKm(a, b) {
   return Math.sqrt(latKm ** 2 + lonKm ** 2);
 }
 
+function mapPosition(order) {
+  return mapPositionFromPoint(orderPoint(order));
+}
+
+function mapPositionFromPoint(point) {
+  const bounds = { minLat: 50.0, maxLat: 53.6, minLon: 2.8, maxLon: 7.3 };
+  const x = clamp(((point.lon - bounds.minLon) / (bounds.maxLon - bounds.minLon)) * 100, 4, 96);
+  const y = clamp((1 - ((point.lat - bounds.minLat) / (bounds.maxLat - bounds.minLat))) * 100, 4, 96);
+  return { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10 };
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function pinLabel(order) {
+  return order.webshop === "De Rijplaten Specialist" ? "DR" : "SF";
+}
+
 function bearingFromDepot(point) {
   const y = Math.sin(toRad(point.lon - DEPOT_POINT.lon)) * Math.cos(toRad(point.lat));
   const x = Math.cos(toRad(DEPOT_POINT.lat)) * Math.sin(toRad(point.lat))
@@ -566,6 +653,7 @@ function rebuildPlanning() {
   state.decisions = state.orders.map((order) => ({ order, ...applyManualDecision(order, decide(order)) }));
   state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
   renderSummary();
+  renderPlanningOverview();
   renderOrders();
   renderRoutes();
 }
@@ -661,5 +749,13 @@ document.querySelector("#decisionFilter").addEventListener("change", renderOrder
 document.querySelector("#makeRouteButton")?.addEventListener("click", makeRouteFromSelection);
 document.querySelector("#markSelectedDeliveredButton")?.addEventListener("click", markSelectedDelivered);
 document.querySelector("#clearSelectionButton")?.addEventListener("click", clearSelection);
+document.querySelector("#showMapButton")?.addEventListener("click", () => {
+  planningView = "map";
+  renderPlanningOverview();
+});
+document.querySelector("#showRoutesButton")?.addEventListener("click", () => {
+  planningView = "routes";
+  renderPlanningOverview();
+});
 refreshData();
 setInterval(refreshData, CONFIG.refreshMs);
