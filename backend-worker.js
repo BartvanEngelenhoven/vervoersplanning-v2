@@ -66,6 +66,10 @@ export default {
       return setOwnDelivery(request, env);
     }
 
+    if (request.method === "POST" && url.pathname === "/actions/sync-shopify") {
+      return syncShopify(request, env);
+    }
+
     if (request.method === "POST" && url.pathname === "/routes/estimate") {
       return estimateRoute(request, env);
     }
@@ -103,16 +107,23 @@ async function receiveShopifyOrder(request, env) {
   }
 
   const shopifyOrder = JSON.parse(rawBody);
+  const planningOrder = await storeShopifyOrder(env, shopifyOrder, shopDomain);
+
+  return json({ ok: true, id: planningOrder.id }, 200, env);
+}
+
+async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
   const planningOrder = mapShopifyOrder(shopifyOrder, shopDomain);
   const storageKey = orderStorageKey(planningOrder);
+  const historyKey = `delivered:${shopDomain}:${planningOrder.id}`;
 
   if (planningOrder.fulfilled) {
     const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
-    await env.PLANNING_ORDERS.put(`delivered:${shopDomain}:${planningOrder.id}`, JSON.stringify({
+    await env.PLANNING_ORDERS.put(historyKey, JSON.stringify({
       id: planningOrder.id,
       shopDomain,
       shopifyOrderId: planningOrder.shopifyOrderId,
-      order: storedOrder || planningOrder,
+      order: storedOrder ? { ...planningOrder, ...storedOrder, products: planningOrder.products } : planningOrder,
       fulfillment: null,
       deliveredAt: shopifyFulfilledAt(shopifyOrder) || new Date().toISOString(),
       source: "shopify",
@@ -122,9 +133,10 @@ async function receiveShopifyOrder(request, env) {
     await env.PLANNING_ORDERS.delete(storageKey);
   } else {
     await env.PLANNING_ORDERS.put(storageKey, JSON.stringify(planningOrder));
+    await env.PLANNING_ORDERS.delete(historyKey);
   }
 
-  return json({ ok: true, id: planningOrder.id }, 200, env);
+  return planningOrder;
 }
 
 async function markDelivered(request, env) {
@@ -300,6 +312,74 @@ async function appendOrderPlanningNote(shopDomain, token, shopifyOrderId, lines)
   } catch {
     // Planning notes are useful context, but should not block delivery actions.
   }
+}
+
+async function syncShopify(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
+  const url = new URL(request.url);
+  const payload = await request.json().catch(() => ({}));
+  const days = Math.min(Math.max(Number(payload.days || 7), 1), 60);
+  const requestedShop = normalizeShopDomain(payload.shopDomain);
+  const shops = requestedShop ? [requestedShop] : await installedShopDomains(env);
+  const updatedAtMin = new Date(Date.now() - days * 86_400_000).toISOString();
+  const results = [];
+
+  for (const shopDomain of shops) {
+    const token = await shopifyAdminToken(env, shopDomain);
+    if (!token) {
+      results.push({ shopDomain, ok: false, error: "Geen Shopify token gevonden" });
+      continue;
+    }
+
+    await registerShopifyWebhooks(shopDomain, token, url.origin);
+    const orders = await fetchRecentShopifyOrders(shopDomain, token, updatedAtMin);
+    let open = 0;
+    let delivered = 0;
+    for (const order of orders) {
+      const planningOrder = await storeShopifyOrder(env, order, shopDomain);
+      if (planningOrder.fulfilled) delivered += 1;
+      else if (!planningOrder.cancelled) open += 1;
+    }
+    results.push({ shopDomain, ok: true, checked: orders.length, open, delivered });
+  }
+
+  return json({ ok: true, days, results }, 200, env);
+}
+
+async function installedShopDomains(env) {
+  const list = await env.PLANNING_ORDERS.list({ prefix: "shop-install:" });
+  return list.keys.map((key) => key.name.replace("shop-install:", "")).filter(Boolean);
+}
+
+async function fetchRecentShopifyOrders(shopDomain, token, updatedAtMin) {
+  const orders = [];
+  let url = new URL(`https://${shopDomain}/admin/api/2026-07/orders.json`);
+  url.searchParams.set("status", "any");
+  url.searchParams.set("limit", "250");
+  url.searchParams.set("updated_at_min", updatedAtMin);
+
+  for (let page = 0; page < 5 && url; page += 1) {
+    const response = await fetch(url.toString(), {
+      headers: {
+        "content-type": "application/json",
+        "x-shopify-access-token": token,
+      },
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(JSON.stringify(data));
+    orders.push(...(Array.isArray(data.orders) ? data.orders : []));
+    url = nextShopifyPageUrl(response.headers.get("link"));
+  }
+
+  return orders;
+}
+
+function nextShopifyPageUrl(linkHeader) {
+  if (!linkHeader) return null;
+  const next = linkHeader.split(",").find((part) => part.includes('rel="next"'));
+  const match = next?.match(/<([^>]+)>/);
+  return match ? new URL(match[1]) : null;
 }
 
 async function estimateRoute(request, env) {
