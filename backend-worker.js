@@ -18,7 +18,7 @@
  * - SHOPIFY_CLIENT_ID_<SHOP_DOMAIN>: optional per-shop Shopify app client ID
  * - SHOPIFY_CLIENT_SECRET_<SHOP_DOMAIN>: optional per-shop Shopify app secret
  * - SHOPIFY_ADMIN_TOKEN_<SHOP_DOMAIN>: optional legacy per-shop Admin API token for marking orders fulfilled
- * - GOOGLE_MAPS_API_KEY: optional Google Maps key for future precise route calculations
+ * - GOOGLE_MAPS_API_KEY: optional Google Routes key; without it the planning falls back to estimates
  */
 
 const JSON_HEADERS = {
@@ -72,6 +72,18 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/routes/estimate") {
       return estimateRoute(request, env);
+    }
+
+    if (request.method === "GET" && url.pathname === "/plan") {
+      return getPlan(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/plan/assign") {
+      return assignPlanRoute(request, env);
+    }
+
+    if (request.method === "POST" && url.pathname === "/plan/remove") {
+      return removePlanRoute(request, env);
     }
 
     return json({ error: "Not found" }, 404, env);
@@ -384,6 +396,76 @@ function nextShopifyPageUrl(linkHeader) {
   const next = linkHeader.split(",").find((part) => part.includes('rel="next"'));
   const match = next?.match(/<([^>]+)>/);
   return match ? new URL(match[1]) : null;
+}
+
+// A planned route is its own record, plan:<date>:<id>, never one record per day.
+// The planner on a laptop and the driver on a phone both write here, and KV has
+// no transactions: a shared per-day record would let one silently overwrite the
+// other's route. The date is whatever the browser calls today in Dutch local
+// time and is only ever compared as text, so the worker's UTC clock cannot shift
+// a route onto the wrong day.
+const PLAN_PREFIX = "plan:";
+
+function isPlanDate(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+async function getPlan(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
+  const from = new URL(request.url).searchParams.get("from");
+  const list = await env.PLANNING_ORDERS.list({ prefix: PLAN_PREFIX });
+  const wanted = list.keys
+    .map((key) => key.name)
+    .filter((name) => !isPlanDate(from) || name.slice(PLAN_PREFIX.length, PLAN_PREFIX.length + 10) >= from);
+
+  const routes = (await Promise.all(wanted.map((name) => env.PLANNING_ORDERS.get(name, "json"))))
+    .filter(Boolean)
+    .sort((a, b) => `${a.date}${a.assignedAt}`.localeCompare(`${b.date}${b.assignedAt}`));
+
+  return json({ routes }, 200, env);
+}
+
+async function assignPlanRoute(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
+  const payload = await request.json().catch(() => ({}));
+  const date = String(payload.date || "");
+  const orderIds = [...new Set((Array.isArray(payload.orderIds) ? payload.orderIds : []).map(String).filter(Boolean))];
+  if (!isPlanDate(date)) return json({ error: "date moet JJJJ-MM-DD zijn" }, 400, env);
+  if (!orderIds.length) return json({ error: "orderIds zijn verplicht" }, 400, env);
+
+  const id = String(payload.id || crypto.randomUUID());
+  const record = {
+    id,
+    date,
+    name: String(payload.name || "Rit").slice(0, 60),
+    orderIds,
+    assignedAt: payload.assignedAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+
+  // Moving a route to another day writes the new record and drops the old one,
+  // so the same route can never sit on two days at once.
+  const previous = String(payload.fromDate || "");
+  if (isPlanDate(previous) && previous !== date) {
+    await env.PLANNING_ORDERS.delete(`${PLAN_PREFIX}${previous}:${id}`);
+  }
+
+  await env.PLANNING_ORDERS.put(`${PLAN_PREFIX}${date}:${id}`, JSON.stringify(record));
+  return json({ route: record }, 200, env);
+}
+
+async function removePlanRoute(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
+  const payload = await request.json().catch(() => ({}));
+  const date = String(payload.date || "");
+  const id = String(payload.id || "");
+  if (!isPlanDate(date) || !id) return json({ error: "date en id zijn verplicht" }, 400, env);
+
+  await env.PLANNING_ORDERS.delete(`${PLAN_PREFIX}${date}:${id}`);
+  return json({ removed: true }, 200, env);
 }
 
 const DEPOT_ADDRESS = "Goorsteeg 46, 6718 XT Ede, Netherlands";

@@ -14,6 +14,10 @@
       <div class="brand"><strong>Vervoersplanning</strong><span id="todayLabel"></span></div>
       <div class="top-actions">
         <span id="syncText" class="sync-text">Gegevens laden…</span>
+        <button id="agendaButton" class="button secondary icon-button" type="button" aria-expanded="false" aria-controls="agendaPanel" title="Agenda">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="16" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 10h18M8 3v4M16 3v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          <span>Agenda</span><span id="agendaCount" class="agenda-count" hidden></span>
+        </button>
         <button id="refreshButton" class="button secondary" type="button">Ververs</button>
       </div>
     </header>
@@ -23,6 +27,14 @@
         <h1 id="dayLine" class="day-line">Planning laden…</h1>
         <section id="summary" class="summary" aria-label="Wat er vandaag ligt"></section>
         <p id="summaryRest" class="summary-rest"></p>
+      </section>
+
+      <section id="agendaPanel" class="panel agenda-panel" hidden aria-label="Agenda">
+        <div class="panel-heading compact">
+          <div><p class="eyebrow">Agenda</p><h2>Ingeplande ritten</h2></div>
+          <button id="agendaCloseButton" class="button subtle-action" type="button">Sluiten</button>
+        </div>
+        <div id="agendaDays" class="agenda-days"></div>
       </section>
 
       <section id="manualRouteBar" class="notice-bar" hidden>

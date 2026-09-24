@@ -16,7 +16,7 @@ const CONFIG = {
   exceptionRouteMinutes: 480,
 };
 
-const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [], driveMinutes: null, driveDepot: "" };
+const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [], plan: [], driveMinutes: null, driveDepot: "" };
 const decisionLabels = { include: "Meenemen", review: "Controleren", dhl: "DHL", far: "Te ver", exclude: "Niet meenemen" };
 
 // Every order brings its own travel budget to the trip and the budgets pool, so
@@ -361,6 +361,127 @@ function renderRules() {
   holder.innerHTML = kaarten.map(([titel, tekst]) => `<article><b>${titel}</b><p>${tekst}</p></article>`).join("");
 }
 
+function renderAgenda() {
+  const holder = document.querySelector("#agendaDays");
+  const teller = document.querySelector("#agendaCount");
+  if (!holder) return;
+
+  const vandaag = isoDay(new Date());
+  const komend = state.plan.filter((planned) => planned.date >= vandaag);
+  if (teller) {
+    teller.textContent = komend.length;
+    teller.hidden = !komend.length;
+  }
+
+  const dagen = [];
+  for (let stap = 0; stap < 14; stap += 1) {
+    const datum = new Date();
+    datum.setDate(datum.getDate() + stap);
+    dagen.push(isoDay(datum));
+  }
+  // A route left on a past day was never driven; it stays visible until someone
+  // deals with it rather than quietly disappearing.
+  const achterstallig = [...new Set(state.plan.filter((p) => p.date < vandaag).map((p) => p.date))].sort();
+
+  holder.innerHTML = [...achterstallig, ...dagen].map((dag) => {
+    const ritten = state.plan.filter((planned) => planned.date === dag);
+    const naam = new Intl.DateTimeFormat("nl-NL", { weekday: "short", day: "numeric", month: "short" }).format(dateFromIso(dag));
+    const label = dag === vandaag ? `${naam} · vandaag` : dag < vandaag ? `${naam} · niet gereden` : naam;
+    return `<article class="agenda-day${dag === vandaag ? " vandaag" : ""}${dag < vandaag ? " achterstallig" : ""}${ritten.length ? "" : " leeg"}">
+      <h3>${label}</h3>
+      ${ritten.length ? ritten.map((planned) => {
+        const status = plannedRouteStatus(planned);
+        const weg = status.verdwenen.length;
+        const waarschuwing = weg
+          ? `<em>${weg} van de ${planned.orderIds.length} orders ${weg === 1 ? "staat" : "staan"} niet meer in de planning</em>`
+          : "";
+        return `<div class="agenda-route">
+          <b>${planned.name}</b>
+          <span>${status.aanwezig.length} ${status.aanwezig.length === 1 ? "stop" : "stops"}</span>
+          ${waarschuwing}
+          <div class="agenda-route-actions">
+            <button class="button primary open-planned" type="button" data-planned="${planned.id}">Rit openen</button>
+            <button class="button subtle-action drop-planned" type="button" data-planned="${planned.id}">Uit agenda</button>
+          </div>
+        </div>`;
+      }).join("") : '<p class="empty">Niets ingepland.</p>'}
+    </article>`;
+  }).join("");
+
+  holder.querySelectorAll(".open-planned").forEach((button) => {
+    button.addEventListener("click", () => openPlannedRoute(state.plan.find((p) => p.id === button.dataset.planned)));
+  });
+  holder.querySelectorAll(".drop-planned").forEach((button) => {
+    button.addEventListener("click", () => removePlannedRoute(state.plan.find((p) => p.id === button.dataset.planned)));
+  });
+}
+
+function openPlannedRoute(planned) {
+  if (!planned) return;
+  const status = plannedRouteStatus(planned);
+  if (!status.aanwezig.length) {
+    window.alert(`Geen van de orders uit "${planned.name}" staat nog in de planning. Ze zijn bezorgd, geannuleerd of vervallen.`);
+    return;
+  }
+
+  const erbij = nearbyAdditions(status.aanwezig);
+  const regels = [`Rit "${planned.name}" van ${formatDate(planned.date)}: ${status.aanwezig.length} stops.`];
+  if (status.verdwenen.length) regels.push(`Vervallen sinds het inplannen: ${status.verdwenen.join(", ")}.`);
+  if (erbij.length) {
+    regels.push("", "Sinds het inplannen zijn deze orders binnengekomen die er makkelijk bij kunnen:");
+    erbij.forEach((k) => regels.push(`  ${k.item.order.id} · ${k.item.order.city} · +${formatMinutes(k.extra)}`));
+    regels.push("", "Wil je die erbij nemen?");
+  }
+
+  const meenemen = erbij.length && window.confirm(regels.join("\n"));
+  if (!erbij.length) window.alert(regels.join("\n"));
+
+  const orders = meenemen ? [...status.aanwezig, ...erbij.map((k) => k.item.order)] : status.aanwezig;
+  for (const order of orders) forcedIncludes.add(orderKey(order));
+  saveForcedIncludes();
+  state.manualRoute = { orders: optimizedStopOrder(orders) };
+  activeMapRouteIndex = 0;
+  sluitAgenda();
+  rebuildPlanning();
+  document.querySelector(".route-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// Picking a day from a short list of names beats a date field: the planner
+// thinks in "woensdag", not in 2026-09-30, and cannot mistype a day this way.
+function planRouteDialog(route) {
+  const keuzes = [];
+  for (let stap = 0; stap < 10; stap += 1) {
+    const datum = new Date();
+    datum.setDate(datum.getDate() + stap);
+    const naam = new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(datum);
+    keuzes.push({ dag: isoDay(datum), label: stap === 0 ? `${naam} (vandaag)` : stap === 1 ? `${naam} (morgen)` : naam });
+  }
+
+  const vraag = [`Rit ${route.region} met ${route.orders.length} stops inplannen.`, "", "Typ het nummer van de dag:"]
+    .concat(keuzes.map((k, i) => `${i + 1}. ${k.label}`))
+    .join("\n");
+
+  let antwoord = null;
+  try {
+    antwoord = window.prompt(vraag, "1");
+  } catch {
+    antwoord = null;
+  }
+  const keuze = keuzes[Number(antwoord) - 1];
+  if (!keuze) return;
+
+  assignRouteToDay(route, keuze.dag).then((gelukt) => {
+    if (gelukt) window.alert(`Rit ${route.region} staat op ${keuze.label}.`);
+  });
+}
+
+function sluitAgenda() {
+  const paneel = document.querySelector("#agendaPanel");
+  const knop = document.querySelector("#agendaButton");
+  if (paneel) paneel.hidden = true;
+  if (knop) knop.setAttribute("aria-expanded", "false");
+}
+
 function renderManualRouteBar() {
   const bar = document.querySelector("#manualRouteBar");
   if (bar) bar.hidden = !state.manualRoute?.orders?.length;
@@ -676,6 +797,12 @@ function renderRoutes() {
     fragment.querySelector(".route-meta").textContent = `${CONFIG.depot} · ${route.orders.length} stops · ruwe rijtijd ${formatMinutes(route.driveMinutes)}`;
     fragment.querySelector(".route-load").textContent = `${route.load.toLocaleString("nl-NL")} kg · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)} · ${routeWarning(route)}`;
     fragment.querySelector(".route-map").href = googleMapsUrl(route.orders);
+    const planKnop = document.createElement("button");
+    planKnop.type = "button";
+    planKnop.className = "button ghost plan-route";
+    planKnop.textContent = "Inplannen";
+    planKnop.addEventListener("click", () => planRouteDialog(route));
+    fragment.querySelector(".route-footer").appendChild(planKnop);
     fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${order.id} uit deze rit halen">−</button><b>${order.city} · ${order.id}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-id="${encodeURIComponent(order.id)}">Bezorgd</button></span></li>`).join("");
     fragment.querySelectorAll(".remove-route-stop").forEach((button) => {
       button.addEventListener("click", () => removeOrderFromRoute(button.dataset.orderKey, index));
@@ -1139,6 +1266,7 @@ function rebuildPlanning() {
   state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
   addNearbyPackages();
   renderSummary();
+  renderAgenda();
   renderManualRouteBar();
   renderPlanningOverview();
   renderOrders();
@@ -1256,6 +1384,7 @@ async function refreshData() {
     // Before rebuildPlanning, because the travel budgets are judged against these.
     state.driveMinutes = await fetchDriveMinutes(state.orders);
     state.history = await fetchHistory();
+    state.plan = await fetchPlan();
     rebuildPlanning();
     renderHistory();
     const klok = new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
@@ -1289,6 +1418,90 @@ async function fetchDriveMinutes(orders) {
   } catch {
     return null;
   }
+}
+
+// A day as the planner's own calendar reads it. Never toISOString(), which would
+// call a route planned for tomorrow evening today whenever the clock is ahead.
+function isoDay(date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+async function fetchPlan() {
+  if (!usesBackend) return [];
+  try {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan?from=${isoDay(new Date())}&t=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) return [];
+    return (await response.json()).routes || [];
+  } catch {
+    return [];
+  }
+}
+
+async function assignRouteToDay(route, date, planned) {
+  const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/assign`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      id: planned?.id,
+      fromDate: planned?.date,
+      date,
+      name: route.region || planned?.name || "Rit",
+      orderIds: route.orders.map((order) => order.id),
+    }),
+  });
+  if (!response.ok) {
+    window.alert("Inplannen mislukt. Probeer het opnieuw.");
+    return false;
+  }
+  state.plan = await fetchPlan();
+  renderAgenda();
+  return true;
+}
+
+async function removePlannedRoute(planned) {
+  if (!window.confirm(`Rit "${planned.name}" van ${formatDate(planned.date)} uit de agenda halen?`)) return;
+  const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/remove`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: planned.id, date: planned.date }),
+  });
+  if (!response.ok) {
+    window.alert("Verwijderen mislukt.");
+    return;
+  }
+  state.plan = await fetchPlan();
+  renderAgenda();
+}
+
+// A route planned on Monday and driven on Wednesday is two days old. Orders in
+// it may have been delivered, cancelled or pulled from the store meanwhile, so
+// the stored numbers are matched against what is in the planning right now.
+function plannedRouteStatus(planned) {
+  const byId = new Map(state.orders.map((order) => [order.id, order]));
+  return {
+    aanwezig: planned.orderIds.map((id) => byId.get(id)).filter(Boolean),
+    verdwenen: planned.orderIds.filter((id) => !byId.has(id)),
+  };
+}
+
+// The point of reopening a planned route: orders that arrived since it was
+// planned and would cost little to pick up while the van is out anyway. Judged
+// against the route as it stands today, not as it stood when it was planned.
+function nearbyAdditions(orders) {
+  if (!orders.length) return [];
+  const inRoute = new Set(orders.map(orderKey));
+  const basis = routeSummary("Ingepland", optimizedStopOrder(orders));
+  const dayLimit = CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
+
+  return state.decisions
+    .filter((item) => !inRoute.has(orderKey(item.order)) && item.decision !== "exclude")
+    .map((item) => {
+      const merged = routeSummary("Ingepland", optimizedStopOrder([...orders, item.order]));
+      return { item, extra: merged.totalMinutes - basis.totalMinutes, totaal: merged.totalMinutes };
+    })
+    .filter((kandidaat) => kandidaat.extra <= CONFIG.packageDetourMinutes && kandidaat.totaal <= dayLimit)
+    .sort((a, b) => a.extra - b.extra)
+    .slice(0, 5);
 }
 
 async function fetchHistory() {
@@ -1354,6 +1567,15 @@ document.querySelector("#backToAutoButton")?.addEventListener("click", () => {
 document.querySelector("#mapDetails")?.addEventListener("toggle", () => {
   if (document.querySelector("#mapDetails").open) renderPlanningOverview();
 });
+
+document.querySelector("#agendaButton")?.addEventListener("click", () => {
+  const paneel = document.querySelector("#agendaPanel");
+  const open = paneel.hidden;
+  paneel.hidden = !open;
+  document.querySelector("#agendaButton").setAttribute("aria-expanded", String(open));
+  if (open) paneel.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+document.querySelector("#agendaCloseButton")?.addEventListener("click", sluitAgenda);
 
 renderRules();
 ensureOperatorKey();
