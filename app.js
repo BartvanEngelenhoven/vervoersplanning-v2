@@ -42,6 +42,11 @@ const alwaysOwnTransportProducts = [
 ];
 const forcedIncludeKey = "vervoersplanning.forceInclude.v1";
 const operatorKeyStorageKey = "vervoersplanning.operatorKey.v1";
+// One-off clean-up of leftovers from before the planning went live: orders due
+// before this date stay out of sight here. Shopify is untouched and the records
+// are still in the store, so this is undone by removing the date. An order due
+// on or after it is never hidden, however far past its deadline it runs.
+const hideOrdersDueBefore = "2026-09-24";
 const usesBackend = Boolean(window.VERVOERSPLANNING_CONFIG?.dataUrl);
 let operatorPromptDeclined = false;
 const businessClasses = {
@@ -1109,7 +1114,8 @@ async function refreshData() {
     const response = await backendFetch(`${CONFIG.dataUrl}${separator}t=${Date.now()}`, { cache: "no-store" });
     if (response.status === 401) throw new Error("Operatorcode ontbreekt of klopt niet");
     if (!response.ok) throw new Error("Data kon niet worden geladen");
-    state.orders = await response.json();
+    const loaded = await response.json();
+    state.orders = loaded.filter((order) => !(order.dueDate && order.dueDate < hideOrdersDueBefore));
     state.history = await fetchHistory();
     rebuildPlanning();
     renderHistory();
