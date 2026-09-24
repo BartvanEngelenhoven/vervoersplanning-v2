@@ -12,3 +12,8 @@ CORS_ORIGIN = "https://bartvanengelenhoven.github.io"
 
 # Set the webhook secret with:
 # wrangler secret put SHOPIFY_WEBHOOK_SECRET
+
+# Version preview URLs keep older deploys reachable on their own hostname.
+# Those older versions predate the operator key and would serve customer
+# data without it, so previews stay off.
+preview_urls = false

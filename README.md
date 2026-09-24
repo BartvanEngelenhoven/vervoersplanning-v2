@@ -46,6 +46,22 @@ Voor live gebruik:
 
 `config.js` bevat geen geheimen. Publiceer nooit Shopify API keys, webhook secrets of ruwe klantgegevens in deze repo.
 
+## Operatorcode beschermt ook het lezen
+
+`/orders` en `/history` geven klantnamen en adressen terug. Beide eisen daarom de
+`OPERATOR_KEY` in de header `x-operator-key`, net als de schrijfacties. De site
+vraagt de code eenmalig en onthoudt hem in de browser.
+
+Twee dingen die hierbij horen:
+
+- **Preview URLs staan uit.** Cloudflare zet standaard elke uitgerolde versie op
+  een eigen adres, bijvoorbeeld `https://<versie>-vervoersplanning-v2-backend...`.
+  Oudere versies van vóór deze beveiliging gaven daar de klantgegevens zonder code
+  vrij. `preview_urls = false` staat daarom in `wrangler.toml`, en de instelling is
+  ook op de Worker zelf uitgezet.
+- **Er zit geen rem op verkeerde pogingen.** Kies daarom een lange code, minstens
+  twaalf tekens. Een korte code is binnen een minuut te raden.
+
 ## Volgende fase
 
 De Shopify-koppeling heeft een beveiligde backend nodig. GitHub Pages blijft het dashboard hosten; de backend bewaart de Shopify-sleutel, verifieert webhooks en geeft alleen de benodigde planninggegevens door.
