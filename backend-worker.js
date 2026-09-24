@@ -28,75 +28,90 @@ const JSON_HEADERS = {
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders(env) });
+    try {
+      return await route(request, env);
+    } catch (error) {
+      // Without this a thrown error comes back as a bare 500 with no CORS
+      // headers, and the browser reports only "Failed to fetch" instead of
+      // anything the planner could act on.
+      console.error(error);
+      return json({ error: "Er ging iets mis op de server. Probeer het zo opnieuw." }, 500, env);
     }
-
-    if (request.method === "GET" && url.pathname === "/orders") {
-      return getOrders(request, env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/history") {
-      return getHistory(request, env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/auth/shopify") {
-      return startShopifyOAuth(request, env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/auth/shopify/callback") {
-      return finishShopifyOAuth(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/webhooks/shopify/orders") {
-      return receiveShopifyOrder(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/actions/mark-delivered") {
-      return markDelivered(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/actions/undo-delivered") {
-      return undoDelivered(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/actions/set-own-delivery") {
-      return setOwnDelivery(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/actions/sync-shopify") {
-      return syncShopify(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/routes/estimate") {
-      return estimateRoute(request, env);
-    }
-
-    if (request.method === "GET" && url.pathname === "/plan") {
-      return getPlan(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/plan/assign") {
-      return assignPlanRoute(request, env);
-    }
-
-    if (request.method === "POST" && url.pathname === "/plan/remove") {
-      return removePlanRoute(request, env);
-    }
-
-    return json({ error: "Not found" }, 404, env);
   },
 };
+
+async function route(request, env) {
+  const url = new URL(request.url);
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders(env) });
+  }
+
+  if (request.method === "GET" && url.pathname === "/orders") {
+    return getOrders(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/history") {
+    return getHistory(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/auth/shopify") {
+    return startShopifyOAuth(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/auth/shopify/callback") {
+    return finishShopifyOAuth(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/webhooks/shopify/orders") {
+    return receiveShopifyOrder(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/actions/mark-delivered") {
+    return markDelivered(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/actions/undo-delivered") {
+    return undoDelivered(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/actions/set-own-delivery") {
+    return setOwnDelivery(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/actions/sync-shopify") {
+    return syncShopify(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/routes/estimate") {
+    return estimateRoute(request, env);
+  }
+
+  if (request.method === "GET" && url.pathname === "/plan") {
+    return getPlan(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/plan/assign") {
+    return assignPlanRoute(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/plan/remove") {
+    return removePlanRoute(request, env);
+  }
+
+  return json({ error: "Not found" }, 404, env);
+}
 
 async function getOrders(request, env) {
   if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
 
   const list = await env.PLANNING_ORDERS.list({ prefix: "order:" });
-  const orders = await Promise.all(
-    list.keys.map(async (key) => JSON.parse(await env.PLANNING_ORDERS.get(key.name)))
-  );
+  // A key listed a moment ago can be gone by the time it is read, when a
+  // webhook deletes a delivered order in between. That reads as null, and one
+  // null used to take the whole list down with it.
+  const orders = (await Promise.all(
+    list.keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json"))
+  )).filter(Boolean);
   orders.sort((a, b) => (a.dueDate || "9999-12-31").localeCompare(b.dueDate || "9999-12-31"));
   return json(orders, 200, env);
 }
@@ -105,9 +120,9 @@ async function getHistory(request, env) {
   if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
 
   const list = await env.PLANNING_ORDERS.list({ prefix: "delivered:" });
-  const entries = await Promise.all(
-    list.keys.map(async (key) => JSON.parse(await env.PLANNING_ORDERS.get(key.name)))
-  );
+  const entries = (await Promise.all(
+    list.keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json"))
+  )).filter(Boolean);
   entries.sort((a, b) => String(b.deliveredAt || "").localeCompare(String(a.deliveredAt || "")));
   return json(entries.slice(0, 50), 200, env);
 }
@@ -431,9 +446,12 @@ async function assignPlanRoute(request, env) {
 
   const payload = await request.json().catch(() => ({}));
   const date = String(payload.date || "");
-  const orderIds = [...new Set((Array.isArray(payload.orderIds) ? payload.orderIds : []).map(String).filter(Boolean))];
+  // A stop is identified by shop and order number together, the way the
+  // planning keys orders everywhere else. The number alone is only unique
+  // while the two shops keep their #DRS and #DSP prefixes apart.
+  const orderKeys = [...new Set((Array.isArray(payload.orderKeys) ? payload.orderKeys : []).map(String).filter((key) => key.includes(":")))];
   if (!isPlanDate(date)) return json({ error: "date moet JJJJ-MM-DD zijn" }, 400, env);
-  if (!orderIds.length) return json({ error: "orderIds zijn verplicht" }, 400, env);
+  if (!orderKeys.length) return json({ error: "orderKeys zijn verplicht" }, 400, env);
 
   const id = String(payload.id || crypto.randomUUID());
   const bestaand = isPlanDate(payload.fromDate)
@@ -446,7 +464,7 @@ async function assignPlanRoute(request, env) {
     number: bestaand?.number || await claimRouteNumber(env),
     date,
     name: String(payload.name || "Rit").slice(0, 60),
-    orderIds,
+    orderKeys,
     assignedAt: bestaand?.assignedAt || payload.assignedAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

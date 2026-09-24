@@ -16,7 +16,7 @@ const CONFIG = {
   exceptionRouteMinutes: 480,
 };
 
-const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [], plan: [], driveMinutes: null, driveDepot: "" };
+const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [], plan: [], allOrders: [], openPlan: null, routeInHand: null, lastFetchOk: false, driveMinutes: null, driveDepot: "" };
 const decisionLabels = { include: "Meenemen", review: "Controleren", dhl: "DHL", far: "Te ver", exclude: "Niet meenemen" };
 
 // Every order brings its own travel budget to the trip and the budgets pool, so
@@ -50,7 +50,6 @@ const operatorKeyStorageKey = "vervoersplanning.operatorKey.v1";
 // are still in the store, so this is undone by removing the date. An order due
 // on or after it is never hidden, however far past its deadline it runs.
 const hideOrdersDueBefore = "2026-09-24";
-const historyOpenKey = "vervoersplanning.historieOpen.v1";
 const usesBackend = Boolean(window.VERVOERSPLANNING_CONFIG?.dataUrl);
 let operatorPromptDeclined = false;
 const businessClasses = {
@@ -372,6 +371,71 @@ function routeLabel(route) {
   return `${steden[0]}, ${steden[1]} en ${steden.length - 2} meer`;
 }
 
+// The planned route an order already sits in, from today on, if any.
+function plannedFor(order) {
+  const key = orderKey(order);
+  const vandaag = isoDay(new Date());
+  return state.plan.find((planned) => planned.date >= vandaag && planKeys(planned).includes(key)) || null;
+}
+
+function showView(name) {
+  document.querySelectorAll(".view").forEach((view) => { view.hidden = view.dataset.view !== name; });
+  document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === name));
+
+  // One map, moved rather than duplicated: beside the routes on Vandaag, on its
+  // own full screen under Kaart, where it opens on every open order.
+  const panel = document.querySelector(".map-panel");
+  const target = document.querySelector(name === "kaart" ? "#mapAway" : "#mapHome");
+  if (panel && target && panel.parentElement !== target) target.appendChild(panel);
+  if (name === "kaart") planningView = "all-orders";
+  if (name === "vandaag") planningView = "map";
+  if (name === "vandaag" || name === "kaart") renderPlanningOverview();
+  if (name !== "agenda" && state.routeInHand) {
+    state.routeInHand = null;
+    renderRouteInHand();
+  }
+  window.scrollTo({ top: 0 });
+}
+
+function putRouteInHand(route) {
+  state.routeInHand = route;
+  showView("agenda");
+  renderRouteInHand();
+  renderAgenda();
+}
+
+function renderRouteInHand() {
+  const bar = document.querySelector("#routeInHand");
+  if (!bar) return;
+  const route = state.routeInHand;
+  bar.hidden = !route;
+  if (!route) {
+    bar.innerHTML = "";
+    return;
+  }
+  bar.innerHTML = `<p><strong>Kies een dag</strong> voor de rit naar ${routeLabel(route)} (${route.orders.length} stops).</p>
+    <button id="dropRouteInHand" class="button subtle-action" type="button">Annuleren</button>`;
+  bar.querySelector("#dropRouteInHand").addEventListener("click", () => {
+    state.routeInHand = null;
+    renderRouteInHand();
+    renderAgenda();
+  });
+}
+
+async function placeRouteOnDay(date) {
+  const route = state.routeInHand;
+  if (!route) return;
+  const saved = await savePlan({ date, name: routeLabel(route), keys: route.orders.map(orderKey) });
+  if (!saved) {
+    window.alert("Inplannen is niet gelukt. Probeer het opnieuw.");
+    return;
+  }
+  state.routeInHand = null;
+  state.plan = await fetchPlan();
+  renderRouteInHand();
+  rebuildPlanning();
+}
+
 function renderAgenda() {
   const holder = document.querySelector("#agendaDays");
   const teller = document.querySelector("#agendaCount");
@@ -385,112 +449,129 @@ function renderAgenda() {
   }
 
   const dagen = [];
-  for (let stap = 0; stap < 14; stap += 1) {
-    const datum = new Date();
-    datum.setDate(datum.getDate() + stap);
-    dagen.push(isoDay(datum));
-  }
-  // A route left on a past day was never driven; it stays visible until someone
-  // deals with it rather than quietly disappearing.
-  const achterstallig = [...new Set(state.plan.filter((p) => p.date < vandaag).map((p) => p.date))].sort();
+  for (let stap = 0; stap < 14; stap += 1) dagen.push(daysFromToday(stap));
+  // A route left on a past day was never driven; it stays until someone deals
+  // with it rather than quietly disappearing.
+  const achterstallig = [...new Set(state.plan.filter((planned) => planned.date < vandaag).map((planned) => planned.date))].sort();
+  const inHand = Boolean(state.routeInHand);
 
   holder.innerHTML = [...achterstallig, ...dagen].map((dag) => {
     const ritten = state.plan.filter((planned) => planned.date === dag);
-    const naam = new Intl.DateTimeFormat("nl-NL", { weekday: "short", day: "numeric", month: "short" }).format(dateFromIso(dag));
+    const naam = new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag));
     const label = dag === vandaag ? `${naam} · vandaag` : dag < vandaag ? `${naam} · niet gereden` : naam;
-    return `<article class="agenda-day${dag === vandaag ? " vandaag" : ""}${dag < vandaag ? " achterstallig" : ""}${ritten.length ? "" : " leeg"}">
+    const kiesbaar = inHand && dag >= vandaag;
+    return `<article class="agenda-day${dag === vandaag ? " vandaag" : ""}${dag < vandaag ? " achterstallig" : ""}${ritten.length ? "" : " leeg"}${kiesbaar ? " kiesbaar" : ""}" data-day="${dag}">
       <h3>${label}</h3>
-      ${ritten.length ? ritten.map((planned) => {
+      ${kiesbaar ? `<button class="button primary place-here" type="button" data-day="${dag}">Rit hier inplannen</button>` : ""}
+      ${ritten.map((planned) => {
         const status = plannedRouteStatus(planned);
-        const weg = status.verdwenen.length;
-        const waarschuwing = weg
-          ? `<em>${weg} van de ${planned.orderIds.length} orders ${weg === 1 ? "staat" : "staan"} niet meer in de planning</em>`
-          : "";
+        const weg = status.stops.length - status.open.length;
         return `<div class="agenda-route">
           <b><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${planned.name}</b>
-          <span>${status.aanwezig.length} ${status.aanwezig.length === 1 ? "stop" : "stops"}</span>
-          ${waarschuwing}
+          <span>${status.open.length} ${status.open.length === 1 ? "stop" : "stops"}${weg ? ` · ${weg} al afgehandeld of niet gevonden` : ""}</span>
           <div class="agenda-route-actions">
             <button class="button primary open-planned" type="button" data-planned="${planned.id}">Rit openen</button>
             <button class="button subtle-action drop-planned" type="button" data-planned="${planned.id}">Uit agenda</button>
           </div>
         </div>`;
-      }).join("") : '<p class="empty">Niets ingepland.</p>'}
+      }).join("")}
+      ${!ritten.length && !kiesbaar ? '<p class="empty">Niets ingepland.</p>' : ""}
     </article>`;
   }).join("");
 
+  holder.querySelectorAll(".place-here").forEach((button) => {
+    button.addEventListener("click", () => placeRouteOnDay(button.dataset.day));
+  });
   holder.querySelectorAll(".open-planned").forEach((button) => {
-    button.addEventListener("click", () => openPlannedRoute(state.plan.find((p) => p.id === button.dataset.planned)));
+    button.addEventListener("click", () => openPlannedRoute(state.plan.find((planned) => planned.id === button.dataset.planned)));
   });
   holder.querySelectorAll(".drop-planned").forEach((button) => {
-    button.addEventListener("click", () => removePlannedRoute(state.plan.find((p) => p.id === button.dataset.planned)));
+    button.addEventListener("click", () => removePlannedRoute(state.plan.find((planned) => planned.id === button.dataset.planned)));
   });
 }
 
-function openPlannedRoute(planned) {
+// Opening a planned route is the moment it is checked: fetch first, so what is
+// judged is what Shopify says now and not what this phone had this morning.
+async function openPlannedRoute(planned) {
+  if (!planned) return;
+  await refreshData();
+  state.openPlan = state.plan.find((entry) => entry.id === planned.id) || planned;
+  applyOpenPlan();
+  showView("vandaag");
+}
+
+// The planned route drives the screen through manualRoute and nothing else. It
+// used to be pushed into forcedIncludes as well, which left every order ever
+// opened this way stuck on "Meenemen" on that phone for good.
+function applyOpenPlan() {
+  const planned = state.openPlan;
   if (!planned) return;
   const status = plannedRouteStatus(planned);
-  if (!status.aanwezig.length) {
-    window.alert(`Geen van de orders uit rit ${planned.number || "?"} staat nog in de planning. Ze zijn bezorgd, geannuleerd of vervallen.`);
+  state.manualRoute = status.open.length ? { orders: optimizedStopOrder(status.open) } : null;
+  activeMapRouteIndex = 0;
+  rebuildPlanning();
+}
+
+function closeOpenPlan() {
+  state.openPlan = null;
+  state.manualRoute = null;
+  activeMapRouteIndex = 0;
+  rebuildPlanning();
+}
+
+function renderOpenPlan() {
+  const holder = document.querySelector("#openPlan");
+  if (!holder) return;
+  const planned = state.openPlan;
+  if (!planned) {
+    holder.hidden = true;
+    holder.innerHTML = "";
     return;
   }
 
-  const erbij = nearbyAdditions(status.aanwezig);
-  const regels = [`Rit ${planned.number || "?"} naar ${planned.name}, ${formatDate(planned.date)}: ${status.aanwezig.length} stops.`];
-  if (status.verdwenen.length) regels.push(`Vervallen sinds het inplannen: ${status.verdwenen.join(", ")}.`);
-  if (erbij.length) {
-    regels.push("", "Sinds het inplannen zijn deze orders binnengekomen die er makkelijk bij kunnen:");
-    erbij.forEach((k) => regels.push(`  ${k.item.order.id} · ${k.item.order.city} · +${formatMinutes(k.extra)}`));
-    regels.push("", "Wil je die erbij nemen?");
-  }
+  const status = plannedRouteStatus(planned);
+  const bijzonder = status.stops.filter((stop) => stop.status !== "open");
+  const erbij = state.lastFetchOk ? nearbyAdditions(status.open) : [];
+  const huidig = status.open.length ? routeSummary("Rit", optimizedStopOrder(status.open)) : null;
 
-  const meenemen = erbij.length && window.confirm(regels.join("\n"));
-  if (!erbij.length) window.alert(regels.join("\n"));
+  const regel = (stop) => {
+    if (stop.status === "bezorgd") return `<li class="plan-stop klaar"><s>${stop.id}</s> al bezorgd${stop.at ? ` op ${formatDateTime(stop.at)}` : ""}</li>`;
+    if (stop.status === "geannuleerd") return `<li class="plan-stop fout">${stop.id} is geannuleerd, niet afleveren</li>`;
+    return `<li class="plan-stop fout">${stop.id} niet gevonden. Overleg met de planner voor je gaat.</li>`;
+  };
 
-  const orders = meenemen ? [...status.aanwezig, ...erbij.map((k) => k.item.order)] : status.aanwezig;
-  for (const order of orders) forcedIncludes.add(orderKey(order));
-  saveForcedIncludes();
-  state.manualRoute = { orders: optimizedStopOrder(orders) };
-  activeMapRouteIndex = 0;
-  sluitAgenda();
-  rebuildPlanning();
-  document.querySelector(".route-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
+  holder.hidden = false;
+  holder.innerHTML = `
+    <div class="panel-heading compact">
+      <div>
+        <h2><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${planned.name}</h2>
+        <p class="open-plan-meta">${formatDate(planned.date)} · ${status.open.length} ${status.open.length === 1 ? "stop" : "stops"}${huidig ? ` · ongeveer ${formatMinutes(huidig.totalMinutes)} onderweg` : ""}</p>
+      </div>
+      <button id="closeOpenPlan" class="button subtle-action" type="button">Sluiten</button>
+    </div>
+    ${state.lastFetchOk ? "" : '<p class="plan-offline">Geen verbinding. Je ziet de rit zoals hij bij het laatste verversen was; of er iets bij kan, valt nu niet na te gaan.</p>'}
+    ${bijzonder.length ? `<ul class="plan-stops">${bijzonder.map(regel).join("")}</ul>` : ""}
+    ${state.lastFetchOk ? `<div class="plan-additions">
+      <h3>${erbij.length ? "Sinds het inplannen binnengekomen, kan er makkelijk bij" : "Niets nieuws dat er makkelijk bij kan"}</h3>
+      ${erbij.map((kandidaat) => {
+        const o = kandidaat.item.order;
+        const dhl = kandidaat.item.decision !== "include";
+        return `<div class="plan-addition">
+          <div>
+            <b>${o.id} · ${o.city || "plaats onbekend"}</b>
+            <span>${productSummary(o)}</span>
+            <span>+${formatMinutes(kandidaat.extra)}, rit wordt dan ${formatMinutes(kandidaat.totaal)}${dhl ? " · gaat in Shopify van DHL naar eigen bezorging" : ""}</span>
+          </div>
+          <button class="button primary accept-addition" type="button" data-key="${orderKey(o)}">Meenemen</button>
+        </div>`;
+      }).join("")}
+    </div>` : ""}`;
 
-// Picking a day from a short list of names beats a date field: the planner
-// thinks in "woensdag", not in 2026-09-30, and cannot mistype a day this way.
-function planRouteDialog(route) {
-  const keuzes = [];
-  for (let stap = 0; stap < 10; stap += 1) {
-    const datum = new Date();
-    datum.setDate(datum.getDate() + stap);
-    const naam = new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(datum);
-    keuzes.push({ dag: isoDay(datum), label: stap === 0 ? `${naam} (vandaag)` : stap === 1 ? `${naam} (morgen)` : naam });
-  }
-
-  const vraag = [`Rit naar ${routeLabel(route)} met ${route.orders.length} stops inplannen.`, "", "Typ het nummer van de dag:"]
-    .concat(keuzes.map((k, i) => `${i + 1}. ${k.label}`))
-    .join("\n");
-
-  let antwoord = null;
-  try {
-    antwoord = window.prompt(vraag, "1");
-  } catch {
-    antwoord = null;
-  }
-  const keuze = keuzes[Number(antwoord) - 1];
-  if (!keuze) return;
-
-  assignRouteToDay(route, keuze.dag).then((gelukt) => {
-    if (gelukt) window.alert(`De rit naar ${routeLabel(route)} staat op ${keuze.label}. Het ritnummer zie je in de agenda.`);
+  holder.querySelector("#closeOpenPlan").addEventListener("click", closeOpenPlan);
+  holder.querySelectorAll(".accept-addition").forEach((button) => {
+    const kandidaat = erbij.find((k) => orderKey(k.item.order) === button.dataset.key);
+    button.addEventListener("click", () => acceptAddition(kandidaat.item.order, button));
   });
-}
-
-function sluitAgenda() {
-  const paneel = document.querySelector("#agendaPanel");
-  const knop = document.querySelector("#agendaButton");
-  if (paneel) paneel.hidden = true;
-  if (knop) knop.setAttribute("aria-expanded", "false");
 }
 
 function renderManualRouteBar() {
@@ -808,18 +889,33 @@ function renderRoutes() {
     fragment.querySelector(".route-meta").textContent = `${CONFIG.depot} · ${route.orders.length} stops · ruwe rijtijd ${formatMinutes(route.driveMinutes)}`;
     fragment.querySelector(".route-load").textContent = `${route.load.toLocaleString("nl-NL")} kg · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)} · ${routeWarning(route)}`;
     fragment.querySelector(".route-map").href = googleMapsUrl(route.orders);
-    const planKnop = document.createElement("button");
-    planKnop.type = "button";
-    planKnop.className = "button ghost plan-route";
-    planKnop.textContent = "Inplannen";
-    planKnop.addEventListener("click", () => planRouteDialog(route));
-    fragment.querySelector(".route-footer").appendChild(planKnop);
-    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${order.id} uit deze rit halen">−</button><b>${order.city} · ${order.id}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-id="${encodeURIComponent(order.id)}">Bezorgd</button></span></li>`).join("");
+    // A computed route whose every stop already sits in a planned route says so,
+    // so the planner does not put the same van load on the calendar twice.
+    const alGepland = route.orders.length ? plannedFor(route.orders[0]) : null;
+    const helemaalGepland = alGepland && route.orders.every((order) => plannedFor(order)?.id === alGepland.id);
+    if (!state.openPlan) {
+      if (helemaalGepland) {
+        const label = document.createElement("span");
+        label.className = "al-gepland";
+        label.innerHTML = `<span class="rit-nummer">Rit ${alGepland.number || "?"}</span> ${formatDate(alGepland.date)}`;
+        fragment.querySelector(".route-footer").appendChild(label);
+      } else {
+        const planKnop = document.createElement("button");
+        planKnop.type = "button";
+        planKnop.className = "button primary plan-route";
+        planKnop.textContent = "Inplannen";
+        planKnop.addEventListener("click", () => putRouteInHand(route));
+        fragment.querySelector(".route-footer").appendChild(planKnop);
+      }
+    }
+    // Buttons carry shop and number together: the number alone is only unique
+    // for as long as the two shops keep different prefixes.
+    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${order.id} uit deze rit halen">−</button><b>${order.city} · ${order.id}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-key="${orderKey(order)}">Bezorgd</button></span></li>`).join("");
     fragment.querySelectorAll(".remove-route-stop").forEach((button) => {
       button.addEventListener("click", () => removeOrderFromRoute(button.dataset.orderKey, index));
     });
     fragment.querySelectorAll(".mark-delivered").forEach((button) => {
-      const order = route.orders.find((item) => encodeURIComponent(item.id) === button.dataset.orderId);
+      const order = route.orders.find((item) => orderKey(item) === button.dataset.orderKey);
       button.addEventListener("click", () => markDelivered(order, button));
     });
     holder.appendChild(fragment);
@@ -1249,6 +1345,10 @@ function qualifyCandidates() {
 // start a route: without one nearby they stay with DHL. Routes update as each
 // parcel joins, so the next one is measured against what the van really drives.
 function addNearbyPackages() {
+  // A planned route that is open belongs to the driver: parcels are offered to
+  // them one by one and saved when accepted. Slipping them in here would put
+  // them on screen but in neither the saved route nor Shopify.
+  if (state.openPlan) return;
   for (const item of state.decisions.filter((entry) => entry.decision === "dhl")) {
     const order = item.order;
     if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) continue;
@@ -1278,6 +1378,7 @@ function rebuildPlanning() {
   addNearbyPackages();
   renderSummary();
   renderAgenda();
+  renderOpenPlan();
   renderManualRouteBar();
   renderPlanningOverview();
   renderOrders();
@@ -1391,6 +1492,8 @@ async function refreshData() {
     if (response.status === 401) throw new Error("Operatorcode ontbreekt of klopt niet");
     if (!response.ok) throw new Error("Data kon niet worden geladen");
     const loaded = await response.json();
+    state.allOrders = loaded;
+    state.lastFetchOk = true;
     state.orders = loaded.filter((order) => !(order.dueDate && order.dueDate < hideOrdersDueBefore));
     // Before rebuildPlanning, because the travel budgets are judged against these.
     state.driveMinutes = await fetchDriveMinutes(state.orders);
@@ -1402,6 +1505,7 @@ async function refreshData() {
     const bron = state.driveMinutes ? "echte rijtijden" : "geschatte rijtijden";
     document.querySelector("#syncText").textContent = `Laatst ververst om ${klok} · ${bron}`;
   } catch (error) {
+    state.lastFetchOk = false;
     document.querySelector("#syncText").textContent = `${error.message} — bestaande gegevens blijven staan`;
   } finally {
     button.disabled = false;
@@ -1437,36 +1541,47 @@ function isoDay(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+function daysFromToday(offset) {
+  const date = new Date();
+  date.setDate(date.getDate() + offset);
+  return isoDay(date);
+}
+
+// A week back as well, so a route that was planned and never driven stays in
+// sight instead of dropping off the calendar the morning after.
 async function fetchPlan() {
   if (!usesBackend) return [];
   try {
-    const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan?from=${isoDay(new Date())}&t=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) return [];
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan?from=${daysFromToday(-7)}&t=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) return state.plan;
     return (await response.json()).routes || [];
   } catch {
-    return [];
+    return state.plan;
   }
 }
 
-async function assignRouteToDay(route, date, planned) {
-  const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/assign`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      id: planned?.id,
-      fromDate: planned?.date,
-      date,
-      name: routeLabel(route) || planned?.name || "Rit",
-      orderIds: route.orders.map((order) => order.id),
-    }),
+// Stops are shop and order number together. Records saved before that change
+// hold bare numbers; those are matched on number as a last resort.
+function planKeys(planned) {
+  if (Array.isArray(planned.orderKeys)) return planned.orderKeys;
+  return (planned.orderIds || []).map((id) => {
+    const match = state.allOrders.find((order) => order.id === id);
+    return match ? orderKey(match) : `?:${id}`;
   });
-  if (!response.ok) {
-    window.alert("Inplannen mislukt. Probeer het opnieuw.");
-    return false;
+}
+
+async function savePlan({ id, date, fromDate, name, keys }) {
+  try {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/assign`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id, date, fromDate, name, orderKeys: keys }),
+    });
+    if (!response.ok) return null;
+    return (await response.json()).route || null;
+  } catch {
+    return null;
   }
-  state.plan = await fetchPlan();
-  renderAgenda();
-  return true;
 }
 
 async function removePlannedRoute(planned) {
@@ -1475,44 +1590,113 @@ async function removePlannedRoute(planned) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id: planned.id, date: planned.date }),
-  });
-  if (!response.ok) {
-    window.alert("Verwijderen mislukt.");
+  }).catch(() => null);
+  if (!response?.ok) {
+    window.alert("Uit de agenda halen is niet gelukt. Probeer het opnieuw.");
     return;
   }
+  if (state.openPlan?.id === planned.id) closeOpenPlan();
   state.plan = await fetchPlan();
-  renderAgenda();
+  rebuildPlanning();
 }
 
-// A route planned on Monday and driven on Wednesday is two days old. Orders in
-// it may have been delivered, cancelled or pulled from the store meanwhile, so
-// the stored numbers are matched against what is in the planning right now.
+// Each stored stop, matched against everything the backend returned, not just
+// what the planning shows: an order whose date moved back in Shopify is hidden
+// from the planning but very much alive. Only what can be shown is claimed:
+// delivered when the history says so, otherwise just not found.
 function plannedRouteStatus(planned) {
-  const byId = new Map(state.orders.map((order) => [order.id, order]));
-  return {
-    aanwezig: planned.orderIds.map((id) => byId.get(id)).filter(Boolean),
-    verdwenen: planned.orderIds.filter((id) => !byId.has(id)),
-  };
+  const byKey = new Map(state.allOrders.map((order) => [orderKey(order), order]));
+  const delivered = new Map(state.history.map((entry) => [`${entry.shopDomain}:${entry.id}`, entry]));
+  const stops = planKeys(planned).map((key) => {
+    const order = byKey.get(key);
+    if (order) return { key, id: order.id, order, status: order.cancelled ? "geannuleerd" : "open" };
+    const done = delivered.get(key);
+    if (done) return { key, id: done.id, status: "bezorgd", at: done.deliveredAt };
+    return { key, id: key.split(":").pop(), status: "onbekend" };
+  });
+  return { stops, open: stops.filter((stop) => stop.status === "open").map((stop) => stop.order) };
 }
 
-// The point of reopening a planned route: orders that arrived since it was
-// planned and would cost little to pick up while the van is out anyway. Judged
-// against the route as it stands today, not as it stood when it was planned.
+// The same bar the planning applies before a parcel rides along: paid, fully
+// addressed, no slot agreed with the customer. The driver's offer used to skip
+// it, which made it the one door an unpaid order could walk through into the van.
+function additionAllowed(item) {
+  const order = item.order;
+  if (item.decision === "exclude") return false;
+  return Boolean(order.addressComplete && order.paid && !order.deliveryAppointmentLocked);
+}
+
+// Measured against the route as it stands right now. After every acceptance the
+// list is rebuilt against the grown route, so five offers of "+25 min" can never
+// add up to two hours unnoticed.
 function nearbyAdditions(orders) {
   if (!orders.length) return [];
   const inRoute = new Set(orders.map(orderKey));
-  const basis = routeSummary("Ingepland", optimizedStopOrder(orders));
+  const basis = routeSummary("Rit", optimizedStopOrder(orders));
   const dayLimit = CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
 
   return state.decisions
-    .filter((item) => !inRoute.has(orderKey(item.order)) && item.decision !== "exclude")
+    .filter((item) => !inRoute.has(orderKey(item.order)) && additionAllowed(item))
     .map((item) => {
-      const merged = routeSummary("Ingepland", optimizedStopOrder([...orders, item.order]));
-      return { item, extra: merged.totalMinutes - basis.totalMinutes, totaal: merged.totalMinutes };
+      const merged = routeSummary("Rit", optimizedStopOrder([...orders, item.order]));
+      return { item, extra: merged.totalMinutes - basis.totalMinutes, totaal: merged.totalMinutes, load: merged.load };
     })
-    .filter((kandidaat) => kandidaat.extra <= CONFIG.packageDetourMinutes && kandidaat.totaal <= dayLimit)
+    .filter((kandidaat) => kandidaat.extra <= CONFIG.packageDetourMinutes
+      && kandidaat.totaal <= dayLimit
+      && kandidaat.load <= CONFIG.vehicleCapacityKg)
     .sort((a, b) => a.extra - b.extra)
     .slice(0, 5);
+}
+
+// A parcel the rules had on DHL is tagged as own delivery in Shopify before it
+// joins, so whoever prints the DHL labels that morning does not ship it twice.
+async function tagOwnDelivery(order) {
+  try {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/set-own-delivery`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+// The screen only changes once both the Shopify tag and the saved route have
+// gone through. Poor signal at a van is the normal case, and a driver told a
+// stop was added when it was not is worse off than one told it failed.
+async function acceptAddition(order, button) {
+  const planned = state.openPlan;
+  if (!planned) return;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Bezig…";
+  }
+
+  const decision = state.decisions.find((item) => orderKey(item.order) === orderKey(order))?.decision;
+  if (decision !== "include" && !(await tagOwnDelivery(order))) {
+    window.alert("Toevoegen is niet gelukt, je rijdt de oorspronkelijke rit. Probeer het opnieuw als je bereik hebt.");
+    renderOpenPlan();
+    return;
+  }
+
+  const saved = await savePlan({
+    id: planned.id,
+    date: planned.date,
+    fromDate: planned.date,
+    name: planned.name,
+    keys: [...planKeys(planned), orderKey(order)],
+  });
+  if (!saved) {
+    window.alert("Toevoegen is niet gelukt, je rijdt de oorspronkelijke rit. Probeer het opnieuw als je bereik hebt.");
+    renderOpenPlan();
+    return;
+  }
+
+  state.openPlan = saved;
+  state.plan = await fetchPlan();
+  applyOpenPlan();
 }
 
 async function fetchHistory() {
@@ -1548,39 +1732,24 @@ document.querySelector("#showRoutesButton")?.addEventListener("click", () => {
   planningView = "routes";
   renderPlanningOverview();
 });
-// The history is long and rarely the reason someone opens the planning, so it
-// starts folded and then stays however this browser last left it.
-const historyDetails = document.querySelector("#historyDetails");
-if (historyDetails) {
-  try {
-    historyDetails.open = localStorage.getItem(historyOpenKey) === "open";
-  } catch {
-    historyDetails.open = false;
-  }
-  historyDetails.addEventListener("toggle", () => {
-    try {
-      localStorage.setItem(historyOpenKey, historyDetails.open ? "open" : "dicht");
-    } catch {
-      // A browser refusing storage just means the fold is not remembered.
-    }
-  });
-}
-
 document.querySelector("#backToAutoButton")?.addEventListener("click", () => {
+  state.openPlan = null;
   state.manualRoute = null;
   state.selected.clear();
   activeMapRouteIndex = 0;
   rebuildPlanning();
 });
 
-document.querySelector("#agendaButton")?.addEventListener("click", () => {
-  const paneel = document.querySelector("#agendaPanel");
-  const open = paneel.hidden;
-  paneel.hidden = !open;
-  document.querySelector("#agendaButton").setAttribute("aria-expanded", String(open));
-  if (open) paneel.scrollIntoView({ behavior: "smooth", block: "start" });
+document.querySelector("#refreshMobile")?.addEventListener("click", () => {
+  operatorPromptDeclined = false;
+  ensureOperatorKey();
+  refreshData();
 });
-document.querySelector("#agendaCloseButton")?.addEventListener("click", sluitAgenda);
+
+// The menu on the left switches views; the page always opens on Vandaag.
+document.querySelectorAll(".nav-item").forEach((item) => {
+  item.addEventListener("click", () => showView(item.dataset.view));
+});
 
 renderRules();
 ensureOperatorKey();
