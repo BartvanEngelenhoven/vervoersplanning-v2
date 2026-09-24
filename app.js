@@ -382,11 +382,11 @@ function renderPlanningMap() {
     button.addEventListener("click", () => {
       const select = holder.querySelector("#addToRouteSelect");
       const order = state.orders.find((item) => orderKey(item) === select?.value);
-      addOrderToActiveRoute(order);
+      addOrderToRoute(order, activeMapRouteIndex);
     });
   });
   holder.querySelectorAll(".remove-from-active-route").forEach((button) => {
-    button.addEventListener("click", () => removeOrderFromActiveRoute(button.dataset.orderKey));
+    button.addEventListener("click", () => removeOrderFromRoute(button.dataset.orderKey, activeMapRouteIndex));
   });
 }
 
@@ -613,7 +613,7 @@ function renderRoutes() {
     fragment.querySelector(".route-map").href = googleMapsUrl(route.orders);
     fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${order.id} uit deze rit halen">−</button><b>${order.city} · ${order.id}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-id="${encodeURIComponent(order.id)}">Bezorgd</button></span></li>`).join("");
     fragment.querySelectorAll(".remove-route-stop").forEach((button) => {
-      button.addEventListener("click", () => removeOrderFromActiveRoute(button.dataset.orderKey));
+      button.addEventListener("click", () => removeOrderFromRoute(button.dataset.orderKey, index));
     });
     fragment.querySelectorAll(".mark-delivered").forEach((button) => {
       const order = route.orders.find((item) => encodeURIComponent(item.id) === button.dataset.orderId);
@@ -798,8 +798,10 @@ function makeRouteFromSelection() {
   rebuildPlanning();
 }
 
-async function addOrderToActiveRoute(order) {
-  if (!order || !state.routes[activeMapRouteIndex]) return;
+// routeIndex says which route the button belongs to. It used to be implicit, and
+// every route's buttons acted on whichever route the map had selected.
+async function addOrderToRoute(order, routeIndex) {
+  if (!order || !state.routes[routeIndex]) return;
   // Anything the rules did not already put on own transport gets tagged as own
   // delivery in Shopify first, so the webshop and the planning agree.
   if (state.decisions.find((item) => item.order === order)?.decision !== "include") {
@@ -807,7 +809,7 @@ async function addOrderToActiveRoute(order) {
     if (!tagged) return;
     order.deliveryMethod = "delivery";
   }
-  const route = state.routes[activeMapRouteIndex];
+  const route = state.routes[routeIndex];
   const nextOrders = optimizedStopOrder([...route.orders.filter((item) => orderKey(item) !== orderKey(order)), order]);
   for (const item of nextOrders) forcedIncludes.add(orderKey(item));
   saveForcedIncludes();
@@ -817,9 +819,14 @@ async function addOrderToActiveRoute(order) {
   rebuildPlanning();
 }
 
-function removeOrderFromActiveRoute(key) {
-  if (!key || !state.routes[activeMapRouteIndex]) return;
-  const route = state.routes[activeMapRouteIndex];
+function removeOrderFromRoute(key, routeIndex) {
+  if (!key || !state.routes[routeIndex]) return;
+  const route = state.routes[routeIndex];
+  const stop = route.orders.find((order) => orderKey(order) === key);
+  if (!stop) return;
+  // Taking a stop out cannot be undone, and it drops the planning into manual
+  // mode where the other routes are hidden. Both deserve saying out loud.
+  if (!window.confirm(`${stop.id} uit deze rit halen? Dit kan niet ongedaan gemaakt worden. De andere ritten verdwijnen zolang van het scherm.`)) return;
   const nextOrders = route.orders.filter((order) => orderKey(order) !== key);
   if (!nextOrders.length) {
     state.manualRoute = null;
