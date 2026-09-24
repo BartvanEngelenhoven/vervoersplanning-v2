@@ -291,8 +291,8 @@ function renderAllOrdersMap(holder) {
   }
   const orderRows = openOrders.map((order) => {
     const decision = state.decisions.find((item) => item.order === order)?.decision || "exclude";
-    return `<a class="loose-order-point ${decision}" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer" aria-label="${order.id} ${order.city || ""} bekijken in Google Maps">
-      <span class="map-dot ${decision}"></span>
+    const position = mapPosition(order);
+    return `<a class="map-pin order-map-point ${decision}" style="left:${position.x}%; top:${position.y}%;" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer" aria-label="${order.id} ${order.city || ""} bekijken in Google Maps">
       <span class="order-point-popover">
         <b>${order.id} · ${order.customer || "Onbekende klant"}</b>
         <span>${productSummary(order)}</span>
@@ -301,16 +301,24 @@ function renderAllOrdersMap(holder) {
       </span>
     </a>`;
   }).join("");
-  holder.innerHTML = `<div class="google-map-card">
-    <iframe title="Google Maps alle open orders" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${googleMapsEmbedUrl(openOrders)}"></iframe>
+  const depot = mapPositionFromPoint(DEPOT_POINT);
+  holder.innerHTML = `<div class="map-board all-orders-board">
+    <span class="map-country nl">Nederland</span>
+    <span class="map-country be">België</span>
+    <span class="map-depot" style="left:${depot.x}%; top:${depot.y}%;">Ede</span>
+    ${orderRows}
   </div>
   <div class="map-side">
     <div class="map-route-summary">
       <b>Alle open orders op kaart</b>
-      <span>${openOrders.length} orders tegelijk vanaf en terug naar ${CONFIG.depot}</span>
+      <span>${openOrders.length} losse punten. Hover over een punt voor de bestelling.</span>
       <a class="button ghost" href="${googleMapsUrl(openOrders)}" target="_blank" rel="noreferrer">Open alle orders in Google Maps</a>
     </div>
-    <div class="loose-order-list point-cloud" aria-label="Open orders als losse punten">${orderRows}</div>
+    <div class="map-legend">
+      <span><i class="map-dot include"></i> Meenemen</span>
+      <span><i class="map-dot review"></i> Controleren</span>
+      <span><i class="map-dot exclude"></i> Niet meenemen</span>
+    </div>
   </div>`;
 }
 
