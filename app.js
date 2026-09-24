@@ -757,7 +757,7 @@ function businessClass(order) {
 function businessLogo(order) {
   const label = order.webshop || "Webshop";
   const logo = businessLogos[order.webshop];
-  return `${logo ? `<img src="${logo}" alt="" />` : ""}<span>${label}</span>`;
+  return logo ? `<img src="${logo}" alt="${label}" />` : `<span>${label}</span>`;
 }
 
 function orderKey(order) {

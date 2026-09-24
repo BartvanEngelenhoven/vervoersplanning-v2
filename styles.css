@@ -27,10 +27,11 @@ button, select { cursor: pointer; }
 .brand small { color: #b9c8c3; font-size: .78rem; }
 .business-logos { gap: .5rem; margin-left: auto; }
 .business-logo, .shop-chip { display: inline-flex; align-items: center; gap: .45rem; border-radius: 999px; font-weight: 850; white-space: nowrap; }
-.business-logo { min-height: 42px; padding: .42rem .7rem; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.1); color: #eff7f4; font-size: .78rem; }
+.business-logo { min-height: 44px; padding: .5rem .75rem; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.1); color: #eff7f4; font-size: .78rem; }
+.business-logo.slowfeeder { background: rgba(255,255,255,.94); border-color: rgba(255,255,255,.55); }
 .business-logo img, .shop-chip img { display: block; object-fit: contain; flex: 0 0 auto; }
-.business-logo img { width: auto; max-width: 148px; height: 24px; }
-.business-logo.slowfeeder img { height: 26px; }
+.business-logo img { width: auto; max-width: 168px; height: 28px; }
+.business-logo.slowfeeder img { height: 34px; max-width: 190px; }
 .business-logo span, .shop-chip span { overflow: hidden; text-overflow: ellipsis; }
 .top-actions { gap: .7rem; }
 .mode-pill { display: inline-flex; align-items: center; gap: .45rem; padding: .45rem .7rem; border: 1px solid rgba(255,255,255,.2); border-radius: 999px; color: #dfe9e5; font-size: .85rem; }
@@ -151,10 +152,10 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
 .order-side { display: grid; align-content: start; gap: .55rem; }
 .order-side span { display: block; padding: .55rem .65rem; border-radius: 10px; background: #f4f7f4; color: var(--muted); font-size: .8rem; }
 .order-side b { display: block; color: var(--ink); font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; }
-.shop-chip { max-width: 260px; padding: .26rem .58rem .26rem .42rem; background: #eef4f1; color: #234d42; font-size: .72rem; }
-.shop-chip.slowfeeder { background: #fff3d8; color: #664410; }
-.shop-chip img { max-width: 72px; height: 18px; }
-.shop-chip.slowfeeder img { max-width: 86px; height: 20px; }
+.shop-chip { min-width: 88px; max-width: 130px; justify-content: center; padding: .28rem .5rem; background: #eef4f1; color: #234d42; font-size: .72rem; }
+.shop-chip.slowfeeder { background: #fff8e8; color: #664410; }
+.shop-chip img { max-width: 96px; height: 21px; }
+.shop-chip.slowfeeder img { max-width: 108px; height: 26px; }
 .subtle { display: block; color: var(--muted); font-size: .8rem; }
 .badge { display: inline-flex; align-items: center; white-space: nowrap; padding: .28rem .58rem; border-radius: 999px; font-size: .75rem; font-weight: 800; }
 .badge.include { color: #08673c; background: #daf4e6; }
