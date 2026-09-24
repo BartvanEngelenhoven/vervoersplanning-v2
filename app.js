@@ -601,7 +601,15 @@ function googleMapsUrl(orders) {
 }
 
 function googleMapsEmbedUrl(orders) {
-  return `${googleMapsUrl(orders)}?output=embed`;
+  const stops = [CONFIG.depot, ...orders.map((order) => order.fullAddress || `${order.postcode} ${order.city}`), CONFIG.depot];
+  const url = new URL("https://maps.google.com/maps");
+  url.searchParams.set("f", "d");
+  url.searchParams.set("source", "s_d");
+  url.searchParams.set("hl", "nl");
+  url.searchParams.set("saddr", stops[0]);
+  url.searchParams.set("daddr", stops.slice(1).join(" to: "));
+  url.searchParams.set("output", "embed");
+  return url.toString();
 }
 
 function singleOrderMapsUrl(order) {
