@@ -291,10 +291,14 @@ function renderAllOrdersMap(holder) {
   }
   const orderRows = openOrders.map((order) => {
     const decision = state.decisions.find((item) => item.order === order)?.decision || "exclude";
-    return `<a class="loose-order-button" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">
+    return `<a class="loose-order-point ${decision}" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer" aria-label="${order.id} ${order.city || ""} bekijken in Google Maps">
       <span class="map-dot ${decision}"></span>
-      <b>${order.id} · ${order.city || "Plaats onbekend"}</b>
-      <small>${productSummary(order)}</small>
+      <span class="order-point-popover">
+        <b>${order.id} · ${order.customer || "Onbekende klant"}</b>
+        <span>${productSummary(order)}</span>
+        <span>${addressSummary(order)}</span>
+        <small>${order.paymentStatus || (order.paid ? "Betaald" : "In afwachting")} · uiterlijk ${formatDate(order.dueDate)}</small>
+      </span>
     </a>`;
   }).join("");
   holder.innerHTML = `<div class="google-map-card">
@@ -306,7 +310,7 @@ function renderAllOrdersMap(holder) {
       <span>${openOrders.length} orders tegelijk vanaf en terug naar ${CONFIG.depot}</span>
       <a class="button ghost" href="${googleMapsUrl(openOrders)}" target="_blank" rel="noreferrer">Open alle orders in Google Maps</a>
     </div>
-    <div class="loose-order-list">${orderRows}</div>
+    <div class="loose-order-list point-cloud" aria-label="Open orders als losse punten">${orderRows}</div>
   </div>`;
 }
 
