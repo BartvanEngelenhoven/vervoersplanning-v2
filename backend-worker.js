@@ -896,9 +896,11 @@ function deliveryAppointmentLocked(order) {
   return text.includes("aflevermoment afgestemd") || text.includes("afgesproken") || text.includes("klant geïnformeerd");
 }
 
+// Kept in line with deliveryMinutes in app.js, which decides. The Shopify title
+// reads "Slowfeeder hooihuisje voor paarden", never "houten hooihuisje".
 function deliveryMinutes(lineItems) {
   const text = lineItems.map((item) => item.title).join(" ").toLowerCase();
-  return text.includes("houten hooihuisje") || text.includes("houten hoihuisje") ? 90 : 20;
+  return text.includes("hooihuisje") || text.includes("hoihuisje") ? 90 : 20;
 }
 
 function inferDeliveryMethod(order, tags) {

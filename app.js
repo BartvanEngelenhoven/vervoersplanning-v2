@@ -250,9 +250,10 @@ function routeSortScore(order) {
 }
 
 function deliveryMinutes(order) {
-  if (Number(order.deliveryMinutes)) return Number(order.deliveryMinutes);
-  // Matched "houten hooihuisje" before, which the Shopify titles never say, so
-  // every hay house was planned as a 20 minute drop.
+  // Worked out here from the products, never taken from order.deliveryMinutes.
+  // The backend stamps that field with its own copy of the rule, and when it
+  // matched "houten hooihuisje", which no Shopify title says, its 20 minutes
+  // quietly won over the 90 a hay house needs.
   if (isHooihuisje(order)) return 90;
   return 20;
 }
@@ -609,7 +610,7 @@ function renderPlanningMap() {
   activeMapRouteIndex = Math.min(activeMapRouteIndex, state.routes.length - 1);
   const route = state.routes[activeMapRouteIndex];
   const routeButtons = state.routes.map((item, index) => `<button class="${index === activeMapRouteIndex ? "active" : ""}" type="button" data-route-index="${index}">
-    Rit ${index + 1}: ${item.region} · ${formatMinutes(item.totalMinutes)}
+    Rit ${index + 1}: ${routeLabel(item)} · ${formatMinutes(item.totalMinutes)}
   </button>`).join("");
   const stops = route.orders.map((order, index) => `<li>
     <div>
@@ -638,12 +639,12 @@ function renderPlanningMap() {
       </div>`
     : "";
   holder.innerHTML = `<div class="google-map-card">
-    <iframe title="Google Maps route ${route.region}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${googleMapsEmbedUrl(route.orders)}"></iframe>
+    <iframe title="Google Maps route ${routeLabel(route)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${googleMapsEmbedUrl(route.orders)}"></iframe>
   </div>
   <div class="map-side">
     <div class="map-route-picker">${routeButtons}</div>
     <div class="map-route-summary">
-      <b>Rit ${activeMapRouteIndex + 1}: ${route.region}</b>
+      <b>Rit ${activeMapRouteIndex + 1}: ${routeLabel(route)}</b>
       <span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span>
       <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open groot in Google Maps</a>
     </div>
@@ -765,7 +766,7 @@ function renderRoutesOverview() {
     return;
   }
   holder.innerHTML = state.routes.map((route, index) => `<article class="route-overview-card">
-    <div><b>${index + 1}. ${route.region}</b><span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span></div>
+    <div><b>${index + 1}. ${routeLabel(route)}</b><span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span></div>
     <ol>${route.orders.map((order) => `<li>${order.city || "Plaats onbekend"} · ${order.id} · ${productSummary(order)}</li>`).join("")}</ol>
     <div class="route-overview-actions">
       <button class="button manual-action show-route-map" type="button" data-route-index="${index}">Toon op kaart</button>
