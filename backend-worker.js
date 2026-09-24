@@ -87,6 +87,10 @@ async function route(request, env) {
     return estimateRoute(request, env);
   }
 
+  if (request.method === "POST" && url.pathname === "/geo") {
+    return geocodeAddresses(request, env);
+  }
+
   if (request.method === "GET" && url.pathname === "/plan") {
     return getPlan(request, env);
   }
@@ -413,6 +417,74 @@ function nextShopifyPageUrl(linkHeader) {
   return match ? new URL(match[1]) : null;
 }
 
+// Real coordinates for Dutch addresses from PDOK, the government's own address
+// service: free, no key, and it knows every address in the BAG. Without this the
+// planning placed each order on one of eleven points for the whole country, so a
+// customer in Ede counted as a drive to Arnhem.
+//
+// Each address is looked up once and kept: geo:<address> holds the point, or a
+// miss that is tried again after a week in case the address was since fixed.
+// Addresses outside the Netherlands are not sent anywhere; the planning keeps
+// its own estimate for those.
+const GEO_PREFIX = "geo:";
+const GEO_MISS_TTL = 7 * 24 * 3600;
+// The Workers free plan allows 50 outbound fetches per request. Forty lookups
+// leaves room; anything past it is simply looked up on the next refresh.
+const GEO_BATCH_LIMIT = 40;
+
+function looksDutch(address) {
+  return /\b\d{4}\s?[A-Z]{2}\b/i.test(address) && !/(belgi|belgium|deutschland|germany|czech|france|luxemb)/i.test(address);
+}
+
+async function pdokLookup(address) {
+  const url = new URL("https://api.pdok.nl/bzk/locatieserver/search/v3_1/free");
+  url.searchParams.set("q", address);
+  url.searchParams.set("rows", "1");
+  url.searchParams.set("fl", "centroide_ll,type,score");
+  url.searchParams.set("fq", "type:(adres OR postcode OR weg)");
+  const response = await fetch(url, { headers: { "user-agent": "vervoersplanning-de-specialisten" } });
+  if (!response.ok) throw new Error(`PDOK ${response.status}`);
+  const doc = (await response.json())?.response?.docs?.[0];
+  const match = String(doc?.centroide_ll || "").match(/POINT\(([-\d.]+) ([-\d.]+)\)/);
+  if (!match) return null;
+  return { lat: Number(match[2]), lon: Number(match[1]), precision: doc.type };
+}
+
+async function geocodeAddresses(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
+  const payload = await request.json().catch(() => ({}));
+  const addresses = [...new Set((Array.isArray(payload.addresses) ? payload.addresses : [])
+    .map(normalizeAddress).filter(Boolean))].slice(0, GEO_BATCH_LIMIT);
+
+  const results = {};
+  let looked = 0;
+  for (const address of addresses) {
+    if (!looksDutch(address)) {
+      results[address] = null;
+      continue;
+    }
+    const key = `${GEO_PREFIX}${address.toLowerCase()}`;
+    const cached = await env.PLANNING_ORDERS.get(key, "json");
+    if (cached) {
+      results[address] = cached.miss ? null : cached;
+      continue;
+    }
+    try {
+      const point = await pdokLookup(address);
+      looked += 1;
+      results[address] = point;
+      await env.PLANNING_ORDERS.put(key, JSON.stringify(point || { miss: true }), point ? {} : { expirationTtl: GEO_MISS_TTL });
+    } catch {
+      // PDOK down or slow: leave this one out and let the planning estimate it.
+      // Nothing is cached, so the next refresh simply tries again.
+      results[address] = null;
+    }
+  }
+
+  return json({ results, looked }, 200, env);
+}
+
 // A planned route is its own record, plan:<date>:<id>, never one record per day.
 // The planner on a laptop and the driver on a phone both write here, and KV has
 // no transactions: a shared per-day record would let one silently overwrite the
@@ -516,7 +588,7 @@ async function removePlanRoute(request, env) {
   return json({ removed: true }, 200, env);
 }
 
-const DEPOT_ADDRESS = "Goorsteeg 46, 6718 XT Ede, Netherlands";
+const DEPOT_ADDRESS = "Goorsteeg 46, 6718 TA Ede, Netherlands";
 // Google allows 625 origin x destination pairs per call; staying under it leaves
 // room for a stop list that grew between the cache read and the request.
 const MATRIX_PAIR_LIMIT = 600;
