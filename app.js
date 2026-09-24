@@ -16,7 +16,7 @@ const CONFIG = {
   exceptionRouteMinutes: 480,
 };
 
-const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [], plan: [], allOrders: [], geo: {}, openPlan: null, routeInHand: null, lastFetchOk: false, driveMinutes: null, driveDepot: "" };
+const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [], plan: [], dayNotes: [], allOrders: [], geo: {}, role: null, driverRouteId: null, openPlan: null, routeInHand: null, lastFetchOk: false, driveMinutes: null, driveDepot: "" };
 const decisionLabels = { include: "Meenemen", review: "Controleren", dhl: "DHL", far: "Te ver", exclude: "Niet meenemen" };
 
 // Every order brings its own travel budget to the trip and the budgets pool, so
@@ -368,6 +368,287 @@ function renderRules() {
   holder.innerHTML = kaarten.map(([titel, tekst]) => `<article><b>${titel}</b><p>${tekst}</p></article>`).join("");
 }
 
+// ---------------------------------------------------------------------------
+// Roles. Which screen opens depends on the code typed in, not on the link: the
+// planner's code shows the whole portal, the driver's code only their routes.
+// ---------------------------------------------------------------------------
+async function fetchRole() {
+  if (!usesBackend) return "planner";
+  try {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/whoami`, { cache: "no-store" });
+    if (!response.ok) return null;
+    return (await response.json()).role || null;
+  } catch {
+    return null;
+  }
+}
+
+function applyRole(role) {
+  state.role = role;
+  document.body.classList.toggle("role-driver", role === "driver");
+  if (role === "driver") showView("bezorger");
+}
+
+// While the driver or the planner is typing in one of the inline panels, the
+// minute refresh must not redraw it away under their thumbs.
+function isEditing() {
+  return Boolean(document.querySelector(".inline-editor textarea:focus, .inline-editor[data-open='1']"));
+}
+
+// ---------------------------------------------------------------------------
+// The driver's screen: their routes, then one route with everything needed at
+// each door, one stop at a time.
+// ---------------------------------------------------------------------------
+function driverRoutes() {
+  const vandaag = isoDay(new Date());
+  const tot = daysFromToday(7);
+  return state.plan
+    .filter((planned) => planned.date >= vandaag && planned.date <= tot)
+    .sort((a, b) => `${a.date}${a.number}`.localeCompare(`${b.date}${b.number}`));
+}
+
+function dayNoteFor(date) {
+  return state.dayNotes.find((entry) => entry.date === date)?.note || "";
+}
+
+function renderDriver() {
+  const holder = document.querySelector("#driverView");
+  if (!holder || state.role !== "driver" || isEditing()) return;
+  const open = state.plan.find((planned) => planned.id === state.driverRouteId);
+  if (open) renderDriverRoute(holder, open);
+  else renderDriverList(holder);
+}
+
+function renderDriverList(holder) {
+  const ritten = driverRoutes();
+  const vandaag = isoDay(new Date());
+  const perDag = [...new Set(ritten.map((planned) => planned.date))];
+
+  holder.innerHTML = `
+    <div class="view-head"><h1>Jouw ritten</h1>
+      <p>${ritten.length ? "Tik op een rit om de stops te zien." : "Er staat deze week nog geen rit voor je klaar."}</p></div>
+    ${perDag.map((dag) => {
+      const naam = new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag));
+      const dagnotitie = dayNoteFor(dag);
+      return `<section class="driver-day${dag === vandaag ? " vandaag" : ""}">
+        <h2>${dag === vandaag ? `Vandaag · ${naam}` : naam}</h2>
+        ${dagnotitie ? `<p class="note-box">${escapeHtml(dagnotitie)}</p>` : ""}
+        ${ritten.filter((planned) => planned.date === dag).map((planned) => {
+          const status = plannedRouteStatus(planned);
+          const klaar = status.stops.filter((stop) => stop.status === "bezorgd").length;
+          return `<button class="driver-route${planned.abortedAt ? " afgebroken" : ""}" type="button" data-planned="${planned.id}">
+            <span class="rit-nummer">Rit ${planned.number || "?"}</span>
+            <b>${escapeHtml(planned.name)}</b>
+            <span>${planned.abortedAt ? "Afgebroken" : `${status.open.length} te gaan${klaar ? ` · ${klaar} bezorgd` : ""}`}</span>
+            ${planned.note ? `<em>${escapeHtml(planned.note)}</em>` : ""}
+          </button>`;
+        }).join("")}
+      </section>`;
+    }).join("")}`;
+
+  holder.querySelectorAll(".driver-route").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.driverRouteId = button.dataset.planned;
+      // Opening is the moment to check: what Shopify says now, not this morning.
+      await refreshData();
+      state.openPlan = state.plan.find((planned) => planned.id === state.driverRouteId) || null;
+      renderDriver();
+      window.scrollTo({ top: 0 });
+    });
+  });
+}
+
+function renderDriverRoute(holder, planned) {
+  const status = plannedRouteStatus(planned);
+  const volgorde = optimizedStopOrder(status.open);
+  const erbij = state.lastFetchOk && !planned.abortedAt ? nearbyAdditions(status.open) : [];
+  const dagnotitie = dayNoteFor(planned.date);
+  const telLink = (nummer) => `tel:${String(nummer).replace(/[^\d+]/g, "")}`;
+
+  holder.innerHTML = `
+    <button id="driverBack" class="button subtle-action driver-back" type="button">‹ Alle ritten</button>
+    <div class="driver-route-head">
+      <h1><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${escapeHtml(planned.name)}</h1>
+      <p>${formatDate(planned.date)} · ${status.open.length} te gaan</p>
+    </div>
+    ${planned.note ? `<p class="note-box"><b>Van de planner:</b> ${escapeHtml(planned.note)}</p>` : ""}
+    ${dagnotitie ? `<p class="note-box"><b>Deze dag:</b> ${escapeHtml(dagnotitie)}</p>` : ""}
+    ${state.lastFetchOk ? "" : '<p class="plan-offline">Geen verbinding. Je ziet de rit zoals hij bij het laatste verversen was.</p>'}
+    ${planned.abortedAt ? `<p class="note-box afgebroken">Deze rit is afgebroken${planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : ""}.</p>` : ""}
+    ${volgorde.length ? `<a class="button primary driver-maps" href="${googleMapsUrl(volgorde)}" target="_blank" rel="noreferrer">Hele rit openen in Google Maps</a>` : ""}
+
+    <ol class="driver-stops">
+      ${volgorde.map((order, index) => `<li class="driver-stop">
+        <div class="driver-stop-nr">${index + 1}</div>
+        <div class="driver-stop-body">
+          <b>${escapeHtml(order.customer || "Onbekende klant")}</b>
+          <a class="driver-address" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">${escapeHtml(order.fullAddress || addressSummary(order))}</a>
+          ${order.phone ? `<a class="driver-phone" href="${telLink(order.phone)}">Bel ${escapeHtml(order.phone)}</a>` : ""}
+          <span class="driver-products">${productSummary(order)}</span>
+          ${order.customerNote ? `<span class="driver-customer-note">Klant schreef: ${escapeHtml(order.customerNote)}</span>` : ""}
+          <span class="driver-meta">${order.id} · ${order.webshop || ""} · ${deliveryMinutes(order)} min lossen</span>
+          ${planned.abortedAt ? "" : `<button class="button primary mark-delivered driver-deliver" type="button" data-order-key="${orderKey(order)}">Bezorgd</button>`}
+        </div>
+      </li>`).join("")}
+    </ol>
+
+    ${status.stops.filter((stop) => stop.status !== "open").length ? `<ul class="plan-stops">${status.stops.filter((stop) => stop.status !== "open").map((stop) =>
+      stop.status === "bezorgd"
+        ? `<li class="plan-stop klaar"><s>${stop.id}</s> bezorgd${stop.at ? ` om ${formatDateTime(stop.at)}` : ""}</li>`
+        : stop.status === "geannuleerd"
+          ? `<li class="plan-stop fout">${stop.id} is geannuleerd, niet afleveren</li>`
+          : `<li class="plan-stop fout">${stop.id} niet gevonden. Bel de planner.</li>`).join("")}</ul>` : ""}
+
+    ${erbij.length ? `<div class="plan-additions"><h3>Kan er nog bij</h3>${erbij.map((kandidaat) => {
+      const o = kandidaat.item.order;
+      return `<div class="plan-addition"><div><b>${o.id} · ${escapeHtml(o.city || "")}</b>
+        <span>${productSummary(o)}</span>
+        <span>+${formatMinutes(kandidaat.extra)}, rit wordt dan ${formatMinutes(kandidaat.totaal)}</span></div>
+        <button class="button primary accept-addition" type="button" data-key="${orderKey(o)}">Meenemen</button></div>`;
+    }).join("")}</div>` : ""}
+
+    ${planned.abortedAt ? "" : `<div class="inline-editor abort-box" id="abortBox">
+      <button id="abortOpen" class="button danger" type="button">Rit afbreken</button>
+      <div class="abort-form" hidden>
+        <p>Wat nog niet bezorgd is, gaat terug naar de planning. Wat al bezorgd is, blijft bezorgd.</p>
+        <label>Waarom? (mag leeg)<textarea id="abortReason" rows="2" maxlength="300" placeholder="Bijvoorbeeld: bus kapot, klant niet thuis"></textarea></label>
+        <div class="abort-actions">
+          <button id="abortConfirm" class="button danger" type="button">Ja, rit afbreken</button>
+          <button id="abortCancel" class="button subtle-action" type="button">Toch niet</button>
+        </div>
+      </div>
+    </div>`}`;
+
+  holder.querySelector("#driverBack").addEventListener("click", () => {
+    state.driverRouteId = null;
+    state.openPlan = null;
+    renderDriver();
+    window.scrollTo({ top: 0 });
+  });
+  holder.querySelectorAll(".driver-deliver").forEach((button) => {
+    const order = volgorde.find((item) => orderKey(item) === button.dataset.orderKey);
+    button.addEventListener("click", () => markDelivered(order, button));
+  });
+  holder.querySelectorAll(".accept-addition").forEach((button) => {
+    const kandidaat = erbij.find((k) => orderKey(k.item.order) === button.dataset.key);
+    button.addEventListener("click", () => acceptAddition(kandidaat.item.order, button));
+  });
+
+  const box = holder.querySelector("#abortBox");
+  if (box) {
+    const form = box.querySelector(".abort-form");
+    box.querySelector("#abortOpen").addEventListener("click", () => {
+      form.hidden = false;
+      box.dataset.open = "1";
+      box.querySelector("#abortOpen").hidden = true;
+      box.querySelector("#abortReason").focus();
+    });
+    box.querySelector("#abortCancel").addEventListener("click", () => {
+      form.hidden = true;
+      delete box.dataset.open;
+      box.querySelector("#abortOpen").hidden = false;
+    });
+    box.querySelector("#abortConfirm").addEventListener("click", (event) => {
+      abortRoute(planned, box.querySelector("#abortReason").value, event.currentTarget);
+    });
+  }
+}
+
+async function abortRoute(planned, reden, button) {
+  button.disabled = true;
+  button.textContent = "Bezig…";
+  let response = null;
+  try {
+    response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/abort`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: planned.id, date: planned.date, reason: reden }),
+    });
+  } catch {
+    response = null;
+  }
+  if (!response?.ok) {
+    window.alert("Afbreken is niet gelukt. Probeer het opnieuw als je bereik hebt; de rit staat nog zoals hij stond.");
+    button.disabled = false;
+    button.textContent = "Ja, rit afbreken";
+    return;
+  }
+  const { route } = await response.json();
+  const terug = (route.droppedKeys || []).length;
+  const klaar = (route.orderKeys || []).length;
+  // Done typing: let go of the reason field, or the redraw that follows would
+  // still think someone is busy in it and leave the old route on screen.
+  document.querySelector("#abortBox")?.removeAttribute("data-open");
+  document.activeElement?.blur?.();
+  window.alert(`Rit ${route.number || "?"} is afgebroken. ${klaar} bezorgd, ${terug} ${terug === 1 ? "order gaat" : "orders gaan"} terug naar de planning.`);
+  state.driverRouteId = null;
+  state.openPlan = null;
+  await refreshData();
+}
+
+// Text typed by people (notes, reasons, customer notes) goes into the page as
+// text, never as markup.
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (teken) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[teken]);
+}
+
+// ---------------------------------------------------------------------------
+// The planner's notes: one on a route, one on a day, both edited in place.
+// ---------------------------------------------------------------------------
+async function saveRouteNote(planned, note) {
+  const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/note`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: planned.id, date: planned.date, note }),
+  }).catch(() => null);
+  return Boolean(response?.ok);
+}
+
+async function saveDayNote(date, note) {
+  const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/day-note`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ date, note }),
+  }).catch(() => null);
+  return Boolean(response?.ok);
+}
+
+function noteEditor({ label, value, onSave }) {
+  const wrap = document.createElement("div");
+  wrap.className = "inline-editor note-editor";
+  wrap.innerHTML = `<button class="note-toggle" type="button">${value ? "Opmerking wijzigen" : label}</button>
+    <div class="note-form" hidden>
+      <textarea rows="2" maxlength="1000" placeholder="Bijvoorbeeld: eerst Doorn, klant wil voor 10 uur">${escapeHtml(value)}</textarea>
+      <div class="note-actions"><button class="button primary note-save" type="button">Opslaan</button>
+      <button class="button subtle-action note-cancel" type="button">Annuleren</button></div>
+    </div>`;
+  const form = wrap.querySelector(".note-form");
+  const toggle = wrap.querySelector(".note-toggle");
+  toggle.addEventListener("click", () => {
+    form.hidden = false;
+    toggle.hidden = true;
+    wrap.dataset.open = "1";
+    wrap.querySelector("textarea").focus();
+  });
+  wrap.querySelector(".note-cancel").addEventListener("click", () => {
+    form.hidden = true;
+    toggle.hidden = false;
+    delete wrap.dataset.open;
+  });
+  wrap.querySelector(".note-save").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = "Bezig…";
+    const gelukt = await onSave(wrap.querySelector("textarea").value);
+    delete wrap.dataset.open;
+    document.activeElement?.blur?.();
+    if (!gelukt) window.alert("Opslaan is niet gelukt. Probeer het opnieuw.");
+    state.plan = await fetchPlan();
+    renderAgenda();
+  });
+  return wrap;
+}
+
 // A route is named for where it goes, not for the compass sector it was grouped
 // into: two routes out of one direction would otherwise carry the same name.
 function routeLabel(route) {
@@ -455,6 +736,7 @@ function renderAgenda() {
     teller.textContent = komend.length;
     teller.hidden = !komend.length;
   }
+  if (isEditing()) return;
 
   const dagen = [];
   for (let stap = 0; stap < 14; stap += 1) dagen.push(daysFromToday(stap));
@@ -470,13 +752,21 @@ function renderAgenda() {
     const kiesbaar = inHand && dag >= vandaag;
     return `<article class="agenda-day${dag === vandaag ? " vandaag" : ""}${dag < vandaag ? " achterstallig" : ""}${ritten.length ? "" : " leeg"}${kiesbaar ? " kiesbaar" : ""}" data-day="${dag}">
       <h3>${label}</h3>
+      ${dayNoteFor(dag) ? `<p class="agenda-day-note">${escapeHtml(dayNoteFor(dag))}</p>` : ""}
+      ${dag >= vandaag ? `<div class="day-note-slot" data-day="${dag}"></div>` : ""}
       ${kiesbaar ? `<button class="button primary place-here" type="button" data-day="${dag}">Rit hier inplannen</button>` : ""}
       ${ritten.map((planned) => {
         const status = plannedRouteStatus(planned);
         const weg = status.stops.length - status.open.length;
-        return `<div class="agenda-route">
-          <b><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${planned.name}</b>
-          <span>${status.open.length} ${status.open.length === 1 ? "stop" : "stops"}${weg ? ` · ${weg} al afgehandeld of niet gevonden` : ""}</span>
+        const afgebroken = planned.abortedAt
+          ? `<p class="agenda-aborted">Afgebroken door ${planned.abortedBy || "iemand"} om ${formatDateTime(planned.abortedAt)}${planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : ""}. ${(planned.droppedKeys || []).length} terug naar de planning: ${(planned.droppedKeys || []).map((key) => key.split(":").pop()).join(", ") || "geen"}.</p>`
+          : "";
+        return `<div class="agenda-route${planned.abortedAt ? " afgebroken" : ""}">
+          <b><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${escapeHtml(planned.name)}</b>
+          <span>${planned.abortedAt ? `${status.stops.filter((stop) => stop.status === "bezorgd").length} bezorgd` : `${status.open.length} ${status.open.length === 1 ? "stop" : "stops"}${weg ? ` · ${weg} al afgehandeld of niet gevonden` : ""}`}</span>
+          ${planned.note ? `<p class="agenda-note">${escapeHtml(planned.note)}</p>` : ""}
+          ${afgebroken}
+          ${planned.abortedAt ? "" : `<div class="note-slot" data-planned="${planned.id}"></div>`}
           <div class="agenda-route-actions">
             <button class="button primary open-planned" type="button" data-planned="${planned.id}">Rit openen</button>
             <button class="button subtle-action drop-planned" type="button" data-planned="${planned.id}">Uit agenda</button>
@@ -495,6 +785,14 @@ function renderAgenda() {
   });
   holder.querySelectorAll(".drop-planned").forEach((button) => {
     button.addEventListener("click", () => removePlannedRoute(state.plan.find((planned) => planned.id === button.dataset.planned)));
+  });
+  holder.querySelectorAll(".note-slot").forEach((slot) => {
+    const planned = state.plan.find((entry) => entry.id === slot.dataset.planned);
+    if (planned) slot.appendChild(noteEditor({ label: "Opmerking voor de bezorger", value: planned.note || "", onSave: (note) => saveRouteNote(planned, note) }));
+  });
+  holder.querySelectorAll(".day-note-slot").forEach((slot) => {
+    const dag = slot.dataset.day;
+    slot.appendChild(noteEditor({ label: "Opmerking bij deze dag", value: dayNoteFor(dag), onSave: (note) => saveDayNote(dag, note) }));
   });
 }
 
@@ -1396,6 +1694,7 @@ function rebuildPlanning() {
   renderSummary();
   renderAgenda();
   renderOpenPlan();
+  renderDriver();
   renderManualRouteBar();
   renderPlanningOverview();
   renderOrders();
@@ -1478,7 +1777,7 @@ function ensureOperatorKey() {
   const stored = storedOperatorKey();
   if (stored) return stored;
   if (operatorPromptDeclined) return "";
-  return askOperatorKey("Operatorcode om de planning te openen");
+  return askOperatorKey("Code om de planning te openen");
 }
 
 // Every backend call carries the operator code. On a rejected code the planner
@@ -1493,7 +1792,8 @@ async function backendFetch(url, options = {}) {
   let response = await send();
   if (response.status === 401 && usesBackend && !operatorPromptDeclined) {
     localStorage.removeItem(operatorKeyStorageKey);
-    if (!askOperatorKey("Operatorcode klopt niet. Probeer het opnieuw:")) return response;
+    state.role = null;
+    if (!askOperatorKey("Die code klopt niet. Probeer het opnieuw:")) return response;
     response = await send();
   }
   return response;
@@ -1506,7 +1806,7 @@ async function refreshData() {
   try {
     const separator = CONFIG.dataUrl.includes("?") ? "&" : "?";
     const response = await backendFetch(`${CONFIG.dataUrl}${separator}t=${Date.now()}`, { cache: "no-store" });
-    if (response.status === 401) throw new Error("Operatorcode ontbreekt of klopt niet");
+    if (response.status === 401) throw new Error("Code ontbreekt of klopt niet");
     if (!response.ok) throw new Error("Data kon niet worden geladen");
     const loaded = await response.json();
     state.allOrders = loaded;
@@ -1517,6 +1817,7 @@ async function refreshData() {
     state.driveMinutes = await fetchDriveMinutes(state.orders);
     state.history = await fetchHistory();
     state.plan = await fetchPlan();
+    if (!state.role) applyRole(await fetchRole());
     rebuildPlanning();
     renderHistory();
     const klok = new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
@@ -1572,7 +1873,9 @@ async function fetchPlan() {
   try {
     const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan?from=${daysFromToday(-7)}&t=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) return state.plan;
-    return (await response.json()).routes || [];
+    const payload = await response.json();
+    state.dayNotes = payload.dayNotes || [];
+    return payload.routes || [];
   } catch {
     return state.plan;
   }
@@ -1699,13 +2002,18 @@ async function acceptAddition(order, button) {
     return;
   }
 
-  const saved = await savePlan({
-    id: planned.id,
-    date: planned.date,
-    fromDate: planned.date,
-    name: planned.name,
-    keys: [...planKeys(planned), orderKey(order)],
-  });
+  // One stop onto an existing route, the only change the driver may make to it.
+  let saved = null;
+  try {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/add-stop`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: planned.id, date: planned.date, orderKey: orderKey(order) }),
+    });
+    if (response.ok) saved = (await response.json()).route || null;
+  } catch {
+    saved = null;
+  }
   if (!saved) {
     window.alert("Toevoegen is niet gelukt, je rijdt de oorspronkelijke rit. Probeer het opnieuw als je bereik hebt.");
     renderOpenPlan();

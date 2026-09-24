@@ -12,7 +12,9 @@
  * - SHOPIFY_WEBHOOK_SECRET_<SHOP_DOMAIN>: optional per-shop secret, for example SHOPIFY_WEBHOOK_SECRET_SLOWFEEDER_SPECIALIST_MYSHOPIFY_COM
  * - PLANNING_ORDERS: Cloudflare KV namespace
  * - CORS_ORIGIN: optional, for example https://bartvanengelenhoven.github.io
- * - OPERATOR_KEY: shared operator key required for reading orders and for write actions
+ * - OPERATOR_KEY: the planner's code; opens everything
+ * - DRIVER_KEY: optional driver's code; opens the day's routes, reporting deliveries,
+ *   taking a parcel along and breaking a route off, but no planning
  * - SHOPIFY_CLIENT_ID: Shopify app client ID, required for OAuth install
  * - SHOPIFY_CLIENT_SECRET: Shopify app secret, required for OAuth install
  * - SHOPIFY_CLIENT_ID_<SHOP_DOMAIN>: optional per-shop Shopify app client ID
@@ -103,11 +105,32 @@ async function route(request, env) {
     return removePlanRoute(request, env);
   }
 
+  if (request.method === "GET" && url.pathname === "/whoami") {
+    const role = roleFor(request, env);
+    return role ? json({ role }, 200, env) : json({ error: "Unauthorized" }, 401, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/plan/add-stop") {
+    return addPlanStop(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/plan/abort") {
+    return abortPlanRoute(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/plan/note") {
+    return setPlanNote(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/plan/day-note") {
+    return setDayNote(request, env);
+  }
+
   return json({ error: "Not found" }, 404, env);
 }
 
 async function getOrders(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
 
   const list = await env.PLANNING_ORDERS.list({ prefix: "order:" });
   // A key listed a moment ago can be gone by the time it is read, when a
@@ -121,7 +144,7 @@ async function getOrders(request, env) {
 }
 
 async function getHistory(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
 
   const list = await env.PLANNING_ORDERS.list({ prefix: "delivered:" });
   const entries = (await Promise.all(
@@ -175,7 +198,7 @@ async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
 }
 
 async function markDelivered(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
 
   const payload = await request.json();
   const shopDomain = normalizeShopDomain(payload.shopDomain);
@@ -282,7 +305,7 @@ async function undoDelivered(request, env) {
 }
 
 async function setOwnDelivery(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
 
   const payload = await request.json();
   const shopDomain = normalizeShopDomain(payload.shopDomain);
@@ -451,7 +474,7 @@ async function pdokLookup(address) {
 }
 
 async function geocodeAddresses(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
 
   const payload = await request.json().catch(() => ({}));
   const addresses = [...new Set((Array.isArray(payload.addresses) ? payload.addresses : [])
@@ -498,7 +521,7 @@ function isPlanDate(value) {
 }
 
 async function getPlan(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
 
   const from = new URL(request.url).searchParams.get("from");
   const list = await env.PLANNING_ORDERS.list({ prefix: PLAN_PREFIX });
@@ -510,7 +533,13 @@ async function getPlan(request, env) {
     .filter(Boolean)
     .sort((a, b) => `${a.date}${a.assignedAt}`.localeCompare(`${b.date}${b.assignedAt}`));
 
-  return json({ routes }, 200, env);
+  const dayList = await env.PLANNING_ORDERS.list({ prefix: "plan-day:" });
+  const dayNotes = (await Promise.all(dayList.keys
+    .filter((key) => !isPlanDate(from) || key.name.slice("plan-day:".length) >= from)
+    .map((key) => env.PLANNING_ORDERS.get(key.name, "json"))))
+    .filter(Boolean);
+
+  return json({ routes, dayNotes }, 200, env);
 }
 
 async function assignPlanRoute(request, env) {
@@ -576,6 +605,82 @@ async function claimRouteNumber(env) {
   return nummer;
 }
 
+async function readPlanRecord(env, date, id) {
+  if (!isPlanDate(date) || !id) return null;
+  return env.PLANNING_ORDERS.get(`${PLAN_PREFIX}${date}:${id}`, "json");
+}
+
+async function writePlanRecord(env, record) {
+  record.updatedAt = new Date().toISOString();
+  await env.PLANNING_ORDERS.put(`${PLAN_PREFIX}${record.date}:${record.id}`, JSON.stringify(record));
+  return record;
+}
+
+// The driver taking one more stop along. Kept apart from /plan/assign, which
+// rewrites a whole route and is the planner's alone.
+async function addPlanStop(request, env) {
+  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const payload = await request.json().catch(() => ({}));
+  const key = String(payload.orderKey || "");
+  const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
+  if (!record) return json({ error: "Rit niet gevonden" }, 404, env);
+  if (record.abortedAt) return json({ error: "Deze rit is afgebroken" }, 409, env);
+  if (!key.includes(":")) return json({ error: "orderKey ontbreekt" }, 400, env);
+
+  record.orderKeys = [...new Set([...(record.orderKeys || []), key])];
+  return json({ route: await writePlanRecord(env, record) }, 200, env);
+}
+
+// Breaking a route off halfway. Which stops were delivered is decided here from
+// the delivered records, not from whatever the driver's phone last loaded: the
+// phone may have been offline for the last three drops. Delivered stops stay on
+// the route as its record; the rest are released so the planning offers them
+// again, and are kept apart so the planner can see what came back and why.
+async function abortPlanRoute(request, env) {
+  const role = roleFor(request, env);
+  if (!role) return json({ error: "Unauthorized" }, 401, env);
+  const payload = await request.json().catch(() => ({}));
+  const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
+  if (!record) return json({ error: "Rit niet gevonden" }, 404, env);
+  if (record.abortedAt) return json({ route: record }, 200, env);
+
+  const keys = record.orderKeys || [];
+  const delivered = await Promise.all(keys.map(async (key) =>
+    key.includes(":") && !key.startsWith("?:") && Boolean(await env.PLANNING_ORDERS.get(`delivered:${key}`))
+  ));
+
+  record.orderKeys = keys.filter((_, index) => delivered[index]);
+  record.droppedKeys = keys.filter((_, index) => !delivered[index]);
+  record.abortedAt = new Date().toISOString();
+  record.abortedBy = role === "driver" ? "bezorger" : "planner";
+  record.abortReason = String(payload.reason || "").slice(0, 300);
+  return json({ route: await writePlanRecord(env, record) }, 200, env);
+}
+
+async function setPlanNote(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const payload = await request.json().catch(() => ({}));
+  const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
+  if (!record) return json({ error: "Rit niet gevonden" }, 404, env);
+  record.note = String(payload.note || "").trim().slice(0, 1000);
+  return json({ route: await writePlanRecord(env, record) }, 200, env);
+}
+
+// A note for a whole day, "bus in onderhoud", apart from any one route.
+async function setDayNote(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const payload = await request.json().catch(() => ({}));
+  const date = String(payload.date || "");
+  if (!isPlanDate(date)) return json({ error: "date moet JJJJ-MM-DD zijn" }, 400, env);
+  const note = String(payload.note || "").trim().slice(0, 1000);
+  if (note) {
+    await env.PLANNING_ORDERS.put(`plan-day:${date}`, JSON.stringify({ date, note, updatedAt: new Date().toISOString() }));
+  } else {
+    await env.PLANNING_ORDERS.delete(`plan-day:${date}`);
+  }
+  return json({ date, note }, 200, env);
+}
+
 async function removePlanRoute(request, env) {
   if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
 
@@ -608,7 +713,7 @@ function driveCacheKey(from) {
 // it has been measured, which keeps a refresh to a handful of KV reads and only
 // writes when an address is new.
 async function estimateRoute(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
   if (!env.GOOGLE_MAPS_API_KEY) return json({ error: "Google Maps API key is not configured" }, 501, env);
 
   const payload = await request.json().catch(() => ({}));
@@ -702,9 +807,25 @@ async function shopifyGraphql(shopDomain, token, query, variables) {
 }
 
 function operatorAllowed(request, env) {
-  const configured = String(env.OPERATOR_KEY || "");
+  return roleFor(request, env) === "planner";
+}
+
+// Two codes, two roles. The planner's code opens everything. The driver's code,
+// DRIVER_KEY, opens what is needed on the road: reading the day, reporting a
+// delivery, taking a parcel along, breaking a route off. It cannot plan, delete
+// or undo. Without DRIVER_KEY set there is simply no driver role.
+function roleFor(request, env) {
   const provided = request.headers.get("x-operator-key") || "";
-  return Boolean(configured) && timingSafeEqual(configured, provided);
+  if (!provided) return null;
+  const planner = String(env.OPERATOR_KEY || "");
+  if (planner && timingSafeEqual(planner, provided)) return "planner";
+  const driver = String(env.DRIVER_KEY || "");
+  if (driver && timingSafeEqual(driver, provided)) return "driver";
+  return null;
+}
+
+function anyRoleAllowed(request, env) {
+  return roleFor(request, env) !== null;
 }
 
 async function startShopifyOAuth(request, env) {
@@ -877,6 +998,10 @@ export function mapShopifyOrder(order, shopDomain = "") {
     deliveryMinutes: deliveryMinutes(lineItems),
     weightKg: totalWeightKg(lineItems),
     products: lineItems.map(productLabel).filter(Boolean),
+    // What the driver needs at the door: a number to ring when nobody answers,
+    // and whatever the customer wrote at checkout ("achterom, hond los").
+    phone: String(shipping.phone || order.phone || order.customer?.phone || "").trim(),
+    customerNote: String(order.note || "").trim().slice(0, 500),
   };
 }
 

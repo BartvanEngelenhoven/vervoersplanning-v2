@@ -218,6 +218,12 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
 .button.secondary { background: white; color: var(--brand); }
 .button.ghost { background: #edf1ee; color: #27483f; text-decoration: none; white-space: nowrap; }
 .button.manual-action { background: var(--brand); color: white; }
+/* The main action on a screen. Used across the portal and the driver's view,
+   and until now never defined, so those buttons fell back to a bare default. */
+.button.primary { background: var(--brand); color: #fff; }
+.button.primary:hover { background: var(--brand-2); }
+.button:disabled { opacity: .6; cursor: default; }
+a.button { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
 .button.subtle-action { background: #f7f9f6; color: var(--muted); border: 1px solid var(--line); }
 
 .history-panel, .rules-panel { margin-top: .8rem; }
@@ -461,3 +467,66 @@ details[open] > summary .fold-hint::after { content: " ▴"; }
 .mobile-brand .mobile-logos span { display: flex; padding: .25rem .4rem; border-radius: 6px; background: #fff; }
 .mobile-brand .mobile-logos span.slowfeeder { background: #2f4a2b; }
 .mobile-brand .button { min-height: 38px; padding: .35rem .8rem; }
+
+
+/* ======================================================================
+   Bezorger: alleen de eigen ritten, groot en duimvriendelijk
+   ====================================================================== */
+.role-driver .sidebar-nav { display: none; }
+@media (max-width: 860px) { .role-driver .sidebar { display: none; } .role-driver .content { padding-bottom: 2rem; } }
+
+.driver-view { max-width: 760px; }
+.driver-day { margin-bottom: 1.4rem; }
+.driver-day h2 { margin: 0 0 .6rem; font-size: 1.05rem; text-transform: capitalize; }
+.driver-day.vandaag h2 { color: var(--brand-2); }
+.driver-route { display: grid; gap: .2rem; width: 100%; margin-bottom: .6rem; padding: 1rem 1.1rem; text-align: left;
+  border: 1px solid var(--line); border-left: 5px solid var(--brand-2); border-radius: 14px; background: var(--paper);
+  font: inherit; color: inherit; cursor: pointer; }
+.driver-route b { font-size: 1.1rem; }
+.driver-route span:not(.rit-nummer) { color: var(--muted); font-size: .9rem; }
+.driver-route em { font-style: normal; font-size: .88rem; color: #6b4d00; }
+.driver-route.afgebroken { border-left-color: var(--bad); opacity: .7; }
+.driver-route .rit-nummer { justify-self: start; }
+
+.driver-back { margin-bottom: .6rem; min-height: 44px; }
+.driver-route-head h1 { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem; margin: 0; font-size: 1.5rem; }
+.driver-route-head p { margin: .25rem 0 .9rem; color: var(--muted); }
+a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin: .4rem 0 1rem; font-size: 1.05rem; }
+
+.note-box { margin: 0 0 .8rem; padding: .8rem 1rem; border-radius: 12px; border: 1px solid #e6c766; background: #fdf6e0; font-size: .95rem; }
+.note-box.afgebroken { border-color: #e2a39b; background: #fbe9e6; }
+
+.driver-stops { list-style: none; margin: 0 0 1rem; padding: 0; display: grid; gap: .7rem; }
+.driver-stop { display: grid; grid-template-columns: 2.4rem minmax(0, 1fr); gap: .7rem; padding: 1rem;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
+.driver-stop-nr { display: grid; place-items: center; width: 2.4rem; height: 2.4rem; border-radius: 999px;
+  background: var(--brand); color: #fff; font-weight: 900; font-size: 1.05rem; }
+.driver-stop-body { display: grid; gap: .3rem; min-width: 0; }
+.driver-stop-body b { font-size: 1.1rem; }
+.driver-address { color: var(--brand-2); font-weight: 650; text-decoration: underline; overflow-wrap: anywhere; }
+.driver-phone { justify-self: start; display: inline-flex; align-items: center; min-height: 44px; padding: .4rem .9rem;
+  border-radius: 10px; background: #e7f2ec; color: var(--brand); font-weight: 750; text-decoration: none; }
+.driver-products { font-size: .92rem; }
+.driver-customer-note { padding: .45rem .6rem; border-radius: 8px; background: #fdf6e0; font-size: .9rem; }
+.driver-meta { color: var(--muted); font-size: .8rem; }
+.driver-deliver { justify-self: stretch; min-height: 52px; margin-top: .3rem; font-size: 1.05rem; }
+
+.button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+.abort-box { margin: 1.4rem 0 0; padding-top: 1rem; border-top: 1px solid var(--line); }
+.abort-box > .button { width: 100%; min-height: 48px; }
+.abort-form { display: grid; gap: .6rem; }
+.abort-form[hidden] { display: none; }
+.abort-form label { display: grid; gap: .3rem; font-weight: 650; }
+.abort-form textarea, .note-form textarea { width: 100%; padding: .6rem; border: 1px solid var(--line); border-radius: 10px; font: inherit; }
+.abort-actions, .note-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.abort-actions .button, .note-actions .button { min-height: 44px; }
+
+/* Opmerkingen in de agenda */
+.agenda-note, .agenda-day-note { margin: .15rem 0; padding: .4rem .55rem; border-radius: 8px; background: #fdf6e0; font-size: .82rem; }
+.agenda-aborted { margin: .15rem 0; padding: .4rem .55rem; border-radius: 8px; background: #fbe9e6; color: #7d2a20; font-size: .8rem; }
+.agenda-route.afgebroken b { opacity: .7; }
+.note-editor { margin: .2rem 0; }
+.note-toggle { padding: 0; border: 0; background: none; color: var(--brand-2); font: inherit; font-size: .82rem; font-weight: 650;
+  text-decoration: underline; cursor: pointer; }
+.note-toggle[hidden], .note-form[hidden] { display: none; }
+.note-form { display: grid; gap: .4rem; margin-top: .3rem; }

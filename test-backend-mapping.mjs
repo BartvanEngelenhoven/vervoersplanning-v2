@@ -48,6 +48,8 @@ assert.deepEqual(mapShopifyOrder(deliveryOrder, "slowfeeder-specialist.myshopify
   deliveryMinutes: 20,
   weightKg: 630,
   products: ["20x Kunststof rijplaat", "4x Koppelstuk"],
+  phone: "",
+  customerNote: "",
 });
 
 const pickupOrder = {
@@ -90,5 +92,20 @@ const rijplatenShippingOrder = {
 const mappedRijplatenOrder = mapShopifyOrder(rijplatenShippingOrder, "de-rijplaten-specialist.myshopify.com");
 assert.equal(mappedRijplatenOrder.requiresVanRoekelDelivery, true);
 assert.equal(mappedRijplatenOrder.dueDate, "2026-09-30");
+
+// The driver needs a number to ring and whatever the customer wrote at checkout.
+const doorstepOrder = {
+  ...deliveryOrder,
+  note: "Achterom, de hond loopt los",
+  phone: "+31 6 00000000",
+  shipping_address: { ...deliveryOrder.shipping_address, phone: "+31 6 11111111" },
+};
+const mappedDoorstep = mapShopifyOrder(doorstepOrder, "slowfeeder-specialist.myshopify.com");
+assert.equal(mappedDoorstep.phone, "+31 6 11111111", "the shipping phone wins over the order phone");
+assert.equal(mappedDoorstep.customerNote, "Achterom, de hond loopt los");
+
+// The Shopify title never says "houten": a hay house must still get its 90 minutes.
+const hayHouseOrder = { ...deliveryOrder, line_items: [{ title: "Slowfeeder hooihuisje voor paarden. Compleet geleverd", grams: 0, quantity: 1 }] };
+assert.equal(mapShopifyOrder(hayHouseOrder, "slowfeeder-specialist.myshopify.com").deliveryMinutes, 90);
 
 console.log("backend mapping tests passed");
