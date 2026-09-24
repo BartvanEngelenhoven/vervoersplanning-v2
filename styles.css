@@ -221,6 +221,14 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
 .button.subtle-action { background: #f7f9f6; color: var(--muted); border: 1px solid var(--line); }
 
 .history-panel, .rules-panel { margin-top: .8rem; }
+.history-panel summary { cursor: pointer; list-style: none; user-select: none; }
+.history-panel summary::-webkit-details-marker { display: none; }
+.history-panel summary:hover { background: #f6f8f5; }
+.history-panel summary:focus-visible { outline: 2px solid var(--brand-2); outline-offset: -2px; }
+.history-count { display: inline-flex; align-items: center; gap: .5rem; color: var(--muted); font-size: .85rem; font-weight: 650; white-space: nowrap; }
+.history-count::after { content: ""; width: .5rem; height: .5rem; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg) translate(-2px, -2px); transition: transform .15s ease; }
+.history-panel details[open] .history-count::after { transform: rotate(225deg) translate(-2px, -2px); }
+.history-panel details[open] summary { border-bottom: 1px solid var(--line); }
 .history-list { display: grid; gap: .65rem; padding: .85rem; }
 .history-item { display: flex; align-items: center; justify-content: space-between; gap: .8rem; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
 .history-item b, .history-item span, .history-item small { display: block; }

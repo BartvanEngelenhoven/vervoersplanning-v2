@@ -50,6 +50,7 @@ const operatorKeyStorageKey = "vervoersplanning.operatorKey.v1";
 // are still in the store, so this is undone by removing the date. An order due
 // on or after it is never hidden, however far past its deadline it runs.
 const hideOrdersDueBefore = "2026-09-24";
+const historyOpenKey = "vervoersplanning.historieOpen.v1";
 const usesBackend = Boolean(window.VERVOERSPLANNING_CONFIG?.dataUrl);
 let operatorPromptDeclined = false;
 const businessClasses = {
@@ -834,6 +835,10 @@ async function markSelectedDelivered() {
 function renderHistory() {
   const holder = document.querySelector("#history");
   if (!holder) return;
+
+  const counter = document.querySelector("#historyCount");
+  if (counter) counter.textContent = state.history.length ? `${state.history.length} bezorgd` : "leeg";
+
   if (!state.history.length) {
     holder.innerHTML = '<p class="empty">Nog geen bezorgde orders in de historie.</p>';
     return;
@@ -1010,11 +1015,15 @@ function addNearbyPackages() {
     const order = item.order;
     if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) continue;
 
+    // Routes are packed to the edge of a day before parcels are offered them,
+    // so without this a couple of parcels would quietly turn 5:30 into 7:30.
+    const dayLimit = CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
     let best = null;
     state.routes.forEach((route, index) => {
       const merged = routeSummary(route.region, optimizedStopOrder([...route.orders, order]));
       const grows = merged.totalMinutes - route.totalMinutes;
-      if (grows <= CONFIG.packageDetourMinutes && (!best || grows < best.grows)) best = { index, grows, merged };
+      if (grows > CONFIG.packageDetourMinutes || merged.totalMinutes > dayLimit) return;
+      if (!best || grows < best.grows) best = { index, grows, merged };
     });
     if (!best) continue;
 
@@ -1188,6 +1197,24 @@ document.querySelector("#showRoutesButton")?.addEventListener("click", () => {
   planningView = "routes";
   renderPlanningOverview();
 });
+// The history is long and rarely the reason someone opens the planning, so it
+// starts folded and then stays however this browser last left it.
+const historyDetails = document.querySelector("#historyDetails");
+if (historyDetails) {
+  try {
+    historyDetails.open = localStorage.getItem(historyOpenKey) === "open";
+  } catch {
+    historyDetails.open = false;
+  }
+  historyDetails.addEventListener("toggle", () => {
+    try {
+      localStorage.setItem(historyOpenKey, historyDetails.open ? "open" : "dicht");
+    } catch {
+      // A browser refusing storage just means the fold is not remembered.
+    }
+  });
+}
+
 ensureOperatorKey();
 refreshData();
 setInterval(refreshData, CONFIG.refreshMs);

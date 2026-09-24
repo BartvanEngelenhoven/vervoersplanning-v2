@@ -90,10 +90,13 @@
       </section>
 
       <section class="panel history-panel" aria-labelledby="history-title">
-        <div class="panel-heading compact">
-          <div><p class="eyebrow">Historie</p><h2 id="history-title">Bezorgd gemeld</h2></div>
-        </div>
-        <div id="history" class="history-list"></div>
+        <details id="historyDetails">
+          <summary class="panel-heading compact">
+            <div><p class="eyebrow">Historie</p><h2 id="history-title">Bezorgd gemeld</h2></div>
+            <span class="history-count" id="historyCount"></span>
+          </summary>
+          <div id="history" class="history-list"></div>
+        </details>
       </section>
 
       <section class="panel rules-panel" aria-labelledby="rules-title">
