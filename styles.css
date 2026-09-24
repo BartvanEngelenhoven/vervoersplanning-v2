@@ -58,6 +58,8 @@ h2 { margin-bottom: 0; font-size: 1.35rem; letter-spacing: -.025em; }
 .view-toggle button.active { background: var(--brand); color: white; }
 .map-view { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(260px, .6fr); gap: .85rem; padding: .85rem; }
 .map-view[hidden], .routes-overview[hidden] { display: none; }
+.google-map-card { min-height: 520px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #e5ece7; }
+.google-map-card iframe { display: block; width: 100%; height: 520px; border: 0; }
 .map-board { position: relative; min-height: 420px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background:
   linear-gradient(135deg, rgba(255,255,255,.75), rgba(255,255,255,.35)),
   radial-gradient(circle at 56% 30%, rgba(23,130,83,.18), transparent 20%),
@@ -75,6 +77,12 @@ h2 { margin-bottom: 0; font-size: 1.35rem; letter-spacing: -.025em; }
 .map-pin.review { background: var(--warn); }
 .map-pin.exclude { background: var(--bad); }
 .map-side { display: grid; align-content: start; gap: .75rem; }
+.map-route-picker { display: grid; gap: .45rem; }
+.map-route-picker button { min-height: 38px; padding: .5rem .65rem; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfa; color: var(--ink); text-align: left; font-weight: 800; }
+.map-route-picker button.active { border-color: var(--brand); background: var(--brand); color: white; }
+.map-route-summary { display: grid; gap: .45rem; padding: .8rem; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
+.map-route-summary b, .map-route-summary span { display: block; }
+.map-route-summary span { color: var(--muted); font-size: .85rem; }
 .map-legend { display: flex; flex-wrap: wrap; gap: .55rem; padding: .7rem; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
 .map-legend span { display: inline-flex; align-items: center; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 750; }
 .map-dot { display: inline-block; width: .72rem; height: .72rem; border-radius: 999px; }
@@ -82,13 +90,15 @@ h2 { margin-bottom: 0; font-size: 1.35rem; letter-spacing: -.025em; }
 .map-dot.review { background: var(--warn); }
 .map-dot.exclude { background: var(--bad); }
 .map-order-list { display: grid; gap: .45rem; max-height: 340px; margin: 0; padding: 0; overflow: auto; list-style: none; }
-.map-order-list li { display: grid; grid-template-columns: auto auto 1fr; gap: .15rem .45rem; padding: .65rem; border: 1px solid var(--line); border-radius: 10px; background: white; }
-.map-order-list small { grid-column: 2 / -1; color: var(--muted); }
+.map-order-list li { display: grid; gap: .15rem; padding: .65rem; border: 1px solid var(--line); border-radius: 10px; background: white; }
+.map-order-list b, .map-order-list span, .map-order-list small { display: block; }
+.map-order-list span, .map-order-list small { color: var(--muted); font-size: .82rem; }
 .routes-overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; padding: .85rem; }
 .route-overview-card { display: grid; gap: .65rem; padding: 1rem; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
 .route-overview-card b, .route-overview-card span { display: block; }
 .route-overview-card span { color: var(--muted); font-size: .85rem; }
 .route-overview-card ol { margin: 0; padding-left: 1.2rem; color: var(--muted); font-size: .85rem; }
+.route-overview-actions { display: flex; flex-wrap: wrap; gap: .45rem; }
 .route-overview-card .button { justify-self: start; }
 
 .workspace { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(320px, .8fr); gap: .8rem; align-items: start; }
@@ -179,6 +189,7 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
   .workspace, .rules-panel { grid-template-columns: 1fr; }
   .route-panel { position: static; }
   .map-view, .routes-overview { grid-template-columns: 1fr; }
+  .google-map-card, .google-map-card iframe { height: 440px; min-height: 440px; }
   .rules-grid { grid-template-columns: repeat(3, minmax(0,1fr)); }
 }
 @media (max-width: 760px) {

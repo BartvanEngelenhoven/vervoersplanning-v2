@@ -21,6 +21,7 @@ const forcedIncludes = new Set(JSON.parse(localStorage.getItem(forcedIncludeKey)
 const DEPOT_POINT = { lat: 52.05, lon: 5.67 };
 const KM_TO_MINUTES = 1.15;
 let planningView = "map";
+let activeMapRouteIndex = 0;
 
 function decide(order) {
   if (order.cancelled) return { decision: "exclude", reason: "Order is geannuleerd" };
@@ -203,36 +204,38 @@ function renderPlanningOverview() {
 function renderPlanningMap() {
   const holder = document.querySelector("#mapView");
   if (!holder) return;
-  if (!state.decisions.length) {
-    holder.innerHTML = '<p class="empty">Nog geen orders om op de kaart te tonen.</p>';
+  if (!state.routes.length) {
+    holder.innerHTML = '<p class="empty">Nog geen rit om op Google Maps te tonen.</p>';
     return;
   }
-  const pins = state.decisions.map((item) => {
-    const position = mapPosition(item.order);
-    return `<button class="map-pin ${item.decision}" type="button" style="left:${position.x}%; top:${position.y}%;" title="${item.order.id} · ${item.order.city}">
-      <span>${pinLabel(item.order)}</span>
-    </button>`;
-  }).join("");
-  const list = state.decisions.map((item) => `<li>
-    <span class="map-dot ${item.decision}"></span>
-    <b>${item.order.id}</b>
-    <span>${item.order.city || "Plaats onbekend"}</span>
-    <small>${decisionLabels[item.decision]} · ${routeMinutesFromDepot(item.order)}</small>
+  activeMapRouteIndex = Math.min(activeMapRouteIndex, state.routes.length - 1);
+  const route = state.routes[activeMapRouteIndex];
+  const routeButtons = state.routes.map((item, index) => `<button class="${index === activeMapRouteIndex ? "active" : ""}" type="button" data-route-index="${index}">
+    Rit ${index + 1}: ${item.region} · ${formatMinutes(item.totalMinutes)}
+  </button>`).join("");
+  const stops = route.orders.map((order, index) => `<li>
+    <b>${index + 1}. ${order.city || "Plaats onbekend"} · ${order.id}</b>
+    <span>${productSummary(order)}</span>
+    <small>${addressSummary(order)}</small>
   </li>`).join("");
-  holder.innerHTML = `<div class="map-board" aria-label="Kaart met bestellingen">
-    <div class="map-country nl">Nederland</div>
-    <div class="map-country be">België</div>
-    <div class="map-depot" style="left:${mapPositionFromPoint(DEPOT_POINT).x}%; top:${mapPositionFromPoint(DEPOT_POINT).y}%;">Ede</div>
-    ${pins}
+  holder.innerHTML = `<div class="google-map-card">
+    <iframe title="Google Maps route ${route.region}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${googleMapsEmbedUrl(route.orders)}"></iframe>
   </div>
   <div class="map-side">
-    <div class="map-legend">
-      <span><i class="map-dot include"></i>Meenemen</span>
-      <span><i class="map-dot review"></i>Controleren</span>
-      <span><i class="map-dot exclude"></i>Niet meenemen</span>
+    <div class="map-route-picker">${routeButtons}</div>
+    <div class="map-route-summary">
+      <b>Rit ${activeMapRouteIndex + 1}: ${route.region}</b>
+      <span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span>
+      <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open groot in Google Maps</a>
     </div>
-    <ol class="map-order-list">${list}</ol>
+    <ol class="map-order-list">${stops}</ol>
   </div>`;
+  holder.querySelectorAll(".map-route-picker button").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeMapRouteIndex = Number(button.dataset.routeIndex);
+      renderPlanningOverview();
+    });
+  });
 }
 
 function renderRoutesOverview() {
@@ -245,8 +248,18 @@ function renderRoutesOverview() {
   holder.innerHTML = state.routes.map((route, index) => `<article class="route-overview-card">
     <div><b>${index + 1}. ${route.region}</b><span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span></div>
     <ol>${route.orders.map((order) => `<li>${order.city || "Plaats onbekend"} · ${order.id} · ${productSummary(order)}</li>`).join("")}</ol>
-    <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open in Maps</a>
+    <div class="route-overview-actions">
+      <button class="button manual-action show-route-map" type="button" data-route-index="${index}">Toon op kaart</button>
+      <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open in Maps</a>
+    </div>
   </article>`).join("");
+  holder.querySelectorAll(".show-route-map").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeMapRouteIndex = Number(button.dataset.routeIndex);
+      planningView = "map";
+      renderPlanningOverview();
+    });
+  });
 }
 
 function renderOrders() {
@@ -585,6 +598,10 @@ function renderHistory() {
 function googleMapsUrl(orders) {
   const stops = [CONFIG.depot, ...orders.map((order) => order.fullAddress || `${order.postcode} ${order.city}`), CONFIG.depot];
   return `https://www.google.com/maps/dir/${stops.map((stop) => encodeURIComponent(stop)).join("/")}`;
+}
+
+function googleMapsEmbedUrl(orders) {
+  return `${googleMapsUrl(orders)}?output=embed`;
 }
 
 function singleOrderMapsUrl(order) {
