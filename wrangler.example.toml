@@ -17,3 +17,10 @@ CORS_ORIGIN = "https://bartvanengelenhoven.github.io"
 # Those older versions predate the operator key and would serve customer
 # data without it, so previews stay off.
 preview_urls = false
+
+# The announcement at 16:00 Amsterdam time the day before a planned route.
+# Cron runs in UTC: 14:00 is 16:00 in summer time, 15:00 in winter time. The
+# worker checks which of the two it is and skips the other. It stays a trial
+# that only reports until AUTO_FULFILL is set to "aan".
+[triggers]
+crons = ["0 14,15 * * *"]

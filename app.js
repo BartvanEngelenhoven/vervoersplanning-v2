@@ -19,7 +19,7 @@ const CONFIG = {
   exceptionRouteMinutes: 480,
 };
 
-const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [], plan: [], dayNotes: [], allOrders: [], geo: {}, role: null, driverRouteId: null, openPlan: null, routeInHand: null, lastFetchOk: false, driveMinutes: null, driveDepot: "" };
+const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [], plan: [], dayNotes: [], announcements: [], announceLive: false, allOrders: [], geo: {}, role: null, driverRouteId: null, openPlan: null, routeInHand: null, lastFetchOk: false, driveMinutes: null, driveDepot: "" };
 const decisionLabels = { include: "Meenemen", review: "Controleren", dhl: "DHL", far: "Te ver", exclude: "Niet meenemen" };
 
 // Every order brings its own travel budget to the trip and the budgets pool, so
@@ -370,6 +370,9 @@ function renderRules() {
     ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld.`],
     ["Al het andere", "Gaat als pakket via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit " + formatMinutes(CONFIG.packageDetourMinutes) + " langer van worden."],
     ["Net erover", `Zit een rit tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan komt hij bij Controleren te staan in plaats van dat hij afvalt.`],
+    ["Aankondiging", state.announceLive
+      ? "Om 16:00 de dag voor een ingeplande rit gaan de orders in Shopify op fulfilled, met de verzendmail aan de klant. Bezorgd melden stuurt daarna geen tweede mail."
+      : "Staat op proef. Om 16:00 de dag voor een ingeplande rit schrijft het systeem in de agenda op welke orders het zou aankondigen, maar er gaat niets naar Shopify en niets naar klanten."],
     ["Lengte van een dag", `Ritten starten en eindigen op ${CONFIG.depot}. Boven ${formatMinutes(CONFIG.maxRouteMinutes)} volgt een waarschuwing, en er liften geen pakketten meer bij.`],
   ];
   holder.innerHTML = kaarten.map(([titel, tekst]) => `<article><b>${titel}</b><p>${tekst}</p></article>`).join("");
@@ -488,7 +491,7 @@ function renderDriverRoute(holder, planned) {
       ${volgorde.map((order, index) => `<li class="driver-stop">
         <div class="driver-stop-nr">${index + 1}</div>
         <div class="driver-stop-body">
-          <b>${escapeHtml(order.customer || "Onbekende klant")}</b>
+          <b>${escapeHtml(order.customer || "Onbekende klant")}${order.announced ? '<span class="badge-announced">aangekondigd</span>' : ""}</b>
           <a class="driver-address" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">${addressSummary(order)}</a>
           ${order.phone ? `<a class="driver-phone" href="${telLink(order.phone)}">Bel ${escapeHtml(order.phone)}</a>` : ""}
           <span class="driver-products">${productSummary(order)}</span>
@@ -732,6 +735,35 @@ async function placeRouteOnDay(date) {
   rebuildPlanning();
 }
 
+function previousDay(isoDate) {
+  const date = dateFromIso(isoDate);
+  date.setDate(date.getDate() - 1);
+  return isoDay(date);
+}
+
+// What the 16:00 announcement did for this route, or will do. The worker writes
+// a report per day; before that the planner sees when it is due, and whether
+// it is still the trial that sends nothing to customers.
+function announceLine(planned) {
+  if (planned.abortedAt) return "";
+  const log = state.announcements.find((entry) => entry.date === planned.date);
+  const routeLog = log?.routes?.find((entry) => entry.id === planned.id);
+  if (routeLog) {
+    const telling = {};
+    (routeLog.results || []).forEach((result) => { telling[result.status] = (telling[result.status] || 0) + 1; });
+    const tekst = Object.entries(telling).map(([status, aantal]) => `${aantal} ${status}`).join(", ") || "geen orders";
+    const soort = log.mode === "echt" ? "Aangekondigd" : "Proef";
+    return `<p class="agenda-announce ${log.mode === "echt" ? "echt" : "proef"}">${soort} ${formatDateTime(log.ranAt)}: ${escapeHtml(tekst)}</p>`;
+  }
+  const vandaag = isoDay(new Date());
+  if (planned.date <= vandaag) return "";
+  const dagErvoor = previousDay(planned.date);
+  if (dagErvoor === vandaag && new Date().getHours() >= 16) {
+    return `<p class="agenda-announce laat">Na 16:00 ingepland, dus niet aangekondigd</p>`;
+  }
+  return `<p class="agenda-announce gepland">Aankondiging ${formatDate(dagErvoor)} om 16:00${state.announceLive ? "" : " · proef, er gaat niets naar klanten"}</p>`;
+}
+
 function renderAgenda() {
   const holder = document.querySelector("#agendaDays");
   const teller = document.querySelector("#agendaCount");
@@ -772,6 +804,7 @@ function renderAgenda() {
           <b><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${escapeHtml(planned.name)}</b>
           <span>${planned.abortedAt ? `${status.stops.filter((stop) => stop.status === "bezorgd").length} bezorgd` : `${status.open.length} ${status.open.length === 1 ? "stop" : "stops"}${weg ? ` · ${weg} al afgehandeld of niet gevonden` : ""}`}</span>
           ${planned.note ? `<p class="agenda-note">${escapeHtml(planned.note)}</p>` : ""}
+          ${announceLine(planned)}
           ${afgebroken}
           ${planned.abortedAt ? "" : `<div class="note-slot" data-planned="${planned.id}"></div>`}
           <div class="agenda-route-actions">
@@ -1152,7 +1185,7 @@ function orderCard(item) {
         <span class="shop-chip ${businessClass(order)}">${businessLogo(order)}</span>
         <span class="badge ${item.decision}">${decisionLabels[item.decision]}</span>
       </div>
-      <h3>${escapeHtml(order.id)} · ${escapeHtml(order.customer)}</h3>
+      <h3>${escapeHtml(order.id)} · ${escapeHtml(order.customer)}${order.announced ? '<span class="badge-announced">aangekondigd</span>' : ""}</h3>
       <p class="product-line">${productSummary(order)}</p>
       <p class="address-line">${addressSummary(order)}</p>
       <p class="reason">${item.reason}</p>
@@ -1707,6 +1740,7 @@ function rebuildPlanning() {
   renderAgenda();
   renderOpenPlan();
   renderDriver();
+  renderRules();
   renderManualRouteBar();
   renderPlanningOverview();
   renderOrders();
@@ -1892,6 +1926,8 @@ async function fetchPlan() {
     if (!response.ok) return state.plan;
     const payload = await response.json();
     state.dayNotes = payload.dayNotes || [];
+    state.announcements = payload.announcements || [];
+    state.announceLive = Boolean(payload.announceLive);
     return payload.routes || [];
   } catch {
     return state.plan;

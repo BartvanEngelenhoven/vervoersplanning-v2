@@ -21,6 +21,8 @@
  * - SHOPIFY_CLIENT_SECRET_<SHOP_DOMAIN>: optional per-shop Shopify app secret
  * - SHOPIFY_ADMIN_TOKEN_<SHOP_DOMAIN>: optional legacy per-shop Admin API token for marking orders fulfilled
  * - GOOGLE_MAPS_API_KEY: optional Google Routes key; without it the planning falls back to estimates
+ * - AUTO_FULFILL: "aan" to announce routes in Shopify at 16:00 the day before, with the
+ *   customer's shipping mail. Anything else, or unset, runs it as a trial that only reports.
  */
 
 const JSON_HEADERS = {
@@ -29,6 +31,17 @@ const JSON_HEADERS = {
 };
 
 export default {
+  // The announcement at 16:00 the day before a route. Cron runs in UTC, so it
+  // fires at 14:00 and 15:00 UTC and only the one that is 16:00 in Amsterdam
+  // goes ahead: 14:00 in summer time, 15:00 in winter time.
+  async scheduled(event, env) {
+    const now = amsterdamNow(new Date(event.scheduledTime));
+    if (now.hour !== ANNOUNCE_HOUR) return;
+    const date = nextDay(now.day);
+    const report = await runAnnouncement(env, date);
+    await env.PLANNING_ORDERS.put(`${ANNOUNCE_LOG_PREFIX}${date}`, JSON.stringify(report), { expirationTtl: 60 * 24 * 3600 });
+  },
+
   async fetch(request, env) {
     try {
       return await route(request, env);
@@ -105,6 +118,13 @@ async function route(request, env) {
     return removePlanRoute(request, env);
   }
 
+  if (request.method === "GET" && url.pathname === "/announce/preview") {
+    if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+    const date = url.searchParams.get("date");
+    if (!isPlanDate(date)) return json({ error: "date moet JJJJ-MM-DD zijn" }, 400, env);
+    return json({ report: await runAnnouncement(env, date, { preview: true }), live: announceLive(env) }, 200, env);
+  }
+
   if (request.method === "GET" && url.pathname === "/whoami") {
     const role = roleFor(request, env);
     return role ? json({ role }, 200, env) : json({ error: "Unauthorized" }, 401, env);
@@ -176,6 +196,13 @@ async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
   const historyKey = `delivered:${shopDomain}:${planningOrder.id}`;
 
   if (planningOrder.fulfilled) {
+    // Fulfilled by our own announcement the day before is not delivered: the
+    // order stays on the planning, marked, until the driver reports it.
+    const announced = await env.PLANNING_ORDERS.get(`${ANNOUNCED_PREFIX}${shopDomain}:${planningOrder.id}`, "json");
+    if (announced) {
+      await env.PLANNING_ORDERS.put(storageKey, JSON.stringify({ ...planningOrder, fulfilled: false, announced: true, announcedAt: announced.at }));
+      return planningOrder;
+    }
     const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
     await env.PLANNING_ORDERS.put(historyKey, JSON.stringify({
       id: planningOrder.id,
@@ -197,21 +224,9 @@ async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
   return planningOrder;
 }
 
-async function markDelivered(request, env) {
-  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
-
-  const payload = await request.json();
-  const shopDomain = normalizeShopDomain(payload.shopDomain);
-  const shopifyOrderId = payload.shopifyOrderId;
-  const displayOrderId = payload.id;
-  const token = await shopifyAdminToken(env, shopDomain);
-
-  if (!shopDomain || !shopifyOrderId) return json({ error: "shopDomain and shopifyOrderId are required" }, 400, env);
-  if (!token) return json({ error: "Shopify Admin API token is not configured for this shop" }, 501, env);
-
-  const storageKey = `order:${shopDomain}:${displayOrderId}`;
-  const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
-
+// Puts an order on fulfilled in Shopify. Shared by the Bezorgd button, which
+// never mails the customer, and the announcement the day before, which does.
+async function createShopifyFulfillment(shopDomain, token, shopifyOrderId, notifyCustomer) {
   const fulfillmentOrders = await shopifyGraphql(shopDomain, token, `
     query FulfillmentOrders($id: ID!) {
       order(id: $id) {
@@ -239,7 +254,7 @@ async function markDelivered(request, env) {
     }))
     .filter((item) => item.fulfillmentOrderLineItems.length);
 
-  if (!lineItemsByFulfillmentOrder.length) return json({ error: "No open fulfillment lines found" }, 409, env);
+  if (!lineItemsByFulfillmentOrder.length) return { error: "No open fulfillment lines found", status: 409 };
 
   const result = await shopifyGraphql(shopDomain, token, `
     mutation Fulfill($fulfillment: FulfillmentV2Input!) {
@@ -248,14 +263,43 @@ async function markDelivered(request, env) {
         userErrors { field message }
       }
     }
-  `, { fulfillment: { lineItemsByFulfillmentOrder, notifyCustomer: false } });
+  `, { fulfillment: { lineItemsByFulfillmentOrder, notifyCustomer: Boolean(notifyCustomer) } });
 
   const userErrors = result.data?.fulfillmentCreateV2?.userErrors || [];
-  if (userErrors.length) return json({ error: "Shopify fulfillment failed", userErrors }, 422, env);
+  if (userErrors.length) return { error: "Shopify fulfillment failed", userErrors, status: 422 };
+  return { fulfillment: result.data?.fulfillmentCreateV2?.fulfillment };
+}
 
-  const fulfillment = result.data?.fulfillmentCreateV2?.fulfillment;
+async function markDelivered(request, env) {
+  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
+  const payload = await request.json();
+  const shopDomain = normalizeShopDomain(payload.shopDomain);
+  const shopifyOrderId = payload.shopifyOrderId;
+  const displayOrderId = payload.id;
+  const token = await shopifyAdminToken(env, shopDomain);
+
+  if (!shopDomain || !shopifyOrderId) return json({ error: "shopDomain and shopifyOrderId are required" }, 400, env);
+  if (!token) return json({ error: "Shopify Admin API token is not configured for this shop" }, 501, env);
+
+  const storageKey = `order:${shopDomain}:${displayOrderId}`;
+  const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
+
+  // Announced the day before means already fulfilled in Shopify, customer
+  // mailed. Fulfilling again would fail with no open lines; the delivery is
+  // only written down, and the customer gets no second mail.
+  const announcedKey = `${ANNOUNCED_PREFIX}${shopDomain}:${displayOrderId}`;
+  const announced = await env.PLANNING_ORDERS.get(announcedKey, "json");
+
+  let fulfillment = null;
+  if (!announced) {
+    const created = await createShopifyFulfillment(shopDomain, token, shopifyOrderId, false);
+    if (created.error) return json({ error: created.error, userErrors: created.userErrors }, created.status, env);
+    fulfillment = created.fulfillment;
+  }
+
   await appendOrderPlanningNote(shopDomain, token, shopifyOrderId, [
-    `Bezorgd gemeld via Vervoersplanning V2`,
+    announced ? `Bezorgd gemeld via Vervoersplanning (aangekondigd op ${announced.at})` : `Bezorgd gemeld via Vervoersplanning V2`,
     `Tijd: ${new Date().toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam" })}`,
   ]);
   await env.PLANNING_ORDERS.put(`delivered:${shopDomain}:${displayOrderId}`, JSON.stringify({
@@ -267,6 +311,7 @@ async function markDelivered(request, env) {
     deliveredAt: new Date().toISOString(),
   }));
   await env.PLANNING_ORDERS.delete(storageKey);
+  if (announced) await env.PLANNING_ORDERS.delete(announcedKey);
   return json({ ok: true, id: displayOrderId, fulfillment }, 200, env);
 }
 
@@ -551,6 +596,102 @@ async function geocodeAddresses(request, env) {
   return json({ results, looked, pending: Math.max(0, todo.length - looked) }, 200, env);
 }
 
+// ---------------------------------------------------------------------------
+// Announcement. At 16:00 the day before a planned route its orders go on
+// fulfilled in Shopify with the shipping mail, so customers hear it is coming.
+//
+// It is OFF unless the secret or variable AUTO_FULFILL is exactly "aan". Off,
+// it walks every step except the Shopify call and only writes down what it
+// would have done: nothing reaches Shopify, and nothing reaches any customer.
+// ---------------------------------------------------------------------------
+const ANNOUNCED_PREFIX = "announced:";
+const ANNOUNCE_LOG_PREFIX = "plan-announce:";
+const ANNOUNCE_HOUR = 16;
+
+function announceLive(env) {
+  return String(env.AUTO_FULFILL || "").trim().toLowerCase() === "aan";
+}
+
+function amsterdamNow(date = new Date()) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Amsterdam", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23",
+  }).formatToParts(date).map((part) => [part.type, part.value]));
+  return { day: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
+}
+
+function nextDay(isoDay) {
+  const date = new Date(`${isoDay}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+async function runAnnouncement(env, date, { preview = false } = {}) {
+  const live = !preview && announceLive(env);
+  const list = await env.PLANNING_ORDERS.list({ prefix: `${PLAN_PREFIX}${date}:` });
+  const routes = (await Promise.all(list.keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json")))).filter(Boolean);
+  const report = { date, ranAt: new Date().toISOString(), mode: live ? "echt" : "proef", routes: [] };
+
+  for (const route of routes) {
+    const entry = { id: route.id, number: route.number, name: route.name, results: [] };
+    report.routes.push(entry);
+    if (route.abortedAt) {
+      entry.skipped = "afgebroken";
+      continue;
+    }
+
+    for (const key of route.orderKeys || []) {
+      const split = key.indexOf(":");
+      const shopDomain = key.slice(0, split);
+      const id = key.slice(split + 1);
+      const result = { key, id };
+      entry.results.push(result);
+
+      if (await env.PLANNING_ORDERS.get(`${ANNOUNCED_PREFIX}${key}`)) {
+        result.status = "al aangekondigd";
+        continue;
+      }
+      const order = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
+      if (!order) {
+        result.status = (await env.PLANNING_ORDERS.get(`delivered:${key}`)) ? "al bezorgd" : "niet meer open";
+        continue;
+      }
+      if (order.cancelled || order.deliveryMethod === "pickup") {
+        result.status = order.cancelled ? "geannuleerd" : "wordt opgehaald";
+        continue;
+      }
+      if (!live) {
+        result.status = "zou aangekondigd worden";
+        continue;
+      }
+
+      // Live from here on. The marker goes in BEFORE Shopify is told: Shopify
+      // answers a fulfillment with a webhook straight away, and if that came
+      // in first the order would be filed as delivered and leave the route.
+      const token = await shopifyAdminToken(env, shopDomain);
+      if (!token || !order.shopifyOrderId) {
+        result.status = "mislukt: geen Shopify-toegang voor deze winkel";
+        continue;
+      }
+      const marker = { at: new Date().toISOString(), routeId: route.id, number: route.number, date };
+      await env.PLANNING_ORDERS.put(`${ANNOUNCED_PREFIX}${key}`, JSON.stringify(marker), { expirationTtl: 30 * 24 * 3600 });
+      try {
+        const created = await createShopifyFulfillment(shopDomain, token, order.shopifyOrderId, true);
+        if (created.error) throw new Error(created.error);
+        await appendOrderPlanningNote(shopDomain, token, order.shopifyOrderId, [
+          `Aangekondigd via Vervoersplanning: rit ${route.number || "?"}, bezorging ${date}`,
+          `Tijd: ${new Date().toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam" })}`,
+        ]);
+        result.status = "aangekondigd";
+      } catch (error) {
+        await env.PLANNING_ORDERS.delete(`${ANNOUNCED_PREFIX}${key}`);
+        result.status = `mislukt: ${String(error.message || error).slice(0, 120)}`;
+      }
+    }
+  }
+
+  return report;
+}
+
 // A planned route is its own record, plan:<date>:<id>, never one record per day.
 // The planner on a laptop and the driver on a phone both write here, and KV has
 // no transactions: a shared per-day record would let one silently overwrite the
@@ -573,14 +714,16 @@ async function getPlan(request, env) {
   const na = (name, prefix) => !isPlanDate(from) || name.slice(prefix.length, prefix.length + 10) >= from;
   const routeKeys = list.keys.map((key) => key.name).filter((name) => name.startsWith(PLAN_PREFIX) && na(name, PLAN_PREFIX));
   const dayKeys = list.keys.map((key) => key.name).filter((name) => name.startsWith("plan-day:") && na(name, "plan-day:"));
+  const logKeys = list.keys.map((key) => key.name).filter((name) => name.startsWith(ANNOUNCE_LOG_PREFIX) && na(name, ANNOUNCE_LOG_PREFIX));
 
-  const [routes, dayNotes] = await Promise.all([
+  const [routes, dayNotes, announcements] = await Promise.all([
     Promise.all(routeKeys.map((name) => env.PLANNING_ORDERS.get(name, "json"))),
     Promise.all(dayKeys.map((name) => env.PLANNING_ORDERS.get(name, "json"))),
+    Promise.all(logKeys.map((name) => env.PLANNING_ORDERS.get(name, "json"))),
   ]);
   routes.sort((a, b) => `${a?.date}${a?.assignedAt}`.localeCompare(`${b?.date}${b?.assignedAt}`));
 
-  return json({ routes: routes.filter(Boolean), dayNotes: dayNotes.filter(Boolean) }, 200, env);
+  return json({ routes: routes.filter(Boolean), dayNotes: dayNotes.filter(Boolean), announcements: announcements.filter(Boolean), announceLive: announceLive(env) }, 200, env);
 }
 
 async function assignPlanRoute(request, env) {
