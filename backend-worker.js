@@ -502,8 +502,15 @@ export function mapShopifyOrder(order, shopDomain = "") {
     deliveryAppointmentLocked: deliveryAppointmentLocked(order),
     deliveryMinutes: deliveryMinutes(lineItems),
     weightKg: totalWeightKg(lineItems),
-    products: lineItems.map((item) => item.title).filter(Boolean),
+    products: lineItems.map(productLabel).filter(Boolean),
   };
+}
+
+function productLabel(item) {
+  const title = item.title || item.name || "";
+  if (!title) return "";
+  const quantity = Number(item.quantity || 1);
+  return `${quantity || 1}x ${title}`;
 }
 
 function webshopName(shopDomain) {

@@ -47,7 +47,7 @@ assert.deepEqual(mapShopifyOrder(deliveryOrder, "slowfeeder-specialist.myshopify
   deliveryAppointmentLocked: false,
   deliveryMinutes: 20,
   weightKg: 630,
-  products: ["Kunststof rijplaat", "Koppelstuk"],
+  products: ["20x Kunststof rijplaat", "4x Koppelstuk"],
 });
 
 const pickupOrder = {
