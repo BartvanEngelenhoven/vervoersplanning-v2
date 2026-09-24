@@ -4,6 +4,9 @@ const CONFIG = {
   depot: "Goorsteeg 46, Ede",
   vehicleCapacityKg: 3_500,
   apiBaseUrl: new URL(window.VERVOERSPLANNING_CONFIG?.dataUrl || "data/demo-orders.json", window.location.href).origin,
+  // Drive times are straight-line estimates, so a trip that lands just over
+  // budget is within the noise. Up to this much over, the planner decides.
+  budgetTolerance: 0.2,
   maxRouteMinutes: 330,
   nearlyOverMinutes: 15,
   farRouteCombineMinutes: 75,
@@ -946,10 +949,18 @@ function qualifyCandidates() {
 
   for (const [region, candidates] of byRegion) {
     const kept = [...candidates];
+    let verdict = "include";
     while (kept.length) {
       const drive = routeDriveMinutes(kept.map((item) => item.order));
       const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
-      if (drive <= budget) break;
+      if (drive <= budget) {
+        verdict = "include";
+        break;
+      }
+      if (drive <= budget * (1 + CONFIG.budgetTolerance)) {
+        verdict = "review";
+        break;
+      }
 
       let worst = null;
       for (const item of kept) {
@@ -969,13 +980,14 @@ function qualifyCandidates() {
     if (!kept.length) continue;
     const drive = routeDriveMinutes(kept.map((item) => item.order));
     const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
+    const samen = kept.length > 1 ? `${kept.length} orders richting ${region} samen ` : "";
     const shared = budget === Infinity
       ? `${formatMinutes(drive)} rijden richting ${region}; deze slowfeeders gaan altijd zelf, hoe ver ook`
-      : kept.length > 1
-        ? `${kept.length} orders richting ${region} samen ${formatMinutes(drive)} rijden, binnen de gezamenlijke ${formatMinutes(budget)}`
-        : `${formatMinutes(drive)} heen/terug, binnen de ${formatMinutes(budget)}`;
+      : verdict === "review"
+        ? `${samen}${formatMinutes(drive)} rijden, ${formatMinutes(drive - budget)} over de ${kept.length > 1 ? "gezamenlijke " : ""}${formatMinutes(budget)}; net erover, zelf beoordelen`
+        : `${samen}${formatMinutes(drive)} rijden, binnen de ${kept.length > 1 ? "gezamenlijke " : ""}${formatMinutes(budget)}`;
     for (const item of kept) {
-      item.decision = "include";
+      item.decision = verdict;
       item.reason = `${item.plan.label}: ${shared}. ${dueDateReason(item.order)}`;
     }
   }
