@@ -106,7 +106,19 @@ async function receiveShopifyOrder(request, env) {
   const planningOrder = mapShopifyOrder(shopifyOrder, shopDomain);
   const storageKey = orderStorageKey(planningOrder);
 
-  if (planningOrder.cancelled || planningOrder.fulfilled) {
+  if (planningOrder.fulfilled) {
+    const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
+    await env.PLANNING_ORDERS.put(`delivered:${shopDomain}:${planningOrder.id}`, JSON.stringify({
+      id: planningOrder.id,
+      shopDomain,
+      shopifyOrderId: planningOrder.shopifyOrderId,
+      order: storedOrder || planningOrder,
+      fulfillment: null,
+      deliveredAt: shopifyFulfilledAt(shopifyOrder) || new Date().toISOString(),
+      source: "shopify",
+    }));
+    await env.PLANNING_ORDERS.delete(storageKey);
+  } else if (planningOrder.cancelled) {
     await env.PLANNING_ORDERS.delete(storageKey);
   } else {
     await env.PLANNING_ORDERS.put(storageKey, JSON.stringify(planningOrder));
@@ -396,8 +408,31 @@ async function finishShopifyOAuth(request, env) {
     scope: data.scope || "",
     installedAt: new Date().toISOString(),
   }));
+  await registerShopifyWebhooks(shopDomain, data.access_token, url.origin);
 
   return html(`Shopify koppeling is actief voor ${escapeHtml(shopDomain)}. Je kunt dit tabblad sluiten.`, 200);
+}
+
+async function registerShopifyWebhooks(shopDomain, token, origin) {
+  const address = `${origin}/webhooks/shopify/orders`;
+  await Promise.all(["orders/create", "orders/updated"].map((topic) => createShopifyWebhook(shopDomain, token, topic, address)));
+}
+
+async function createShopifyWebhook(shopDomain, token, topic, address) {
+  try {
+    const response = await fetch(`https://${shopDomain}/admin/api/2026-07/webhooks.json`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-shopify-access-token": token,
+      },
+      body: JSON.stringify({ webhook: { topic, address, format: "json" } }),
+    });
+    if (response.ok || response.status === 422) return;
+    throw new Error(await response.text());
+  } catch {
+    // Manual webhook setup still works; registration failure should not break OAuth installation.
+  }
 }
 
 async function verifyShopifyOAuthCallback(url, secret) {
@@ -538,6 +573,12 @@ function sameDate(a, b) {
 function paymentStatus(order) {
   if (order.financial_status === "paid" || order.financial_status === "partially_refunded") return "Betaald";
   return "In afwachting van betaling";
+}
+
+function shopifyFulfilledAt(order) {
+  const fulfillments = Array.isArray(order.fulfillments) ? order.fulfillments : [];
+  const dates = fulfillments.map((item) => item.created_at || item.updated_at).filter(Boolean).sort();
+  return dates.at(-1) || order.updated_at || null;
 }
 
 function deliveryAppointmentLocked(order) {

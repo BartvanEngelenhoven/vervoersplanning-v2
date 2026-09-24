@@ -17,6 +17,10 @@ const businessClasses = {
   "De Rijplaten Specialist": "rijplaten",
   "De Slowfeeder Specialist": "slowfeeder",
 };
+const businessLogos = {
+  "De Rijplaten Specialist": "assets/rijplaten-logo.svg",
+  "De Slowfeeder Specialist": "assets/slowfeeder-logo.png",
+};
 const forcedIncludes = new Set(JSON.parse(localStorage.getItem(forcedIncludeKey) || "[]"));
 const DEPOT_POINT = { lat: 52.05, lon: 5.67 };
 const KM_TO_MINUTES = 1.15;
@@ -383,7 +387,7 @@ function orderCard(item) {
     <div class="order-main">
       <div class="order-title-row">
         <label class="select-order"><input class="order-select" type="checkbox" data-order-key="${key}" ${state.selected.has(key) ? "checked" : ""} /><span>Selecteer</span></label>
-        <span class="shop-chip ${businessClass(order)}">${order.webshop || "Webshop"}</span>
+        <span class="shop-chip ${businessClass(order)}">${businessLogo(order)}</span>
         <span class="badge ${item.decision}">${decisionLabels[item.decision]}</span>
       </div>
       <h3>${order.id} · ${order.customer}</h3>
@@ -748,6 +752,12 @@ function productSummary(order) {
 
 function businessClass(order) {
   return businessClasses[order.webshop] || "";
+}
+
+function businessLogo(order) {
+  const label = order.webshop || "Webshop";
+  const logo = businessLogos[order.webshop];
+  return `${logo ? `<img src="${logo}" alt="" />` : ""}<span>${label}</span>`;
 }
 
 function orderKey(order) {
