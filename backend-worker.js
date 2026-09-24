@@ -12,7 +12,7 @@
  * - SHOPIFY_WEBHOOK_SECRET_<SHOP_DOMAIN>: optional per-shop secret, for example SHOPIFY_WEBHOOK_SECRET_SLOWFEEDER_SPECIALIST_MYSHOPIFY_COM
  * - PLANNING_ORDERS: Cloudflare KV namespace
  * - CORS_ORIGIN: optional, for example https://bartvanengelenhoven.github.io
- * - OPERATOR_KEY: shared operator key required for write actions
+ * - OPERATOR_KEY: shared operator key required for reading orders and for write actions
  * - SHOPIFY_CLIENT_ID: Shopify app client ID, required for OAuth install
  * - SHOPIFY_CLIENT_SECRET: Shopify app secret, required for OAuth install
  * - SHOPIFY_CLIENT_ID_<SHOP_DOMAIN>: optional per-shop Shopify app client ID
@@ -35,11 +35,11 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/orders") {
-      return getOrders(env);
+      return getOrders(request, env);
     }
 
     if (request.method === "GET" && url.pathname === "/history") {
-      return getHistory(env);
+      return getHistory(request, env);
     }
 
     if (request.method === "GET" && url.pathname === "/auth/shopify") {
@@ -78,7 +78,9 @@ export default {
   },
 };
 
-async function getOrders(env) {
+async function getOrders(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
   const list = await env.PLANNING_ORDERS.list({ prefix: "order:" });
   const orders = await Promise.all(
     list.keys.map(async (key) => JSON.parse(await env.PLANNING_ORDERS.get(key.name)))
@@ -87,7 +89,9 @@ async function getOrders(env) {
   return json(orders, 200, env);
 }
 
-async function getHistory(env) {
+async function getHistory(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+
   const list = await env.PLANNING_ORDERS.list({ prefix: "delivered:" });
   const entries = await Promise.all(
     list.keys.map(async (key) => JSON.parse(await env.PLANNING_ORDERS.get(key.name)))

@@ -13,6 +13,9 @@ const CONFIG = {
 const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [] };
 const decisionLabels = { include: "Meenemen", review: "Controleren", exclude: "Niet meenemen" };
 const forcedIncludeKey = "vervoersplanning.forceInclude.v1";
+const operatorKeyStorageKey = "vervoersplanning.operatorKey.v1";
+const usesBackend = Boolean(window.VERVOERSPLANNING_CONFIG?.dataUrl);
+let operatorPromptDeclined = false;
 const businessClasses = {
   "De Rijplaten Specialist": "rijplaten",
   "De Slowfeeder Specialist": "slowfeeder",
@@ -725,17 +728,13 @@ function removeOrderFromActiveRoute(key) {
 async function markSelectedDelivered() {
   const orders = selectedOrdersList();
   if (!orders.length) return;
-  const operatorKey = window.prompt(`Operatorcode voor ${orders.length} geselecteerde orders`);
-  if (!operatorKey) return;
+  if (!ensureOperatorKey()) return;
   if (!window.confirm(`${orders.length} geselecteerde orders als bezorgd melden?`)) return;
 
   for (const order of orders) {
-    const response = await fetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-operator-key": operatorKey,
-      },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
     });
     const payload = await response.json();
@@ -834,15 +833,12 @@ function saveForcedIncludes() {
 
 async function forceInclude(order) {
   if (!order) return;
-  const operatorKey = window.prompt(`Operatorcode om ${order.id} als eigen bezorging te taggen in Shopify`);
-  if (!operatorKey) return false;
+  if (!ensureOperatorKey()) return false;
+  if (!window.confirm(`${order.id} als eigen bezorging taggen in Shopify?`)) return false;
   try {
-    const response = await fetch(`${CONFIG.apiBaseUrl}/actions/set-own-delivery`, {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/set-own-delivery`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-operator-key": operatorKey,
-      },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
     });
     const payload = await response.json();
@@ -879,17 +875,14 @@ function formatDateTime(value) {
 }
 
 async function markDelivered(order, button) {
-  const operatorKey = window.prompt(`Operatorcode voor ${order.id}`);
-  if (!operatorKey) return;
+  if (!ensureOperatorKey()) return;
+  if (!window.confirm(`${order.id} als bezorgd melden?`)) return;
   button.disabled = true;
   button.textContent = "Bezig…";
   try {
-    const response = await fetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-operator-key": operatorKey,
-      },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
     });
     const payload = await response.json();
@@ -903,18 +896,14 @@ async function markDelivered(order, button) {
 }
 
 async function undoDelivered(id, shopDomain, button) {
-  const operatorKey = window.prompt(`Terugdraaien voor ${id}. Operatorcode:`);
-  if (!operatorKey) return;
+  if (!ensureOperatorKey()) return;
   if (!window.confirm(`${id} terugzetten naar open en Shopify fulfillment proberen te annuleren?`)) return;
   button.disabled = true;
   button.textContent = "Bezig…";
   try {
-    const response = await fetch(`${CONFIG.apiBaseUrl}/actions/undo-delivered`, {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/undo-delivered`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-operator-key": operatorKey,
-      },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ id, shopDomain }),
     });
     const payload = await response.json();
@@ -927,13 +916,64 @@ async function undoDelivered(id, shopDomain, button) {
   }
 }
 
+function storedOperatorKey() {
+  return localStorage.getItem(operatorKeyStorageKey) || "";
+}
+
+function askOperatorKey(message) {
+  // A blocked prompt throws instead of returning null. Browsers block it once the
+  // planner ticks "prevent additional dialogs", so this must never break the page.
+  let entered = null;
+  try {
+    entered = window.prompt(message);
+  } catch {
+    entered = null;
+  }
+
+  if (!entered) {
+    // Cancelling must not make the minute timer pop up a prompt over and over.
+    operatorPromptDeclined = true;
+    return "";
+  }
+  operatorPromptDeclined = false;
+  localStorage.setItem(operatorKeyStorageKey, entered.trim());
+  return entered.trim();
+}
+
+function ensureOperatorKey() {
+  if (!usesBackend) return "";
+  const stored = storedOperatorKey();
+  if (stored) return stored;
+  if (operatorPromptDeclined) return "";
+  return askOperatorKey("Operatorcode om de planning te openen");
+}
+
+// Every backend call carries the operator code. On a rejected code the planner
+// gets one chance to retype it, so a changed code does not need a page reload.
+async function backendFetch(url, options = {}) {
+  const send = () =>
+    fetch(url, {
+      ...options,
+      headers: { ...(options.headers || {}), "x-operator-key": storedOperatorKey() },
+    });
+
+  let response = await send();
+  if (response.status === 401 && usesBackend && !operatorPromptDeclined) {
+    localStorage.removeItem(operatorKeyStorageKey);
+    if (!askOperatorKey("Operatorcode klopt niet. Probeer het opnieuw:")) return response;
+    response = await send();
+  }
+  return response;
+}
+
 async function refreshData() {
   const button = document.querySelector("#refreshButton");
   button.disabled = true;
   button.textContent = "Verversen…";
   try {
     const separator = CONFIG.dataUrl.includes("?") ? "&" : "?";
-    const response = await fetch(`${CONFIG.dataUrl}${separator}t=${Date.now()}`, { cache: "no-store" });
+    const response = await backendFetch(`${CONFIG.dataUrl}${separator}t=${Date.now()}`, { cache: "no-store" });
+    if (response.status === 401) throw new Error("Operatorcode ontbreekt of klopt niet");
     if (!response.ok) throw new Error("Data kon niet worden geladen");
     state.orders = await response.json();
     state.history = await fetchHistory();
@@ -941,7 +981,7 @@ async function refreshData() {
     renderHistory();
     document.querySelector("#syncText").textContent = `Laatst ververst om ${new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date())}`;
   } catch (error) {
-    document.querySelector("#syncText").textContent = "Verversen mislukt — bestaande gegevens blijven staan";
+    document.querySelector("#syncText").textContent = `${error.message} — bestaande gegevens blijven staan`;
   } finally {
     button.disabled = false;
     button.textContent = "Nu verversen";
@@ -950,7 +990,7 @@ async function refreshData() {
 
 async function fetchHistory() {
   try {
-    const response = await fetch(`${CONFIG.apiBaseUrl}/history?t=${Date.now()}`, { cache: "no-store" });
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/history?t=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) return [];
     return await response.json();
   } catch {
@@ -958,7 +998,12 @@ async function fetchHistory() {
   }
 }
 
-document.querySelector("#refreshButton").addEventListener("click", refreshData);
+document.querySelector("#refreshButton").addEventListener("click", () => {
+  // Verversen is the way back in after cancelling the code prompt.
+  operatorPromptDeclined = false;
+  ensureOperatorKey();
+  refreshData();
+});
 document.querySelector("#searchInput").addEventListener("input", renderOrders);
 document.querySelector("#decisionFilter").addEventListener("change", renderOrders);
 document.querySelector("#makeRouteButton")?.addEventListener("click", makeRouteFromSelection);
@@ -976,5 +1021,6 @@ document.querySelector("#showRoutesButton")?.addEventListener("click", () => {
   planningView = "routes";
   renderPlanningOverview();
 });
+ensureOperatorKey();
 refreshData();
 setInterval(refreshData, CONFIG.refreshMs);
