@@ -19,9 +19,24 @@ const decisionLabels = { include: "Meenemen", review: "Controleren", dhl: "DHL",
 // back. Hay houses go whatever the distance, so they carry no ceiling.
 const transportRules = {
   rijplaten: { label: "Rijplaten", budgetMinutes: 120, overflow: "far" },
-  hooihuisje: { label: "Hooihuisje", budgetMinutes: Infinity, overflow: "far" },
+  alwaysOwn: { label: "Altijd eigen bezorging", budgetMinutes: Infinity, overflow: "far" },
   xxl: { label: "XXL bak", budgetMinutes: 60, overflow: "dhl" },
 };
+
+// The Slowfeeder collection that always goes by own transport, whatever the
+// distance, matched on the distinctive start of each title. Seven entries cover
+// eight products: both round feeders begin the same way. Renaming one of these
+// in Shopify quietly drops it to DHL, so this list and that collection have to
+// be kept in step.
+const alwaysOwnTransportProducts = [
+  "vierkante slowfeeder ruif",
+  "slowfeeder hooihuisje",
+  "haybell hooistolp",
+  "vierkante slowfeeder hooiruif",
+  "ronde ruif met slowfeedernet",
+  "compacte vierkante slowfeeder hooiruif",
+  "patura klima",
+];
 const forcedIncludeKey = "vervoersplanning.forceInclude.v1";
 const operatorKeyStorageKey = "vervoersplanning.operatorKey.v1";
 const usesBackend = Boolean(window.VERVOERSPLANNING_CONFIG?.dataUrl);
@@ -50,6 +65,12 @@ function isRijplatenOrder(order) {
   return `${order.shopDomain || ""} ${order.webshop || ""}`.toLowerCase().includes("rijplaten");
 }
 
+function isAlwaysOwnTransport(order) {
+  const text = productText(order);
+  return alwaysOwnTransportProducts.some((name) => text.includes(name));
+}
+
+// Only the hay house needs the long unloading slot; the feeders are a drop.
 function isHooihuisje(order) {
   const text = productText(order);
   return text.includes("hooihuisje") || text.includes("hoihuisje");
@@ -63,7 +84,7 @@ function isXxlBak(order) {
 
 function transportPlan(order) {
   if (isRijplatenOrder(order)) return transportRules.rijplaten;
-  if (isHooihuisje(order)) return transportRules.hooihuisje;
+  if (isAlwaysOwnTransport(order)) return transportRules.alwaysOwn;
   if (isXxlBak(order)) return transportRules.xxl;
   return null;
 }
@@ -74,7 +95,7 @@ function decide(order) {
   if (order.deliveryMethod === "pickup") return { decision: "exclude", reason: "Klant haalt de bestelling af" };
 
   const plan = transportPlan(order);
-  if (!plan) return { decision: "dhl", reason: "Geen hooihuisje en geen XXL bak; gaat als pakket via DHL" };
+  if (!plan) return { decision: "dhl", reason: "Staat niet in de vaste eigen-bezorgingslijst en is geen XXL bak; gaat als pakket via DHL" };
 
   if (!order.addressComplete) return { decision: "review", reason: "Bezorgadres is onvolledig" };
   if (order.deliveryAppointmentLocked) return { decision: "review", reason: "Aflevermoment is afgestemd; niet verplaatsen zonder toestemming" };
@@ -949,7 +970,7 @@ function qualifyCandidates() {
     const drive = routeDriveMinutes(kept.map((item) => item.order));
     const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
     const shared = budget === Infinity
-      ? `${formatMinutes(drive)} rijden richting ${region}; een hooihuisje gaat altijd mee, hoe ver ook`
+      ? `${formatMinutes(drive)} rijden richting ${region}; deze slowfeeders gaan altijd zelf, hoe ver ook`
       : kept.length > 1
         ? `${kept.length} orders richting ${region} samen ${formatMinutes(drive)} rijden, binnen de gezamenlijke ${formatMinutes(budget)}`
         : `${formatMinutes(drive)} heen/terug, binnen de ${formatMinutes(budget)}`;
