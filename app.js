@@ -80,7 +80,7 @@ function productText(order) {
 }
 
 function isRijplatenOrder(order) {
-  return `${order.shopDomain || ""} ${order.webshop || ""}`.toLowerCase().includes("rijplaten");
+  return `${escapeHtml(order.shopDomain || "")} ${escapeHtml(order.webshop || "")}`.toLowerCase().includes("rijplaten");
 }
 
 function isAlwaysOwnTransport(order) {
@@ -204,7 +204,7 @@ function routeSummary(region, orders) {
 
 // The address as the backend keyed it, so both sides agree on what a stop is.
 function orderAddress(order) {
-  return String(order.fullAddress || `${order.postcode || ""} ${order.city || ""}`).replace(/\s+/g, " ").trim();
+  return String(order.fullAddress || `${escapeHtml(order.postcode || "")} ${escapeHtml(order.city || "")}`).replace(/\s+/g, " ").trim();
 }
 
 // Real minutes for the whole trip, depot out and back, leg by leg. Returns null
@@ -482,11 +482,11 @@ function renderDriverRoute(holder, planned) {
         <div class="driver-stop-nr">${index + 1}</div>
         <div class="driver-stop-body">
           <b>${escapeHtml(order.customer || "Onbekende klant")}</b>
-          <a class="driver-address" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">${escapeHtml(order.fullAddress || addressSummary(order))}</a>
+          <a class="driver-address" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">${addressSummary(order)}</a>
           ${order.phone ? `<a class="driver-phone" href="${telLink(order.phone)}">Bel ${escapeHtml(order.phone)}</a>` : ""}
           <span class="driver-products">${productSummary(order)}</span>
           ${order.customerNote ? `<span class="driver-customer-note">Klant schreef: ${escapeHtml(order.customerNote)}</span>` : ""}
-          <span class="driver-meta">${order.id} · ${order.webshop || ""} · ${deliveryMinutes(order)} min lossen</span>
+          <span class="driver-meta">${escapeHtml(order.id)} · ${escapeHtml(order.webshop || "")} · ${deliveryMinutes(order)} min lossen</span>
           ${planned.abortedAt ? "" : `<button class="button primary mark-delivered driver-deliver" type="button" data-order-key="${orderKey(order)}">Bezorgd</button>`}
         </div>
       </li>`).join("")}
@@ -494,14 +494,14 @@ function renderDriverRoute(holder, planned) {
 
     ${status.stops.filter((stop) => stop.status !== "open").length ? `<ul class="plan-stops">${status.stops.filter((stop) => stop.status !== "open").map((stop) =>
       stop.status === "bezorgd"
-        ? `<li class="plan-stop klaar"><s>${stop.id}</s> bezorgd${stop.at ? ` om ${formatDateTime(stop.at)}` : ""}</li>`
+        ? `<li class="plan-stop klaar"><s>${escapeHtml(stop.id)}</s> bezorgd${stop.at ? ` om ${formatDateTime(stop.at)}` : ""}</li>`
         : stop.status === "geannuleerd"
-          ? `<li class="plan-stop fout">${stop.id} is geannuleerd, niet afleveren</li>`
-          : `<li class="plan-stop fout">${stop.id} niet gevonden. Bel de planner.</li>`).join("")}</ul>` : ""}
+          ? `<li class="plan-stop fout">${escapeHtml(stop.id)} is geannuleerd, niet afleveren</li>`
+          : `<li class="plan-stop fout">${escapeHtml(stop.id)} niet gevonden. Bel de planner.</li>`).join("")}</ul>` : ""}
 
     ${erbij.length ? `<div class="plan-additions"><h3>Kan er nog bij</h3>${erbij.map((kandidaat) => {
       const o = kandidaat.item.order;
-      return `<div class="plan-addition"><div><b>${o.id} · ${escapeHtml(o.city || "")}</b>
+      return `<div class="plan-addition"><div><b>${escapeHtml(o.id)} · ${escapeHtml(o.city || "")}</b>
         <span>${productSummary(o)}</span>
         <span>+${formatMinutes(kandidaat.extra)}, rit wordt dan ${formatMinutes(kandidaat.totaal)}</span></div>
         <button class="button primary accept-addition" type="button" data-key="${orderKey(o)}">Meenemen</button></div>`;
@@ -702,7 +702,7 @@ function renderRouteInHand() {
     bar.innerHTML = "";
     return;
   }
-  bar.innerHTML = `<p><strong>Kies een dag</strong> voor de rit naar ${routeLabel(route)} (${route.orders.length} stops).</p>
+  bar.innerHTML = `<p><strong>Kies een dag</strong> voor de rit naar ${escapeHtml(routeLabel(route))} (${route.orders.length} stops).</p>
     <button id="dropRouteInHand" class="button subtle-action" type="button">Annuleren</button>`;
   bar.querySelector("#dropRouteInHand").addEventListener("click", () => {
     state.routeInHand = null;
@@ -841,16 +841,16 @@ function renderOpenPlan() {
   const huidig = status.open.length ? routeSummary("Rit", optimizedStopOrder(status.open)) : null;
 
   const regel = (stop) => {
-    if (stop.status === "bezorgd") return `<li class="plan-stop klaar"><s>${stop.id}</s> al bezorgd${stop.at ? ` op ${formatDateTime(stop.at)}` : ""}</li>`;
-    if (stop.status === "geannuleerd") return `<li class="plan-stop fout">${stop.id} is geannuleerd, niet afleveren</li>`;
-    return `<li class="plan-stop fout">${stop.id} niet gevonden. Overleg met de planner voor je gaat.</li>`;
+    if (stop.status === "bezorgd") return `<li class="plan-stop klaar"><s>${escapeHtml(stop.id)}</s> al bezorgd${stop.at ? ` op ${formatDateTime(stop.at)}` : ""}</li>`;
+    if (stop.status === "geannuleerd") return `<li class="plan-stop fout">${escapeHtml(stop.id)} is geannuleerd, niet afleveren</li>`;
+    return `<li class="plan-stop fout">${escapeHtml(stop.id)} niet gevonden. Overleg met de planner voor je gaat.</li>`;
   };
 
   holder.hidden = false;
   holder.innerHTML = `
     <div class="panel-heading compact">
       <div>
-        <h2><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${planned.name}</h2>
+        <h2><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${escapeHtml(planned.name)}</h2>
         <p class="open-plan-meta">${formatDate(planned.date)} · ${status.open.length} ${status.open.length === 1 ? "stop" : "stops"}${huidig ? ` · ongeveer ${formatMinutes(huidig.totalMinutes)} onderweg` : ""}</p>
       </div>
       <button id="closeOpenPlan" class="button subtle-action" type="button">Sluiten</button>
@@ -864,7 +864,7 @@ function renderOpenPlan() {
         const dhl = kandidaat.item.decision !== "include";
         return `<div class="plan-addition">
           <div>
-            <b>${o.id} · ${o.city || "plaats onbekend"}</b>
+            <b>${escapeHtml(o.id)} · ${escapeHtml(o.city || "plaats onbekend")}</b>
             <span>${productSummary(o)}</span>
             <span>+${formatMinutes(kandidaat.extra)}, rit wordt dan ${formatMinutes(kandidaat.totaal)}${dhl ? " · gaat in Shopify van DHL naar eigen bezorging" : ""}</span>
           </div>
@@ -915,11 +915,11 @@ function renderPlanningMap() {
   activeMapRouteIndex = Math.min(activeMapRouteIndex, state.routes.length - 1);
   const route = state.routes[activeMapRouteIndex];
   const routeButtons = state.routes.map((item, index) => `<button class="${index === activeMapRouteIndex ? "active" : ""}" type="button" data-route-index="${index}">
-    Rit ${index + 1}: ${routeLabel(item)} · ${formatMinutes(item.totalMinutes)}
+    Rit ${index + 1}: ${escapeHtml(routeLabel(item))} · ${formatMinutes(item.totalMinutes)}
   </button>`).join("");
   const stops = route.orders.map((order, index) => `<li>
     <div>
-      <b>${index + 1}. ${order.city || "Plaats onbekend"} · ${order.id}</b>
+      <b>${index + 1}. ${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}</b>
       <span>${productSummary(order)}</span>
       <small>${addressSummary(order)}</small>
     </div>
@@ -938,18 +938,18 @@ function renderPlanningMap() {
   const addableList = addableOrders.length
     ? `<div class="route-add-box compact-add">
         <label><span>Toevoegen aan deze rit</span><select id="addToRouteSelect">
-          ${addableOrders.map((order) => `<option value="${orderKey(order)}">${order.id} · ${order.city || "Plaats onbekend"} · +${order.extraMinutes} min · route ${formatMinutes(order.routeWouldBeMinutes)}</option>`).join("")}
+          ${addableOrders.map((order) => `<option value="${orderKey(order)}">${escapeHtml(order.id)} · ${escapeHtml(order.city || "Plaats onbekend")} · +${order.extraMinutes} min · route ${formatMinutes(order.routeWouldBeMinutes)}</option>`).join("")}
         </select></label>
         <button class="button manual-action add-to-active-route" type="button">Toevoegen aan rit</button>
       </div>`
     : "";
   holder.innerHTML = `<div class="google-map-card">
-    <iframe title="Google Maps route ${routeLabel(route)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${googleMapsEmbedUrl(route.orders)}"></iframe>
+    <iframe title="Google Maps route ${escapeHtml(routeLabel(route))}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${googleMapsEmbedUrl(route.orders)}"></iframe>
   </div>
   <div class="map-side">
     <div class="map-route-picker">${routeButtons}</div>
     <div class="map-route-summary">
-      <b>Rit ${activeMapRouteIndex + 1}: ${routeLabel(route)}</b>
+      <b>Rit ${activeMapRouteIndex + 1}: ${escapeHtml(routeLabel(route))}</b>
       <span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span>
       <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open groot in Google Maps</a>
     </div>
@@ -1056,10 +1056,10 @@ function markerColor(decision) {
 
 function orderTooltip(order) {
   return `<div class="map-tooltip-content">
-    <b>${order.id} · ${order.customer || "Onbekende klant"}</b>
+    <b>${escapeHtml(order.id)} · ${escapeHtml(order.customer || "Onbekende klant")}</b>
     <span>${productSummary(order)}</span>
     <span>${addressSummary(order)}</span>
-    <small>${order.paymentStatus || (order.paid ? "Betaald" : "In afwachting")} · uiterlijk ${formatDate(order.dueDate)}</small>
+    <small>${escapeHtml(order.paymentStatus || (order.paid ? "Betaald" : "In afwachting"))} · uiterlijk ${formatDate(order.dueDate)}</small>
   </div>`;
 }
 
@@ -1071,8 +1071,8 @@ function renderRoutesOverview() {
     return;
   }
   holder.innerHTML = state.routes.map((route, index) => `<article class="route-overview-card">
-    <div><b>${index + 1}. ${routeLabel(route)}</b><span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span></div>
-    <ol>${route.orders.map((order) => `<li>${order.city || "Plaats onbekend"} · ${order.id} · ${productSummary(order)}</li>`).join("")}</ol>
+    <div><b>${index + 1}. ${escapeHtml(routeLabel(route))}</b><span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span></div>
+    <ol>${route.orders.map((order) => `<li>${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)} · ${productSummary(order)}</li>`).join("")}</ol>
     <div class="route-overview-actions">
       <button class="button manual-action show-route-map" type="button" data-route-index="${index}">Toon op kaart</button>
       <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open in Maps</a>
@@ -1145,14 +1145,14 @@ function orderCard(item) {
         <span class="shop-chip ${businessClass(order)}">${businessLogo(order)}</span>
         <span class="badge ${item.decision}">${decisionLabels[item.decision]}</span>
       </div>
-      <h3>${order.id} · ${order.customer}</h3>
+      <h3>${escapeHtml(order.id)} · ${escapeHtml(order.customer)}</h3>
       <p class="product-line">${productSummary(order)}</p>
       <p class="address-line">${addressSummary(order)}</p>
       <p class="reason">${item.reason}</p>
     </div>
     <div class="order-side">
       <span><b>Uiterlijk</b>${formatDate(order.dueDate)}</span>
-      <span><b>Betaling</b>${order.paymentStatus || (order.paid ? "Betaald" : "In afwachting")}</span>
+      <span><b>Betaling</b>${escapeHtml(order.paymentStatus || (order.paid ? "Betaald" : "In afwachting"))}</span>
       <a class="button ghost" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a>
       ${manualActionButton(item, key, isForced)}
     </div>
@@ -1216,7 +1216,7 @@ function renderRoutes() {
     }
     // Buttons carry shop and number together: the number alone is only unique
     // for as long as the two shops keep different prefixes.
-    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${order.id} uit deze rit halen">−</button><b>${order.city} · ${order.id}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-key="${orderKey(order)}">Bezorgd</button></span></li>`).join("");
+    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${escapeHtml(order.id)} uit deze rit halen">−</button><b>${escapeHtml(order.city)} · ${escapeHtml(order.id)}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-key="${orderKey(order)}">Bezorgd</button></span></li>`).join("");
     fragment.querySelectorAll(".remove-route-stop").forEach((button) => {
       button.addEventListener("click", () => removeOrderFromRoute(button.dataset.orderKey, index));
     });
@@ -1239,7 +1239,7 @@ function renderSuggestions() {
   }
   holder.innerHTML = `<div class="suggestion-box"><b>Mogelijk combineren</b><p>Deze orders liggen logisch bij je handmatige selectie of route.</p>${suggestions.map((order) => `
     <article>
-      <span>${order.id} · ${order.city}</span>
+      <span>${escapeHtml(order.id)} · ${escapeHtml(order.city)}</span>
       <small>${productSummary(order)}</small>
       <em>+${order.extraMinutes} min geschat · route wordt ${formatMinutes(order.routeWouldBeMinutes)}</em>
       <button class="button subtle-action add-suggestion" type="button" data-order-key="${orderKey(order)}">Voeg toe</button>
@@ -1493,7 +1493,7 @@ function renderHistory() {
     return;
   }
   holder.innerHTML = state.history.map((item) => `<article class="history-item">
-    <div><b>${item.id}</b><span>${item.order?.customer || "Onbekende klant"} · ${item.order?.webshop || item.shopDomain}</span><small>${historySourceLabel(item)}: ${formatDateTime(item.deliveredAt)}</small></div>
+    <div><b>${escapeHtml(item.id)}</b><span>${escapeHtml(item.order?.customer || "Onbekende klant")} · ${escapeHtml(item.order?.webshop || item.shopDomain)}</span><small>${historySourceLabel(item)}: ${formatDateTime(item.deliveredAt)}</small></div>
     <button class="button ghost undo-delivered" type="button" data-order-id="${encodeURIComponent(item.id)}" data-shop-domain="${encodeURIComponent(item.shopDomain)}">Terugdraaien</button>
   </article>`).join("");
   holder.querySelectorAll(".undo-delivered").forEach((button) => {
@@ -1506,12 +1506,12 @@ function historySourceLabel(item) {
 }
 
 function googleMapsUrl(orders) {
-  const stops = [CONFIG.depot, ...orders.map((order) => order.fullAddress || `${order.postcode} ${order.city}`), CONFIG.depot];
+  const stops = [CONFIG.depot, ...orders.map((order) => order.fullAddress || `${escapeHtml(order.postcode)} ${escapeHtml(order.city)}`), CONFIG.depot];
   return `https://www.google.com/maps/dir/${stops.map((stop) => encodeURIComponent(stop)).join("/")}`;
 }
 
 function googleMapsEmbedUrl(orders) {
-  const stops = [CONFIG.depot, ...orders.map((order) => order.fullAddress || `${order.postcode} ${order.city}`), CONFIG.depot];
+  const stops = [CONFIG.depot, ...orders.map((order) => order.fullAddress || `${escapeHtml(order.postcode)} ${escapeHtml(order.city)}`), CONFIG.depot];
   const url = new URL("https://maps.google.com/maps");
   url.searchParams.set("f", "d");
   url.searchParams.set("source", "s_d");
@@ -1535,8 +1535,10 @@ function singleOrderMapsUrl(order) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(destination || order.city || "")}`;
 }
 
+// For HTML only, so escaped here. Links use mapsAddress, which stays raw
+// because URL encoding takes care of it there.
 function addressSummary(order) {
-  return mapsAddress(order) || "Adres onbekend";
+  return escapeHtml(mapsAddress(order) || "Adres onbekend");
 }
 
 function mapsAddress(order) {
@@ -1547,7 +1549,7 @@ function mapsAddress(order) {
 
 function productSummary(order) {
   const products = Array.isArray(order.products) ? order.products.filter(Boolean) : [];
-  return products.length ? products.join(", ") : "Product onbekend";
+  return escapeHtml(products.length ? products.join(", ") : "Product onbekend");
 }
 
 function businessClass(order) {
@@ -1555,13 +1557,13 @@ function businessClass(order) {
 }
 
 function businessLogo(order) {
-  const label = order.webshop || "Webshop";
+  const label = escapeHtml(order.webshop || "Webshop");
   const logo = businessLogos[order.webshop];
   return logo ? `<img src="${logo}" alt="${label}" />` : `<span>${label}</span>`;
 }
 
 function orderKey(order) {
-  return `${order.shopDomain || ""}:${order.id}`;
+  return `${escapeHtml(order.shopDomain || "")}:${escapeHtml(order.id)}`;
 }
 
 function saveForcedIncludes() {
