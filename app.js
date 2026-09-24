@@ -440,7 +440,10 @@ function renderRoutes() {
     fragment.querySelector(".route-meta").textContent = `${CONFIG.depot} · ${route.orders.length} stops · ruwe rijtijd ${formatMinutes(route.driveMinutes)}`;
     fragment.querySelector(".route-load").textContent = `${route.load.toLocaleString("nl-NL")} kg · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)} · ${routeWarning(route)}`;
     fragment.querySelector(".route-map").href = googleMapsUrl(route.orders);
-    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><b>${order.city} · ${order.id}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-id="${encodeURIComponent(order.id)}">Bezorgd</button></span></li>`).join("");
+    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${order.id} uit deze rit halen">−</button><b>${order.city} · ${order.id}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-id="${encodeURIComponent(order.id)}">Bezorgd</button></span></li>`).join("");
+    fragment.querySelectorAll(".remove-route-stop").forEach((button) => {
+      button.addEventListener("click", () => removeOrderFromActiveRoute(button.dataset.orderKey));
+    });
     fragment.querySelectorAll(".mark-delivered").forEach((button) => {
       const order = route.orders.find((item) => encodeURIComponent(item.id) === button.dataset.orderId);
       button.addEventListener("click", () => markDelivered(order, button));
