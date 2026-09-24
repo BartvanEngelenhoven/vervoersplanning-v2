@@ -7,6 +7,9 @@ const CONFIG = {
   // Drive times are straight-line estimates, so a trip that lands just over
   // budget is within the noise. Up to this much over, the planner decides.
   budgetTolerance: 0.2,
+  // A DHL parcel rides along when a planned route grows no more than this,
+  // unloading included. It never justifies a trip of its own.
+  packageDetourMinutes: 60,
   maxRouteMinutes: 330,
   nearlyOverMinutes: 15,
   farRouteCombineMinutes: 75,
@@ -998,10 +1001,34 @@ function qualifyCandidates() {
   }
 }
 
+// A parcel that happens to sit next to a planned route is cheaper to drop off
+// than to ship, so it joins the route the trip grows least by. Parcels never
+// start a route: without one nearby they stay with DHL. Routes update as each
+// parcel joins, so the next one is measured against what the van really drives.
+function addNearbyPackages() {
+  for (const item of state.decisions.filter((entry) => entry.decision === "dhl")) {
+    const order = item.order;
+    if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) continue;
+
+    let best = null;
+    state.routes.forEach((route, index) => {
+      const merged = routeSummary(route.region, optimizedStopOrder([...route.orders, order]));
+      const grows = merged.totalMinutes - route.totalMinutes;
+      if (grows <= CONFIG.packageDetourMinutes && (!best || grows < best.grows)) best = { index, grows, merged };
+    });
+    if (!best) continue;
+
+    state.routes[best.index] = best.merged;
+    item.decision = "include";
+    item.reason = `Pakketorder, maar rit ${best.merged.region} wordt er maar ${formatMinutes(best.grows)} langer van; goedkoper zelf meenemen. ${dueDateReason(order)}`;
+  }
+}
+
 function rebuildPlanning() {
   state.decisions = state.orders.map((order) => ({ order, ...applyManualDecision(order, decide(order)) }));
   qualifyCandidates();
   state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
+  addNearbyPackages();
   renderSummary();
   renderPlanningOverview();
   renderOrders();
