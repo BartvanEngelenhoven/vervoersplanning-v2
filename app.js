@@ -13,12 +13,14 @@ const CONFIG = {
 const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [] };
 const decisionLabels = { include: "Meenemen", review: "Controleren", dhl: "DHL", far: "Te ver", exclude: "Niet meenemen" };
 
-// Minutes are round trips from the depot, because routeDriveMinutes drives out
-// and back. An order past directMinutes can still ride along when an existing
-// route absorbs it for extraMinutes or less; otherwise it lands in overflow.
+// Every order brings its own travel budget to the trip and the budgets pool, so
+// two rijplaten may share a 240 minute drive although neither pays for 120 on
+// its own. Minutes are round trips, because routeDriveMinutes drives out and
+// back. Hay houses go whatever the distance, so they carry no ceiling.
 const transportRules = {
-  rijplaten: { label: "Rijplaten", directMinutes: 120, extraMinutes: 120, overflow: "far" },
-  xxl: { label: "XXL bak", directMinutes: 60, extraMinutes: 60, overflow: "dhl" },
+  rijplaten: { label: "Rijplaten", budgetMinutes: 120, overflow: "far" },
+  hooihuisje: { label: "Hooihuisje", budgetMinutes: Infinity, overflow: "far" },
+  xxl: { label: "XXL bak", budgetMinutes: 60, overflow: "dhl" },
 };
 const forcedIncludeKey = "vervoersplanning.forceInclude.v1";
 const operatorKeyStorageKey = "vervoersplanning.operatorKey.v1";
@@ -60,10 +62,10 @@ function isXxlBak(order) {
 }
 
 function transportPlan(order) {
-  if (isRijplatenOrder(order)) return { kind: "limited", rule: transportRules.rijplaten };
-  if (isHooihuisje(order)) return { kind: "always", label: "Hooihuisje" };
-  if (isXxlBak(order)) return { kind: "limited", rule: transportRules.xxl };
-  return { kind: "dhl" };
+  if (isRijplatenOrder(order)) return transportRules.rijplaten;
+  if (isHooihuisje(order)) return transportRules.hooihuisje;
+  if (isXxlBak(order)) return transportRules.xxl;
+  return null;
 }
 
 function decide(order) {
@@ -72,30 +74,14 @@ function decide(order) {
   if (order.deliveryMethod === "pickup") return { decision: "exclude", reason: "Klant haalt de bestelling af" };
 
   const plan = transportPlan(order);
-  if (plan.kind === "dhl") {
-    return { decision: "dhl", reason: "Geen hooihuisje en geen XXL bak; gaat als pakket via DHL" };
-  }
+  if (!plan) return { decision: "dhl", reason: "Geen hooihuisje en geen XXL bak; gaat als pakket via DHL" };
 
   if (!order.addressComplete) return { decision: "review", reason: "Bezorgadres is onvolledig" };
   if (order.deliveryAppointmentLocked) return { decision: "review", reason: "Aflevermoment is afgestemd; niet verplaatsen zonder toestemming" };
   if (!order.paid) return { decision: "review", reason: "Betaling nog niet binnen; alleen optioneel meenemen als dit logisch op de route ligt" };
 
-  if (plan.kind === "always") {
-    return { decision: "include", reason: `${plan.label}: altijd eigen bezorging. ${dueDateReason(order)}` };
-  }
-
-  const roundTrip = routeDriveMinutes([order]);
-  if (roundTrip <= plan.rule.directMinutes) {
-    return { decision: "include", reason: `${plan.rule.label} op ${formatMinutes(roundTrip)} heen/terug. ${dueDateReason(order)}` };
-  }
-
-  // Resolved in attachCombineCandidates, once the routes it could join exist.
-  return {
-    decision: "combine",
-    rule: plan.rule,
-    roundTrip,
-    reason: `${plan.rule.label} op ${formatMinutes(roundTrip)} heen/terug`,
-  };
+  // Settled in qualifyCandidates, which weighs the whole region's trip at once.
+  return { decision: "candidate", plan, reason: `${plan.label}, wacht op ritberekening` };
 }
 
 function applyManualDecision(order, automatic) {
@@ -925,35 +911,59 @@ function clearForceInclude(order) {
   rebuildPlanning();
 }
 
-// An order too far to justify its own trip may still be worth taking when a
-// planned route passes near it. Each candidate joins the route it burdens least,
-// and the route is updated before the next candidate is measured against it.
-function attachCombineCandidates() {
-  for (const item of state.decisions.filter((entry) => entry.decision === "combine")) {
-    let best = null;
-    state.routes.forEach((route, index) => {
-      const merged = routeSummary(route.region, optimizedStopOrder([...route.orders, item.order]));
-      const extra = merged.totalMinutes - route.totalMinutes;
-      if (extra <= item.rule.extraMinutes && (!best || extra < best.extra)) best = { index, extra, merged };
-    });
+// Orders heading the same way share one trip, so they are weighed together: the
+// drive has to fit inside the budgets they bring between them. When it does not,
+// the order paying least for the detour it causes drops out and the rest is
+// weighed again, because losing it may well bring the trip back within budget.
+function qualifyCandidates() {
+  const byRegion = new Map();
+  for (const item of state.decisions.filter((entry) => entry.decision === "candidate")) {
+    const region = regionFor(item.order);
+    if (!byRegion.has(region)) byRegion.set(region, []);
+    byRegion.get(region).push(item);
+  }
 
-    if (best) {
-      state.routes[best.index] = best.merged;
-      item.decision = "include";
-      item.reason = `${item.rule.label} op ${formatMinutes(item.roundTrip)} heen/terug, maar kost ${formatMinutes(best.extra)} extra op rit ${best.merged.region}. ${dueDateReason(item.order)}`;
-      continue;
+  for (const [region, candidates] of byRegion) {
+    const kept = [...candidates];
+    while (kept.length) {
+      const drive = routeDriveMinutes(kept.map((item) => item.order));
+      const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
+      if (drive <= budget) break;
+
+      let worst = null;
+      for (const item of kept) {
+        const others = kept.filter((entry) => entry !== item).map((entry) => entry.order);
+        const causes = drive - routeDriveMinutes(others);
+        const overspend = causes - item.plan.budgetMinutes;
+        if (!worst || overspend > worst.overspend) worst = { item, overspend };
+      }
+
+      kept.splice(kept.indexOf(worst.item), 1);
+      worst.item.decision = worst.item.plan.overflow;
+      worst.item.reason = worst.item.plan.overflow === "dhl"
+        ? `${worst.item.plan.label} kost meer omrijden dan de ${formatMinutes(worst.item.plan.budgetMinutes)} die deze order meebrengt; gaat als pakket via DHL`
+        : `${worst.item.plan.label} kost meer omrijden dan de ${formatMinutes(worst.item.plan.budgetMinutes)} die deze order meebrengt, ook samen met de andere orders richting ${region}`;
     }
 
-    item.decision = item.rule.overflow;
-    const tooFar = `${item.rule.label} op ${formatMinutes(item.roundTrip)} heen/terug, meer dan ${formatMinutes(item.rule.directMinutes)}, en past op geen enkele rit`;
-    item.reason = item.rule.overflow === "dhl" ? `${tooFar}; gaat als pakket via DHL` : tooFar;
+    if (!kept.length) continue;
+    const drive = routeDriveMinutes(kept.map((item) => item.order));
+    const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
+    const shared = budget === Infinity
+      ? `${formatMinutes(drive)} rijden richting ${region}; een hooihuisje gaat altijd mee, hoe ver ook`
+      : kept.length > 1
+        ? `${kept.length} orders richting ${region} samen ${formatMinutes(drive)} rijden, binnen de gezamenlijke ${formatMinutes(budget)}`
+        : `${formatMinutes(drive)} heen/terug, binnen de ${formatMinutes(budget)}`;
+    for (const item of kept) {
+      item.decision = "include";
+      item.reason = `${item.plan.label}: ${shared}. ${dueDateReason(item.order)}`;
+    }
   }
 }
 
 function rebuildPlanning() {
   state.decisions = state.orders.map((order) => ({ order, ...applyManualDecision(order, decide(order)) }));
+  qualifyCandidates();
   state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
-  attachCombineCandidates();
   renderSummary();
   renderPlanningOverview();
   renderOrders();
