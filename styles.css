@@ -360,3 +360,6 @@ details[open] > summary .fold-hint::after { content: " ▴"; }
 }
 .map-panel .panel-heading { flex-wrap: wrap; gap: .6rem; }
 .map-panel .view-toggle { flex-shrink: 0; }
+
+.rit-nummer { display: inline-block; padding: .1rem .45rem; margin-right: .35rem; border-radius: 6px;
+  background: var(--brand); color: #f7f3e8; font-size: .8rem; font-weight: 900; letter-spacing: .02em; }

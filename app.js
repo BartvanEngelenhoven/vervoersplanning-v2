@@ -361,6 +361,17 @@ function renderRules() {
   holder.innerHTML = kaarten.map(([titel, tekst]) => `<article><b>${titel}</b><p>${tekst}</p></article>`).join("");
 }
 
+// A route is named for where it goes, not for the compass sector it was grouped
+// into: two routes out of one direction would otherwise carry the same name.
+function routeLabel(route) {
+  const steden = [...new Set(route.orders.map((order) => order.city).filter(Boolean))];
+  if (!steden.length) return route.region;
+  if (steden.length === 1) return steden[0];
+  if (steden.length === 2) return `${steden[0]} en ${steden[1]}`;
+  if (steden.length === 3) return `${steden[0]}, ${steden[1]} en ${steden[2]}`;
+  return `${steden[0]}, ${steden[1]} en ${steden.length - 2} meer`;
+}
+
 function renderAgenda() {
   const holder = document.querySelector("#agendaDays");
   const teller = document.querySelector("#agendaCount");
@@ -396,7 +407,7 @@ function renderAgenda() {
           ? `<em>${weg} van de ${planned.orderIds.length} orders ${weg === 1 ? "staat" : "staan"} niet meer in de planning</em>`
           : "";
         return `<div class="agenda-route">
-          <b>${planned.name}</b>
+          <b><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${planned.name}</b>
           <span>${status.aanwezig.length} ${status.aanwezig.length === 1 ? "stop" : "stops"}</span>
           ${waarschuwing}
           <div class="agenda-route-actions">
@@ -420,12 +431,12 @@ function openPlannedRoute(planned) {
   if (!planned) return;
   const status = plannedRouteStatus(planned);
   if (!status.aanwezig.length) {
-    window.alert(`Geen van de orders uit "${planned.name}" staat nog in de planning. Ze zijn bezorgd, geannuleerd of vervallen.`);
+    window.alert(`Geen van de orders uit rit ${planned.number || "?"} staat nog in de planning. Ze zijn bezorgd, geannuleerd of vervallen.`);
     return;
   }
 
   const erbij = nearbyAdditions(status.aanwezig);
-  const regels = [`Rit "${planned.name}" van ${formatDate(planned.date)}: ${status.aanwezig.length} stops.`];
+  const regels = [`Rit ${planned.number || "?"} naar ${planned.name}, ${formatDate(planned.date)}: ${status.aanwezig.length} stops.`];
   if (status.verdwenen.length) regels.push(`Vervallen sinds het inplannen: ${status.verdwenen.join(", ")}.`);
   if (erbij.length) {
     regels.push("", "Sinds het inplannen zijn deze orders binnengekomen die er makkelijk bij kunnen:");
@@ -457,7 +468,7 @@ function planRouteDialog(route) {
     keuzes.push({ dag: isoDay(datum), label: stap === 0 ? `${naam} (vandaag)` : stap === 1 ? `${naam} (morgen)` : naam });
   }
 
-  const vraag = [`Rit ${route.region} met ${route.orders.length} stops inplannen.`, "", "Typ het nummer van de dag:"]
+  const vraag = [`Rit naar ${routeLabel(route)} met ${route.orders.length} stops inplannen.`, "", "Typ het nummer van de dag:"]
     .concat(keuzes.map((k, i) => `${i + 1}. ${k.label}`))
     .join("\n");
 
@@ -471,7 +482,7 @@ function planRouteDialog(route) {
   if (!keuze) return;
 
   assignRouteToDay(route, keuze.dag).then((gelukt) => {
-    if (gelukt) window.alert(`Rit ${route.region} staat op ${keuze.label}.`);
+    if (gelukt) window.alert(`De rit naar ${routeLabel(route)} staat op ${keuze.label}. Het ritnummer zie je in de agenda.`);
   });
 }
 
@@ -793,7 +804,7 @@ function renderRoutes() {
   state.routes.forEach((route, index) => {
     const fragment = template.content.cloneNode(true);
     fragment.querySelector(".route-number").textContent = index + 1;
-    fragment.querySelector(".route-name").textContent = route.region;
+    fragment.querySelector(".route-name").textContent = routeLabel(route);
     fragment.querySelector(".route-meta").textContent = `${CONFIG.depot} · ${route.orders.length} stops · ruwe rijtijd ${formatMinutes(route.driveMinutes)}`;
     fragment.querySelector(".route-load").textContent = `${route.load.toLocaleString("nl-NL")} kg · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)} · ${routeWarning(route)}`;
     fragment.querySelector(".route-map").href = googleMapsUrl(route.orders);
@@ -1445,7 +1456,7 @@ async function assignRouteToDay(route, date, planned) {
       id: planned?.id,
       fromDate: planned?.date,
       date,
-      name: route.region || planned?.name || "Rit",
+      name: routeLabel(route) || planned?.name || "Rit",
       orderIds: route.orders.map((order) => order.id),
     }),
   });
@@ -1459,7 +1470,7 @@ async function assignRouteToDay(route, date, planned) {
 }
 
 async function removePlannedRoute(planned) {
-  if (!window.confirm(`Rit "${planned.name}" van ${formatDate(planned.date)} uit de agenda halen?`)) return;
+  if (!window.confirm(`Rit ${planned.number || "?"} naar ${planned.name} van ${formatDate(planned.date)} uit de agenda halen?`)) return;
   const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/remove`, {
     method: "POST",
     headers: { "content-type": "application/json" },

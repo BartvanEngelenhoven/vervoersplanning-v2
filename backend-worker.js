@@ -436,12 +436,18 @@ async function assignPlanRoute(request, env) {
   if (!orderIds.length) return json({ error: "orderIds zijn verplicht" }, 400, env);
 
   const id = String(payload.id || crypto.randomUUID());
+  const bestaand = isPlanDate(payload.fromDate)
+    ? await env.PLANNING_ORDERS.get(`${PLAN_PREFIX}${payload.fromDate}:${id}`, "json")
+    : await env.PLANNING_ORDERS.get(`${PLAN_PREFIX}${date}:${id}`, "json");
+
   const record = {
     id,
+    // A route keeps the number it was given, whatever day it is moved to.
+    number: bestaand?.number || await claimRouteNumber(env),
     date,
     name: String(payload.name || "Rit").slice(0, 60),
     orderIds,
-    assignedAt: payload.assignedAt || new Date().toISOString(),
+    assignedAt: bestaand?.assignedAt || payload.assignedAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
 
@@ -454,6 +460,30 @@ async function assignPlanRoute(request, env) {
 
   await env.PLANNING_ORDERS.put(`${PLAN_PREFIX}${date}:${id}`, JSON.stringify(record));
   return json({ route: record }, 200, env);
+}
+
+// Route numbers run on for good: rit 1 today, rit 500 in a year or two. The
+// driver is told a number, so it has to mean one route and never come round
+// again. KV cannot increment atomically, so the counter is read and written
+// back, and the number is only kept once claiming its marker succeeds: two
+// people assigning a route in the same second would otherwise both be told 137.
+async function claimRouteNumber(env) {
+  const teller = (await env.PLANNING_ORDERS.get("plan-counter", "json")) || { next: 1 };
+  let nummer = Number(teller.next) || 1;
+
+  for (let poging = 0; poging < 8; poging += 1) {
+    const marker = `plan-number:${nummer}`;
+    if (!(await env.PLANNING_ORDERS.get(marker))) {
+      await env.PLANNING_ORDERS.put(marker, new Date().toISOString());
+      await env.PLANNING_ORDERS.put("plan-counter", JSON.stringify({ next: nummer + 1 }));
+      return nummer;
+    }
+    nummer += 1;
+  }
+
+  // Eight taken in a row means the counter drifted behind reality; skip past it.
+  await env.PLANNING_ORDERS.put("plan-counter", JSON.stringify({ next: nummer + 1 }));
+  return nummer;
 }
 
 async function removePlanRoute(request, env) {
