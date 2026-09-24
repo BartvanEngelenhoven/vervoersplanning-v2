@@ -6,6 +6,8 @@ const CONFIG = {
   apiBaseUrl: new URL(window.VERVOERSPLANNING_CONFIG?.dataUrl || "data/demo-orders.json", window.location.href).origin,
   maxRouteMinutes: 330,
   nearlyOverMinutes: 15,
+  farRouteCombineMinutes: 75,
+  exceptionRouteMinutes: 480,
 };
 
 const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [] };
@@ -74,9 +76,14 @@ function buildRoutes(included) {
     for (const order of orders) {
       const candidate = optimizedStopOrder([...current, order]);
       const candidateSummary = routeSummary(region, candidate);
+      const currentSummary = current.length ? routeSummary(region, current) : null;
+      const addedMinutes = currentSummary ? candidateSummary.totalMinutes - currentSummary.totalMinutes : candidateSummary.totalMinutes;
       const loadTooHigh = candidateSummary.load > CONFIG.vehicleCapacityKg;
       const routeTooLong = candidateSummary.totalMinutes > CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
-      if (current.length && (loadTooHigh || routeTooLong)) {
+      const usefulFarCombination = sameRouteCorridor(current, order)
+        && candidateSummary.totalMinutes <= CONFIG.exceptionRouteMinutes
+        && (currentSummary?.overByMinutes || addedMinutes <= CONFIG.farRouteCombineMinutes || countryName(order) === "BE");
+      if (current.length && (loadTooHigh || (routeTooLong && !usefulFarCombination))) {
         routes.push(routeSummary(region, optimizedStopOrder(current)));
         current = [order];
       } else {
@@ -113,7 +120,16 @@ function routeDriveMinutes(orders) {
 }
 
 function optimizedStopOrder(orders) {
-  return [...orders].sort((a, b) => routeSortScore(a) - routeSortScore(b));
+  const remaining = [...orders];
+  const ordered = [];
+  let currentPoint = DEPOT_POINT;
+  while (remaining.length) {
+    remaining.sort((a, b) => distanceKm(currentPoint, orderPoint(a)) - distanceKm(currentPoint, orderPoint(b)));
+    const next = remaining.shift();
+    ordered.push(next);
+    currentPoint = orderPoint(next);
+  }
+  return ordered;
 }
 
 function routeSortScore(order) {
@@ -334,7 +350,11 @@ function suggestionCandidate(item, routeKeys) {
   if (routeKeys.has(orderKey(order)) || state.selected.has(orderKey(order))) return false;
   if (order.cancelled || order.fulfilled || order.deliveryMethod === "pickup") return false;
   if (!order.addressComplete || !order.paid) return false;
-  return item.decision !== "include";
+  return item.decision === "include" || item.decision === "review" || item.decision === "exclude";
+}
+
+function sameRouteCorridor(routeOrders, candidate) {
+  return routeOrders.some((order) => regionFor(order) === regionFor(candidate) || countryName(order) && countryName(order) === countryName(candidate));
 }
 
 function countryName(order) {
