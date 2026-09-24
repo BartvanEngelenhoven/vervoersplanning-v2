@@ -239,12 +239,12 @@ function renderPlanningMap() {
     .sort((a, b) => a.extraMinutes - b.extraMinutes)
     .slice(0, 6);
   const addableList = addableOrders.length
-    ? `<div class="route-add-box"><b>Toevoegen aan deze rit</b>${addableOrders.map((order) => `<article>
-        <span>${order.id} · ${order.city || "Plaats onbekend"}</span>
-        <small>${productSummary(order)}</small>
-        <em>+${order.extraMinutes} min · route wordt ${formatMinutes(order.routeWouldBeMinutes)}</em>
-        <button class="button subtle-action add-to-active-route" type="button" data-order-key="${orderKey(order)}">Voeg toe</button>
-      </article>`).join("")}</div>`
+    ? `<div class="route-add-box compact-add">
+        <label><span>Toevoegen aan deze rit</span><select id="addToRouteSelect">
+          ${addableOrders.map((order) => `<option value="${orderKey(order)}">${order.id} · ${order.city || "Plaats onbekend"} · +${order.extraMinutes} min · route ${formatMinutes(order.routeWouldBeMinutes)}</option>`).join("")}
+        </select></label>
+        <button class="button manual-action add-to-active-route" type="button">Toevoegen aan rit</button>
+      </div>`
     : "";
   holder.innerHTML = `<div class="google-map-card">
     <iframe title="Google Maps route ${route.region}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${googleMapsEmbedUrl(route.orders)}"></iframe>
@@ -266,8 +266,11 @@ function renderPlanningMap() {
     });
   });
   holder.querySelectorAll(".add-to-active-route").forEach((button) => {
-    const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
-    button.addEventListener("click", () => addOrderToActiveRoute(order));
+    button.addEventListener("click", () => {
+      const select = holder.querySelector("#addToRouteSelect");
+      const order = state.orders.find((item) => orderKey(item) === select?.value);
+      addOrderToActiveRoute(order);
+    });
   });
   holder.querySelectorAll(".remove-from-active-route").forEach((button) => {
     button.addEventListener("click", () => removeOrderFromActiveRoute(button.dataset.orderKey));
@@ -282,35 +285,25 @@ function renderAllOrdersMap(holder) {
     holder.innerHTML = '<p class="empty">Geen losse open orders om op Google Maps te tonen.</p>';
     return;
   }
-  if (!activeLooseOrderKey || !openOrders.some((order) => orderKey(order) === activeLooseOrderKey)) {
-    activeLooseOrderKey = orderKey(openOrders[0]);
-  }
-  const activeOrder = openOrders.find((order) => orderKey(order) === activeLooseOrderKey) || openOrders[0];
   const orderRows = openOrders.map((order) => {
     const decision = state.decisions.find((item) => item.order === order)?.decision || "exclude";
-    return `<button class="loose-order-button ${orderKey(order) === activeLooseOrderKey ? "active" : ""}" type="button" data-order-key="${orderKey(order)}">
+    return `<a class="loose-order-button" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">
       <span class="map-dot ${decision}"></span>
       <b>${order.id} · ${order.city || "Plaats onbekend"}</b>
       <small>${productSummary(order)}</small>
-    </button>`;
+    </a>`;
   }).join("");
   holder.innerHTML = `<div class="google-map-card">
-    <iframe title="Google Maps losse order ${activeOrder.id}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${singleOrderEmbedUrl(activeOrder)}"></iframe>
+    <iframe title="Google Maps alle open orders" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${googleMapsEmbedUrl(openOrders)}"></iframe>
   </div>
   <div class="map-side">
     <div class="map-route-summary">
-      <b>Losse order op kaart</b>
-      <span>${activeOrder.id} · ${activeOrder.city || "Plaats onbekend"} · ${addressSummary(activeOrder)}</span>
-      <a class="button ghost" href="${singleOrderMapsUrl(activeOrder)}" target="_blank" rel="noreferrer">Open in Google Maps</a>
+      <b>Alle open orders op kaart</b>
+      <span>${openOrders.length} orders tegelijk vanaf en terug naar ${CONFIG.depot}</span>
+      <a class="button ghost" href="${googleMapsUrl(openOrders)}" target="_blank" rel="noreferrer">Open alle orders in Google Maps</a>
     </div>
     <div class="loose-order-list">${orderRows}</div>
   </div>`;
-  holder.querySelectorAll(".loose-order-button").forEach((button) => {
-    button.addEventListener("click", () => {
-      activeLooseOrderKey = button.dataset.orderKey;
-      renderPlanningOverview();
-    });
-  });
 }
 
 function renderRoutesOverview() {

@@ -85,6 +85,9 @@ h2 { margin-bottom: 0; font-size: 1.35rem; letter-spacing: -.025em; }
 .map-route-summary span { color: var(--muted); font-size: .85rem; }
 .route-add-box { display: grid; gap: .5rem; padding: .8rem; border: 1px solid #f1d28b; border-radius: 12px; background: #fff8e7; }
 .route-add-box > b { display: block; }
+.route-add-box.compact-add { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.route-add-box.compact-add label { min-width: 0; }
+.route-add-box.compact-add select { width: 100%; background: white; }
 .route-add-box article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .25rem .5rem; align-items: center; padding: .6rem; border-radius: 10px; background: rgba(255,255,255,.75); }
 .route-add-box span, .route-add-box small, .route-add-box em { grid-column: 1; min-width: 0; display: block; overflow-wrap: anywhere; }
 .route-add-box span { font-weight: 850; }
