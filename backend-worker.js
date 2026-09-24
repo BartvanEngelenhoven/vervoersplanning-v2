@@ -451,6 +451,9 @@ function nextShopifyPageUrl(linkHeader) {
 // its own estimate for those.
 const GEO_PREFIX = "geo:";
 const GEO_MISS_TTL = 7 * 24 * 3600;
+// Points found before the postcode check existed were kept without expiry;
+// giving every hit a lifetime means any such point is looked up again in time.
+const GEO_HIT_TTL = 90 * 24 * 3600;
 // The Workers free plan allows 50 outbound fetches per request. Forty lookups
 // leaves room; anything past it is simply looked up on the next refresh.
 const GEO_BATCH_LIMIT = 40;
@@ -459,19 +462,53 @@ function looksDutch(address) {
   return /\b\d{4}\s?[A-Z]{2}\b/i.test(address) && !/(belgi|belgium|deutschland|germany|czech|france|luxemb)/i.test(address);
 }
 
-async function pdokLookup(address) {
+function postcodeOf(address) {
+  const match = String(address).match(/\b(\d{4})\s?([A-Z]{2})\b/i);
+  return match ? { digits: match[1], full: `${match[1]}${match[2].toUpperCase()}` } : null;
+}
+
+async function pdokQuery(q, fq) {
   const url = new URL("https://api.pdok.nl/bzk/locatieserver/search/v3_1/free");
-  url.searchParams.set("q", address);
+  url.searchParams.set("q", q);
   url.searchParams.set("rows", "1");
-  url.searchParams.set("fl", "centroide_ll,type,score");
-  url.searchParams.set("fq", "type:(adres OR postcode OR weg)");
-  const response = await fetch(url, { headers: { "user-agent": "vervoersplanning-de-specialisten" } });
+  url.searchParams.set("fl", "centroide_ll,type,postcode");
+  url.searchParams.set("fq", fq);
+  // PDOK stalling must not stall the planning: three seconds, then give up on
+  // this address and let the next refresh try again.
+  const response = await fetch(url, {
+    headers: { "user-agent": "vervoersplanning-de-specialisten" },
+    signal: AbortSignal.timeout(3000),
+  });
   if (!response.ok) throw new Error(`PDOK ${response.status}`);
   const doc = (await response.json())?.response?.docs?.[0];
-  const match = String(doc?.centroide_ll || "").match(/POINT\(([-\d.]+) ([-\d.]+)\)/);
-  if (!match) return null;
-  return { lat: Number(match[2]), lon: Number(match[1]), precision: doc.type };
+  const point = String(doc?.centroide_ll || "").match(/POINT\(([-\d.]+) ([-\d.]+)\)/);
+  if (!point) return null;
+  return { lat: Number(point[2]), lon: Number(point[1]), precision: doc.type, postcode: String(doc.postcode || "") };
 }
+
+// PDOK matches loosely and nearly always answers something. A farm name in the
+// address ("Manege De Hoeve") came back as a street of that name in Friesland,
+// 112 km off, and was kept for good. A hit now only counts when its postcode
+// has the same four digits as the order's. Otherwise the postcode alone is
+// looked up, which always lands in the right place, and failing that the
+// address is left to the planning's own estimate.
+async function pdokLookup(address) {
+  const postcode = postcodeOf(address);
+  if (!postcode) return null;
+  const cleaned = address.replace(/["\u201c\u201d]/g, " ");
+  const hit = await pdokQuery(cleaned, "type:(adres OR postcode OR weg)");
+  if (hit && hit.postcode.slice(0, 4) === postcode.digits) return hit;
+  const area = await pdokQuery(postcode.full, "type:postcode");
+  if (area && area.postcode.slice(0, 4) === postcode.digits) return { ...area, precision: "postcode" };
+  return null;
+}
+
+// A lookup may call PDOK twice (the address, then the postcode alone), and the
+// free plan allows 50 outbound fetches per request: twenty new addresses at
+// most, and none started after eight seconds. What is left over is simply
+// asked for again on the next refresh, which the page does on its own.
+const GEO_LOOKUPS_PER_REQUEST = 20;
+const GEO_TIME_BUDGET_MS = 8000;
 
 async function geocodeAddresses(request, env) {
   if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
@@ -481,23 +518,29 @@ async function geocodeAddresses(request, env) {
     .map(normalizeAddress).filter(Boolean))].slice(0, GEO_BATCH_LIMIT);
 
   const results = {};
+  const dutch = addresses.filter(looksDutch);
+  for (const address of addresses) if (!looksDutch(address)) results[address] = null;
+
+  const keyFor = (address) => `${GEO_PREFIX}${address.toLowerCase()}`;
+  const cached = await Promise.all(dutch.map((address) => env.PLANNING_ORDERS.get(keyFor(address), "json")));
+  const todo = [];
+  dutch.forEach((address, index) => {
+    if (cached[index]) results[address] = cached[index].miss ? null : cached[index];
+    else todo.push(address);
+  });
+
+  const deadline = Date.now() + GEO_TIME_BUDGET_MS;
   let looked = 0;
-  for (const address of addresses) {
-    if (!looksDutch(address)) {
+  for (const address of todo) {
+    if (looked >= GEO_LOOKUPS_PER_REQUEST || Date.now() > deadline) {
       results[address] = null;
       continue;
     }
-    const key = `${GEO_PREFIX}${address.toLowerCase()}`;
-    const cached = await env.PLANNING_ORDERS.get(key, "json");
-    if (cached) {
-      results[address] = cached.miss ? null : cached;
-      continue;
-    }
+    looked += 1;
     try {
       const point = await pdokLookup(address);
-      looked += 1;
       results[address] = point;
-      await env.PLANNING_ORDERS.put(key, JSON.stringify(point || { miss: true }), point ? {} : { expirationTtl: GEO_MISS_TTL });
+      await env.PLANNING_ORDERS.put(keyFor(address), JSON.stringify(point || { miss: true }), { expirationTtl: point ? GEO_HIT_TTL : GEO_MISS_TTL });
     } catch {
       // PDOK down or slow: leave this one out and let the planning estimate it.
       // Nothing is cached, so the next refresh simply tries again.
@@ -505,7 +548,7 @@ async function geocodeAddresses(request, env) {
     }
   }
 
-  return json({ results, looked }, 200, env);
+  return json({ results, looked, pending: Math.max(0, todo.length - looked) }, 200, env);
 }
 
 // A planned route is its own record, plan:<date>:<id>, never one record per day.

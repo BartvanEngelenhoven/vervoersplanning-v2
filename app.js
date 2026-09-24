@@ -73,6 +73,10 @@ const DEPOT_POINT = { lat: 52.07309, lon: 5.63884 };
 // it replaces. The fixed part is paid once out and once back, not at every stop.
 const TRIP_OVERHEAD_MINUTES = 20.2;
 const MINUTES_PER_KM = 0.975;
+// Each further stop costs about five minutes of leaving and rejoining the main
+// road that straight-line km do not see: routes of several stops came out 225
+// minutes short over 46 extra stops against the same OpenStreetMap routing.
+const STOP_MINUTES = 5;
 let planningView = "map";
 let activeMapRouteIndex = 0;
 let activeLooseOrderKey = "";
@@ -238,7 +242,7 @@ function routeDriveMinutes(orders) {
   const points = orders.map(orderPoint);
   const legs = [DEPOT_POINT, ...points, DEPOT_POINT];
   const km = legs.slice(1).reduce((sum, point, index) => sum + distanceKm(legs[index], point), 0);
-  return Math.max(20, Math.round(TRIP_OVERHEAD_MINUTES + km * MINUTES_PER_KM));
+  return Math.max(20, Math.round(TRIP_OVERHEAD_MINUTES + STOP_MINUTES * (orders.length - 1) + km * MINUTES_PER_KM));
 }
 
 function optimizedStopOrder(orders) {
@@ -1618,7 +1622,10 @@ function qualifyCandidates() {
     const kept = [...candidates];
     let verdict = "include";
     while (kept.length) {
-      const drive = routeDriveMinutes(kept.map((item) => item.order));
+      // In driving order, as buildRoutes will show it. The order list's own
+      // sequence can zigzag: Maastricht, Nijmegen, Geleen read as 476 minutes
+      // against 292 for the route actually driven.
+      const drive = routeDriveMinutes(optimizedStopOrder(kept.map((item) => item.order)));
       const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
       if (drive <= budget) {
         verdict = "include";
@@ -1632,7 +1639,7 @@ function qualifyCandidates() {
       let worst = null;
       for (const item of kept) {
         const others = kept.filter((entry) => entry !== item).map((entry) => entry.order);
-        const causes = drive - routeDriveMinutes(others);
+        const causes = drive - routeDriveMinutes(optimizedStopOrder(others));
         const overspend = causes - item.plan.budgetMinutes;
         if (!worst || overspend > worst.overspend) worst = { item, overspend };
       }
@@ -1645,7 +1652,7 @@ function qualifyCandidates() {
     }
 
     if (!kept.length) continue;
-    const drive = routeDriveMinutes(kept.map((item) => item.order));
+    const drive = routeDriveMinutes(optimizedStopOrder(kept.map((item) => item.order)));
     const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
     const samen = kept.length > 1 ? `${kept.length} orders richting ${region} samen ` : "";
     const shared = budget === Infinity
@@ -2048,14 +2055,17 @@ async function fetchGeo(orders) {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ addresses: missing.slice(start, start + 40) }),
+        // The planning waits for this before drawing; it must not wait forever.
+        signal: AbortSignal.timeout(12000),
       });
-      if (!response.ok) return;
+      if (!response.ok) continue;
       const { results } = await response.json();
       for (const [address, point] of Object.entries(results || {})) {
         if (point) state.geo[address] = { lat: point.lat, lon: point.lon };
       }
     } catch {
-      return;
+      // Timed out or offline: carry on with the next batch, estimate the rest.
+      continue;
     }
   }
 }
