@@ -42,29 +42,28 @@
         <button id="backToAutoButton" class="button primary" type="button">Toon weer alle ritten</button>
       </section>
 
-      <section class="panel route-panel" aria-labelledby="route-title">
-        <div class="panel-heading compact">
-          <div><p class="eyebrow">Stap 1</p><h2 id="route-title">Ritten van vandaag</h2></div>
-        </div>
-        <div id="suggestions" class="suggestions"></div>
-        <div id="routes"></div>
-      </section>
+      <div class="today">
+        <section class="panel route-panel" aria-labelledby="route-title">
+          <div class="panel-heading compact">
+            <div><p class="eyebrow">Stap 1</p><h2 id="route-title">Ritten van vandaag</h2></div>
+          </div>
+          <div id="suggestions" class="suggestions"></div>
+          <div id="routes"></div>
+        </section>
 
-      <section class="panel map-panel">
-        <details id="mapDetails">
-          <summary class="panel-heading compact">
-            <div><p class="eyebrow">Stap 2</p><h2>Op de kaart</h2></div>
-            <span class="fold-hint">kaart tonen</span>
-          </summary>
-          <div class="view-toggle" role="group" aria-label="Weergave kiezen">
-            <button id="showMapButton" class="active" type="button">Rit op kaart</button>
-            <button id="showAllOrdersMapButton" type="button">Alle orders</button>
-            <button id="showRoutesButton" type="button">Ritten naast elkaar</button>
+        <section class="panel map-panel">
+          <div class="panel-heading compact">
+            <div><p class="eyebrow">Waar ze liggen</p><h2>Kaart</h2></div>
+            <div class="view-toggle" role="group" aria-label="Weergave kiezen">
+              <button id="showMapButton" class="active" type="button">Rit</button>
+              <button id="showAllOrdersMapButton" type="button">Alle orders</button>
+              <button id="showRoutesButton" type="button">Naast elkaar</button>
+            </div>
           </div>
           <div id="mapView" class="map-view"></div>
           <div id="routesOverview" class="routes-overview" hidden></div>
-        </details>
-      </section>
+        </section>
+      </div>
 
       <section class="panel orders-panel">
         <div class="panel-heading">

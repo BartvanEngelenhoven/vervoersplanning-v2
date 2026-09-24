@@ -294,9 +294,9 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
 .notice-bar[hidden] { display: none; }
 .notice-bar p { margin: 0; font-size: .9rem; }
 
-.map-panel summary, .rules-panel summary { cursor: pointer; list-style: none; user-select: none; }
-.map-panel summary::-webkit-details-marker, .rules-panel summary::-webkit-details-marker { display: none; }
-.map-panel summary:hover, .rules-panel summary:hover { background: #f6f8f5; }
+.rules-panel summary { cursor: pointer; list-style: none; user-select: none; }
+.rules-panel summary::-webkit-details-marker { display: none; }
+.rules-panel summary:hover { background: #f6f8f5; }
 .fold-hint { color: var(--muted); font-size: .85rem; font-weight: 650; white-space: nowrap; }
 .fold-hint::after { content: " ▾"; }
 details[open] > summary .fold-hint::after { content: " ▴"; }
@@ -341,3 +341,22 @@ details[open] > summary .fold-hint::after { content: " ▴"; }
 .agenda-route-actions { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .35rem; }
 .agenda-route-actions .button { min-height: 40px; }
 .plan-route { min-height: 40px; }
+
+
+/* ---- Vandaag: ritten en kaart naast elkaar op een laptop ---- */
+.today { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem; margin-bottom: 1rem; }
+.today > .panel { margin-bottom: 0; min-width: 0; }
+@media (min-width: 1080px) {
+  .today { grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); align-items: start; }
+  /* De kaart blijft in beeld terwijl je door de ritten scrollt. Daarvoor moet
+     het hele blok binnen een scherm passen, dus de kaart wordt lager en het
+     infoblok eronder compact. */
+  .today .map-panel { position: sticky; top: .75rem; max-height: calc(100vh - 1.5rem); display: flex; flex-direction: column; }
+  .today .map-panel .map-view { grid-template-columns: minmax(0, 1fr); overflow-y: auto; min-height: 0; }
+  .today .map-panel .routes-overview { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
+  .today .map-panel .google-map-card,
+  .today .map-panel .google-map-card iframe { height: 340px; min-height: 340px; }
+  .today .map-panel .map-side { gap: .5rem; }
+}
+.map-panel .panel-heading { flex-wrap: wrap; gap: .6rem; }
+.map-panel .view-toggle { flex-shrink: 0; }

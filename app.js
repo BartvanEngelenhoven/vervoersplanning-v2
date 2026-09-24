@@ -1562,12 +1562,6 @@ document.querySelector("#backToAutoButton")?.addEventListener("click", () => {
   rebuildPlanning();
 });
 
-// Leaflet draws into a hidden box as zero by zero, so the map is resized the
-// moment its fold opens.
-document.querySelector("#mapDetails")?.addEventListener("toggle", () => {
-  if (document.querySelector("#mapDetails").open) renderPlanningOverview();
-});
-
 document.querySelector("#agendaButton")?.addEventListener("click", () => {
   const paneel = document.querySelector("#agendaPanel");
   const open = paneel.hidden;
