@@ -221,9 +221,12 @@ function renderPlanningMap() {
     Rit ${index + 1}: ${item.region} · ${formatMinutes(item.totalMinutes)}
   </button>`).join("");
   const stops = route.orders.map((order, index) => `<li>
-    <b>${index + 1}. ${order.city || "Plaats onbekend"} · ${order.id}</b>
-    <span>${productSummary(order)}</span>
-    <small>${addressSummary(order)}</small>
+    <div>
+      <b>${index + 1}. ${order.city || "Plaats onbekend"} · ${order.id}</b>
+      <span>${productSummary(order)}</span>
+      <small>${addressSummary(order)}</small>
+    </div>
+    <button class="button subtle-action remove-from-active-route" type="button" data-order-key="${orderKey(order)}">Uit rit halen</button>
   </li>`).join("");
   const routeKeys = new Set(route.orders.map(orderKey));
   const addableOrders = state.decisions
@@ -253,8 +256,8 @@ function renderPlanningMap() {
       <span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span>
       <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open groot in Google Maps</a>
     </div>
-    <ol class="map-order-list">${stops}</ol>
     ${addableList}
+    <ol class="map-order-list">${stops}</ol>
   </div>`;
   holder.querySelectorAll(".map-route-picker button").forEach((button) => {
     button.addEventListener("click", () => {
@@ -265,6 +268,9 @@ function renderPlanningMap() {
   holder.querySelectorAll(".add-to-active-route").forEach((button) => {
     const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
     button.addEventListener("click", () => addOrderToActiveRoute(order));
+  });
+  holder.querySelectorAll(".remove-from-active-route").forEach((button) => {
+    button.addEventListener("click", () => removeOrderFromActiveRoute(button.dataset.orderKey));
   });
 }
 
@@ -634,6 +640,26 @@ async function addOrderToActiveRoute(order) {
   for (const item of nextOrders) forcedIncludes.add(orderKey(item));
   saveForcedIncludes();
   state.manualRoute = { orders: nextOrders };
+  activeMapRouteIndex = 0;
+  planningView = "map";
+  rebuildPlanning();
+}
+
+function removeOrderFromActiveRoute(key) {
+  if (!key || !state.routes[activeMapRouteIndex]) return;
+  const route = state.routes[activeMapRouteIndex];
+  const nextOrders = route.orders.filter((order) => orderKey(order) !== key);
+  if (!nextOrders.length) {
+    state.manualRoute = null;
+    forcedIncludes.delete(key);
+    saveForcedIncludes();
+    activeMapRouteIndex = 0;
+    rebuildPlanning();
+    return;
+  }
+  state.manualRoute = { orders: optimizedStopOrder(nextOrders) };
+  forcedIncludes.delete(key);
+  saveForcedIncludes();
   activeMapRouteIndex = 0;
   planningView = "map";
   rebuildPlanning();

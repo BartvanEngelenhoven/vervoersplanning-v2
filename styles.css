@@ -103,7 +103,7 @@ h2 { margin-bottom: 0; font-size: 1.35rem; letter-spacing: -.025em; }
 .map-dot.review { background: var(--warn); }
 .map-dot.exclude { background: var(--bad); }
 .map-order-list { display: grid; gap: .45rem; max-height: 340px; margin: 0; padding: 0; overflow: auto; list-style: none; }
-.map-order-list li { display: grid; gap: .15rem; padding: .65rem; border: 1px solid var(--line); border-radius: 10px; background: white; }
+.map-order-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .45rem; align-items: center; padding: .65rem; border: 1px solid var(--line); border-radius: 10px; background: white; }
 .map-order-list b, .map-order-list span, .map-order-list small { display: block; }
 .map-order-list span, .map-order-list small { color: var(--muted); font-size: .82rem; }
 .routes-overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; padding: .85rem; }
