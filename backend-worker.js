@@ -386,15 +386,103 @@ function nextShopifyPageUrl(linkHeader) {
   return match ? new URL(match[1]) : null;
 }
 
+const DEPOT_ADDRESS = "Goorsteeg 46, 6718 XT Ede, Netherlands";
+// Google allows 625 origin x destination pairs per call; staying under it leaves
+// room for a stop list that grew between the cache read and the request.
+const MATRIX_PAIR_LIMIT = 600;
+const MAX_STOPS = 40;
+
+function normalizeAddress(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function driveCacheKey(from) {
+  return `drive:${from.toLowerCase()}`;
+}
+
+// Real driving minutes between the depot and every stop, and between the stops
+// themselves, so a route with several stops can be costed leg by leg. Journeys
+// are cached per origin: one record holding that origin's minutes to everywhere
+// it has been measured, which keeps a refresh to a handful of KV reads and only
+// writes when an address is new.
 async function estimateRoute(request, env) {
+  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
   if (!env.GOOGLE_MAPS_API_KEY) return json({ error: "Google Maps API key is not configured" }, 501, env);
-  const payload = await request.json();
-  const stops = Array.isArray(payload.stops) ? payload.stops : [];
+
+  const payload = await request.json().catch(() => ({}));
+  const requested = Array.isArray(payload.stops) ? payload.stops : [];
+  const stops = [...new Set(requested.map(normalizeAddress).filter(Boolean))].slice(0, MAX_STOPS);
   if (!stops.length) return json({ error: "stops are required" }, 400, env);
 
-  // Placeholder endpoint: keeps the key server-side and gives the frontend a stable API surface.
-  // The next version can call Google Routes API here for exact duration, distance, and stop order.
-  return json({ error: "Google route calculation is not implemented yet", stops }, 501, env);
+  const points = [DEPOT_ADDRESS, ...stops.filter((stop) => stop !== DEPOT_ADDRESS)];
+  const known = {};
+  await Promise.all(points.map(async (from) => {
+    known[from] = (await env.PLANNING_ORDERS.get(driveCacheKey(from), "json")) || {};
+  }));
+
+  const missingFor = new Map();
+  for (const from of points) {
+    const missing = points.filter((to) => to !== from && typeof known[from][to] !== "number");
+    if (missing.length) missingFor.set(from, missing);
+  }
+
+  let measured = 0;
+  let failed = null;
+  if (missingFor.size) {
+    try {
+      measured = await fillDriveMatrix(env, known, missingFor);
+      await Promise.all([...missingFor.keys()].map((from) =>
+        env.PLANNING_ORDERS.put(driveCacheKey(from), JSON.stringify(known[from]))
+      ));
+    } catch (error) {
+      // A Google outage must not take the planning down: the frontend falls back
+      // to its own estimate for whatever is missing.
+      failed = String(error.message || error);
+    }
+  }
+
+  return json({ depot: DEPOT_ADDRESS, minutes: known, measured, cached: !missingFor.size, error: failed }, 200, env);
+}
+
+async function fillDriveMatrix(env, known, missingFor) {
+  const origins = [...missingFor.keys()];
+  const destinations = [...new Set([...missingFor.values()].flat())];
+  const perCall = Math.max(1, Math.floor(MATRIX_PAIR_LIMIT / origins.length));
+  let measured = 0;
+
+  for (let start = 0; start < destinations.length; start += perCall) {
+    const chunk = destinations.slice(start, start + perCall);
+    // GOOGLE_ROUTES_URL exists so the parsing can be exercised against a stand-in
+    // before anyone pays for a key. Production leaves it unset.
+    const endpoint = env.GOOGLE_ROUTES_URL || "https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix";
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Goog-Api-Key": env.GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask": "originIndex,destinationIndex,duration,condition",
+      },
+      body: JSON.stringify({
+        origins: origins.map((address) => ({ waypoint: { address } })),
+        destinations: chunk.map((address) => ({ waypoint: { address } })),
+        travelMode: "DRIVE",
+        routingPreference: "TRAFFIC_UNAWARE",
+      }),
+    });
+
+    if (!response.ok) throw new Error(`Google Routes ${response.status}: ${(await response.text()).slice(0, 200)}`);
+
+    for (const row of await response.json()) {
+      if (row.condition !== "ROUTE_EXISTS" || !row.duration) continue;
+      const from = origins[row.originIndex];
+      const to = chunk[row.destinationIndex];
+      if (!from || !to || from === to) continue;
+      known[from][to] = Math.round(Number(String(row.duration).replace("s", "")) / 60);
+      measured += 1;
+    }
+  }
+
+  return measured;
 }
 
 async function shopifyGraphql(shopDomain, token, query, variables) {

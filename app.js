@@ -16,7 +16,7 @@ const CONFIG = {
   exceptionRouteMinutes: 480,
 };
 
-const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [] };
+const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [], driveMinutes: null, driveDepot: "" };
 const decisionLabels = { include: "Meenemen", review: "Controleren", dhl: "DHL", far: "Te ver", exclude: "Niet meenemen" };
 
 // Every order brings its own travel budget to the trip and the budgets pool, so
@@ -196,8 +196,36 @@ function routeSummary(region, orders) {
   };
 }
 
+// The address as the backend keyed it, so both sides agree on what a stop is.
+function orderAddress(order) {
+  return String(order.fullAddress || `${order.postcode || ""} ${order.city || ""}`).replace(/\s+/g, " ").trim();
+}
+
+// Real minutes for the whole trip, depot out and back, leg by leg. Returns null
+// the moment one leg is unknown, because half a route in real minutes and half
+// in straight-line guesses would read as one number and be neither.
+function measuredDriveMinutes(orders) {
+  if (!state.driveMinutes || !state.driveDepot) return null;
+  const legs = [state.driveDepot, ...orders.map(orderAddress), state.driveDepot];
+  let total = 0;
+  for (let index = 1; index < legs.length; index += 1) {
+    const from = legs[index - 1];
+    const to = legs[index];
+    if (from === to) continue;
+    const minutes = state.driveMinutes[from]?.[to];
+    if (typeof minutes !== "number") return null;
+    total += minutes;
+  }
+  return Math.max(20, Math.round(total));
+}
+
 function routeDriveMinutes(orders) {
   if (!orders.length) return 0;
+  const measured = measuredDriveMinutes(orders);
+  if (measured !== null) return measured;
+
+  // Fallback while Google is unreachable or an address is new: straight-line
+  // distance at a flat speed, which runs pessimistic on long motorway trips.
   const points = orders.map(orderPoint);
   const legs = [DEPOT_POINT, ...points, DEPOT_POINT];
   const km = legs.slice(1).reduce((sum, point, index) => sum + distanceKm(legs[index], point), 0);
@@ -1152,15 +1180,41 @@ async function refreshData() {
     if (!response.ok) throw new Error("Data kon niet worden geladen");
     const loaded = await response.json();
     state.orders = loaded.filter((order) => !(order.dueDate && order.dueDate < hideOrdersDueBefore));
+    // Before rebuildPlanning, because the travel budgets are judged against these.
+    state.driveMinutes = await fetchDriveMinutes(state.orders);
     state.history = await fetchHistory();
     rebuildPlanning();
     renderHistory();
-    document.querySelector("#syncText").textContent = `Laatst ververst om ${new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date())}`;
+    const klok = new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
+    const bron = state.driveMinutes ? "echte rijtijden" : "geschatte rijtijden";
+    document.querySelector("#syncText").textContent = `Laatst ververst om ${klok} · ${bron}`;
   } catch (error) {
     document.querySelector("#syncText").textContent = `${error.message} — bestaande gegevens blijven staan`;
   } finally {
     button.disabled = false;
     button.textContent = "Nu verversen";
+  }
+}
+
+// Real driving times from the backend, which holds the Google key and caches a
+// measured journey so an address is only ever looked up once. Any failure here
+// leaves state.driveMinutes null and the planning falls back to its estimate.
+async function fetchDriveMinutes(orders) {
+  if (!usesBackend) return null;
+  const stops = [...new Set(orders.map(orderAddress).filter(Boolean))];
+  if (!stops.length) return null;
+  try {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/routes/estimate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ stops }),
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    state.driveDepot = payload.depot || "";
+    return payload.minutes || null;
+  } catch {
+    return null;
   }
 }
 
