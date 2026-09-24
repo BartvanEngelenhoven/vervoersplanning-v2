@@ -83,6 +83,19 @@ h2 { margin-bottom: 0; font-size: 1.35rem; letter-spacing: -.025em; }
 .map-route-summary { display: grid; gap: .45rem; padding: .8rem; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
 .map-route-summary b, .map-route-summary span { display: block; }
 .map-route-summary span { color: var(--muted); font-size: .85rem; }
+.route-add-box { display: grid; gap: .5rem; padding: .8rem; border: 1px solid #f1d28b; border-radius: 12px; background: #fff8e7; }
+.route-add-box > b { display: block; }
+.route-add-box article { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .25rem .5rem; align-items: center; padding: .6rem; border-radius: 10px; background: rgba(255,255,255,.75); }
+.route-add-box span, .route-add-box small, .route-add-box em { grid-column: 1; min-width: 0; display: block; overflow-wrap: anywhere; }
+.route-add-box span { font-weight: 850; }
+.route-add-box small { color: var(--muted); }
+.route-add-box em { color: var(--warn); font-size: .78rem; font-style: normal; font-weight: 850; }
+.route-add-box button { grid-column: 2; grid-row: 1 / 4; align-self: center; }
+.loose-order-list { display: grid; gap: .45rem; max-height: 430px; overflow: auto; }
+.loose-order-button { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .1rem .45rem; padding: .65rem; border: 1px solid var(--line); border-radius: 10px; background: white; color: var(--ink); text-align: left; }
+.loose-order-button.active { border-color: var(--brand); box-shadow: inset 3px 0 0 var(--brand); }
+.loose-order-button b, .loose-order-button small { display: block; min-width: 0; overflow-wrap: anywhere; }
+.loose-order-button small { grid-column: 2; color: var(--muted); font-size: .82rem; }
 .map-legend { display: flex; flex-wrap: wrap; gap: .55rem; padding: .7rem; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
 .map-legend span { display: inline-flex; align-items: center; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 750; }
 .map-dot { display: inline-block; width: .72rem; height: .72rem; border-radius: 999px; }

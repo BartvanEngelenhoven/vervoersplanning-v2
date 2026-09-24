@@ -22,6 +22,7 @@ const DEPOT_POINT = { lat: 52.05, lon: 5.67 };
 const KM_TO_MINUTES = 1.15;
 let planningView = "map";
 let activeMapRouteIndex = 0;
+let activeLooseOrderKey = "";
 
 function decide(order) {
   if (order.cancelled) return { decision: "exclude", reason: "Order is geannuleerd" };
@@ -193,17 +194,23 @@ function renderPlanningOverview() {
   const mapView = document.querySelector("#mapView");
   const routesOverview = document.querySelector("#routesOverview");
   const showMapButton = document.querySelector("#showMapButton");
+  const showAllOrdersMapButton = document.querySelector("#showAllOrdersMapButton");
   const showRoutesButton = document.querySelector("#showRoutesButton");
-  if (!mapView || !routesOverview || !showMapButton || !showRoutesButton) return;
-  mapView.hidden = planningView !== "map";
+  if (!mapView || !routesOverview || !showMapButton || !showAllOrdersMapButton || !showRoutesButton) return;
+  mapView.hidden = planningView !== "map" && planningView !== "all-orders";
   routesOverview.hidden = planningView !== "routes";
   showMapButton.classList.toggle("active", planningView === "map");
+  showAllOrdersMapButton.classList.toggle("active", planningView === "all-orders");
   showRoutesButton.classList.toggle("active", planningView === "routes");
 }
 
 function renderPlanningMap() {
   const holder = document.querySelector("#mapView");
   if (!holder) return;
+  if (planningView === "all-orders") {
+    renderAllOrdersMap(holder);
+    return;
+  }
   if (!state.routes.length) {
     holder.innerHTML = '<p class="empty">Nog geen rit om op Google Maps te tonen.</p>';
     return;
@@ -218,6 +225,24 @@ function renderPlanningMap() {
     <span>${productSummary(order)}</span>
     <small>${addressSummary(order)}</small>
   </li>`).join("");
+  const routeKeys = new Set(route.orders.map(orderKey));
+  const addableOrders = state.decisions
+    .filter((item) => !routeKeys.has(orderKey(item.order)) && !item.order.cancelled && !item.order.fulfilled && item.order.deliveryMethod !== "pickup")
+    .map((item) => item.order)
+    .map((order) => {
+      const nextRoute = routeSummary(route.region, optimizedStopOrder([...route.orders, order]));
+      return { ...order, extraMinutes: Math.max(0, nextRoute.totalMinutes - route.totalMinutes), routeWouldBeMinutes: nextRoute.totalMinutes };
+    })
+    .sort((a, b) => a.extraMinutes - b.extraMinutes)
+    .slice(0, 6);
+  const addableList = addableOrders.length
+    ? `<div class="route-add-box"><b>Toevoegen aan deze rit</b>${addableOrders.map((order) => `<article>
+        <span>${order.id} · ${order.city || "Plaats onbekend"}</span>
+        <small>${productSummary(order)}</small>
+        <em>+${order.extraMinutes} min · route wordt ${formatMinutes(order.routeWouldBeMinutes)}</em>
+        <button class="button subtle-action add-to-active-route" type="button" data-order-key="${orderKey(order)}">Voeg toe</button>
+      </article>`).join("")}</div>`
+    : "";
   holder.innerHTML = `<div class="google-map-card">
     <iframe title="Google Maps route ${route.region}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${googleMapsEmbedUrl(route.orders)}"></iframe>
   </div>
@@ -229,10 +254,54 @@ function renderPlanningMap() {
       <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open groot in Google Maps</a>
     </div>
     <ol class="map-order-list">${stops}</ol>
+    ${addableList}
   </div>`;
   holder.querySelectorAll(".map-route-picker button").forEach((button) => {
     button.addEventListener("click", () => {
       activeMapRouteIndex = Number(button.dataset.routeIndex);
+      renderPlanningOverview();
+    });
+  });
+  holder.querySelectorAll(".add-to-active-route").forEach((button) => {
+    const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
+    button.addEventListener("click", () => addOrderToActiveRoute(order));
+  });
+}
+
+function renderAllOrdersMap(holder) {
+  const openOrders = state.decisions
+    .filter((item) => !item.order.cancelled && !item.order.fulfilled)
+    .map((item) => item.order);
+  if (!openOrders.length) {
+    holder.innerHTML = '<p class="empty">Geen losse open orders om op Google Maps te tonen.</p>';
+    return;
+  }
+  if (!activeLooseOrderKey || !openOrders.some((order) => orderKey(order) === activeLooseOrderKey)) {
+    activeLooseOrderKey = orderKey(openOrders[0]);
+  }
+  const activeOrder = openOrders.find((order) => orderKey(order) === activeLooseOrderKey) || openOrders[0];
+  const orderRows = openOrders.map((order) => {
+    const decision = state.decisions.find((item) => item.order === order)?.decision || "exclude";
+    return `<button class="loose-order-button ${orderKey(order) === activeLooseOrderKey ? "active" : ""}" type="button" data-order-key="${orderKey(order)}">
+      <span class="map-dot ${decision}"></span>
+      <b>${order.id} · ${order.city || "Plaats onbekend"}</b>
+      <small>${productSummary(order)}</small>
+    </button>`;
+  }).join("");
+  holder.innerHTML = `<div class="google-map-card">
+    <iframe title="Google Maps losse order ${activeOrder.id}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${singleOrderEmbedUrl(activeOrder)}"></iframe>
+  </div>
+  <div class="map-side">
+    <div class="map-route-summary">
+      <b>Losse order op kaart</b>
+      <span>${activeOrder.id} · ${activeOrder.city || "Plaats onbekend"} · ${addressSummary(activeOrder)}</span>
+      <a class="button ghost" href="${singleOrderMapsUrl(activeOrder)}" target="_blank" rel="noreferrer">Open in Google Maps</a>
+    </div>
+    <div class="loose-order-list">${orderRows}</div>
+  </div>`;
+  holder.querySelectorAll(".loose-order-button").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeLooseOrderKey = button.dataset.orderKey;
       renderPlanningOverview();
     });
   });
@@ -552,6 +621,24 @@ function makeRouteFromSelection() {
   rebuildPlanning();
 }
 
+async function addOrderToActiveRoute(order) {
+  if (!order || !state.routes[activeMapRouteIndex]) return;
+  if (!order.requiresVanRoekelDelivery) {
+    const tagged = await forceInclude(order);
+    if (!tagged) return;
+    order.requiresVanRoekelDelivery = true;
+    order.deliveryMethod = "delivery";
+  }
+  const route = state.routes[activeMapRouteIndex];
+  const nextOrders = optimizedStopOrder([...route.orders.filter((item) => orderKey(item) !== orderKey(order)), order]);
+  for (const item of nextOrders) forcedIncludes.add(orderKey(item));
+  saveForcedIncludes();
+  state.manualRoute = { orders: nextOrders };
+  activeMapRouteIndex = 0;
+  planningView = "map";
+  rebuildPlanning();
+}
+
 async function markSelectedDelivered() {
   const orders = selectedOrdersList();
   if (!orders.length) return;
@@ -612,6 +699,14 @@ function googleMapsEmbedUrl(orders) {
   return url.toString();
 }
 
+function singleOrderEmbedUrl(order) {
+  const url = new URL("https://maps.google.com/maps");
+  url.searchParams.set("q", mapsAddress(order));
+  url.searchParams.set("hl", "nl");
+  url.searchParams.set("output", "embed");
+  return url.toString();
+}
+
 function singleOrderMapsUrl(order) {
   const destination = mapsAddress(order);
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(destination || order.city || "")}`;
@@ -647,7 +742,7 @@ function saveForcedIncludes() {
 async function forceInclude(order) {
   if (!order) return;
   const operatorKey = window.prompt(`Operatorcode om ${order.id} als eigen bezorging te taggen in Shopify`);
-  if (!operatorKey) return;
+  if (!operatorKey) return false;
   try {
     const response = await fetch(`${CONFIG.apiBaseUrl}/actions/set-own-delivery`, {
       method: "POST",
@@ -662,8 +757,10 @@ async function forceInclude(order) {
     forcedIncludes.add(orderKey(order));
     saveForcedIncludes();
     await refreshData();
+    return true;
   } catch (error) {
     window.alert(error.message);
+    return false;
   }
 }
 
@@ -776,6 +873,10 @@ document.querySelector("#markSelectedDeliveredButton")?.addEventListener("click"
 document.querySelector("#clearSelectionButton")?.addEventListener("click", clearSelection);
 document.querySelector("#showMapButton")?.addEventListener("click", () => {
   planningView = "map";
+  renderPlanningOverview();
+});
+document.querySelector("#showAllOrdersMapButton")?.addEventListener("click", () => {
+  planningView = "all-orders";
   renderPlanningOverview();
 });
 document.querySelector("#showRoutesButton")?.addEventListener("click", () => {
