@@ -20,9 +20,20 @@
  * - SHOPIFY_CLIENT_ID_<SHOP_DOMAIN>: optional per-shop Shopify app client ID
  * - SHOPIFY_CLIENT_SECRET_<SHOP_DOMAIN>: optional per-shop Shopify app secret
  * - SHOPIFY_ADMIN_TOKEN_<SHOP_DOMAIN>: optional legacy per-shop Admin API token for marking orders fulfilled
- * - GOOGLE_MAPS_API_KEY: optional Google Routes key; without it the planning falls back to estimates
+ * - GOOGLE_MAPS_API_KEY: leave unset. Google's routing is paid; the planning uses PDOK
+ *   and its own fitted estimate, which are free.
  * - AUTO_FULFILL: "aan" to announce routes in Shopify at 16:00 the day before, with the
  *   customer's shipping mail. Anything else, or unset, runs it as a trial that only reports.
+ *   Set it as a secret (wrangler secret put), which survives deploys; a dashboard
+ *   variable is wiped by the next deploy.
+ *
+ * What is kept, and for how long:
+ * - order:<shop>:<id>      open orders, while open. A cancelled one stays 14 days so a
+ *                          planned route can say "geannuleerd" instead of "not found".
+ * - delivered:<shop>:<id>  60 days, without phone or customer note, for undo and the
+ *                          driver's "bezorgd" ticks.
+ * - plan:<date>:<id>       until 60 days after the route's date.
+ * - geo:<address>          90 days (a point), 7 days (a miss).
  */
 
 const JSON_HEADERS = {
@@ -30,16 +41,38 @@ const JSON_HEADERS = {
   "cache-control": "no-store",
 };
 
+const SHOPIFY_API_VERSION = "2026-07";
+const DAY_SECONDS = 24 * 3600;
+const DELIVERED_TTL = 60 * DAY_SECONDS;
+const CANCELLED_TTL = 14 * DAY_SECONDS;
+const PLAN_KEEP_DAYS = 60;
+// Orders due before the planning went live were cleared from sight once; the
+// frontend hides them for the planner, and a driver is never sent them at all.
+const HIDE_ORDERS_DUE_BEFORE = "2026-09-24";
+// The two shops this planning serves. Installing the Shopify app is only ever
+// offered for these, so a stranger cannot start an install for a shop of theirs.
+const KNOWN_SHOPS = ["de-rijplaten-specialist.myshopify.com", "slowfeeder-specialist.myshopify.com"];
+
 export default {
   // The announcement at 16:00 the day before a route. Cron runs in UTC, so it
   // fires at 14:00 and 15:00 UTC and only the one that is 16:00 in Amsterdam
-  // goes ahead: 14:00 in summer time, 15:00 in winter time.
+  // goes ahead: 14:00 in summer time, 15:00 in winter time. A second trigger ten
+  // minutes later picks up whatever the first could not finish or got refused.
   async scheduled(event, env) {
     const now = amsterdamNow(new Date(event.scheduledTime));
     if (now.hour !== ANNOUNCE_HOUR) return;
     const date = nextDay(now.day);
-    const report = await runAnnouncement(env, date);
-    await env.PLANNING_ORDERS.put(`${ANNOUNCE_LOG_PREFIX}${date}`, JSON.stringify(report), { expirationTtl: 60 * 24 * 3600 });
+    const logKey = `${ANNOUNCE_LOG_PREFIX}${date}`;
+    const report = { date, ranAt: new Date().toISOString(), mode: announceLive(env) ? "echt" : "proef", routes: [] };
+    try {
+      await runAnnouncement(env, date, { report });
+    } catch (error) {
+      report.error = String(error?.message || error).slice(0, 200);
+    } finally {
+      // Written whatever happened, so the agenda never shows a silent gap.
+      const earlier = now.minute >= 10 ? await env.PLANNING_ORDERS.get(logKey, "json").catch(() => null) : null;
+      await env.PLANNING_ORDERS.put(logKey, JSON.stringify(mergeAnnounceReports(earlier, report)), { expirationTtl: 60 * DAY_SECONDS });
+    }
   },
 
   async fetch(request, env) {
@@ -119,10 +152,17 @@ async function route(request, env) {
   }
 
   if (request.method === "GET" && url.pathname === "/announce/preview") {
-    if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+    const denied = plannerOnly(request, env);
+    if (denied) return denied;
     const date = url.searchParams.get("date");
     if (!isPlanDate(date)) return json({ error: "date moet JJJJ-MM-DD zijn" }, 400, env);
-    return json({ report: await runAnnouncement(env, date, { preview: true }), live: announceLive(env) }, 200, env);
+    const report = { date, ranAt: new Date().toISOString(), mode: "proef", routes: [] };
+    await runAnnouncement(env, date, { preview: true, report });
+    return json({ report, live: announceLive(env) }, 200, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/plan/remove-stop") {
+    return removePlanStop(request, env);
   }
 
   if (request.method === "GET" && url.pathname === "/whoami") {
@@ -149,29 +189,105 @@ async function route(request, env) {
   return json({ error: "Not found" }, 404, env);
 }
 
-async function getOrders(request, env) {
-  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+// Every key under a prefix. One list call returns at most 1,000 keys; without
+// following the cursor the newest routes and deliveries, which sort last, were
+// the first to silently fall off. Past 1,000 this costs one more list call.
+async function listAll(env, prefix) {
+  const keys = [];
+  let cursor;
+  for (let page = 0; page < 10; page += 1) {
+    const result = await env.PLANNING_ORDERS.list({ prefix, cursor });
+    keys.push(...result.keys);
+    if (result.list_complete || !result.cursor) break;
+    cursor = result.cursor;
+  }
+  return keys;
+}
 
-  const list = await env.PLANNING_ORDERS.list({ prefix: "order:" });
+// What the driver's phone needs of an order that is not one of their stops: enough
+// to weigh "can it come along", nothing to identify the customer by. Name, street,
+// phone and note only reach the phone for stops of their own routes, via /plan.
+const DRIVER_ORDER_FIELDS = ["id", "shopifyOrderId", "shopDomain", "webshop", "city", "dueDate", "paid", "paymentStatus", "refunded", "cancelled", "fulfilled", "deliveryMethod", "addressComplete", "deliveryAppointmentLocked", "weightKg", "products", "announced", "ownDeliveryTagged"];
+
+function orderCountry(order) {
+  if (order.country) return String(order.country);
+  const last = String(order.fullAddress || "").split(",").pop().trim();
+  return /^(nl|netherlands|nederland)$/i.test(last) ? "NL" : /^(be|belgium|belgi[eë])$/i.test(last) ? "BE" : last;
+}
+
+function geoKeyForOrder(order) {
+  return `${GEO_PREFIX}${normalizeAddress(order.fullAddress || `${order.postcode || ""} ${order.city || ""}`).toLowerCase()}`;
+}
+
+async function getOrders(request, env) {
+  const role = roleFor(request, env);
+  if (!role) return unauthorized(env);
+
+  const keys = await listAll(env, "order:");
   // A key listed a moment ago can be gone by the time it is read, when a
   // webhook deletes a delivered order in between. That reads as null, and one
   // null used to take the whole list down with it.
-  const orders = (await Promise.all(
-    list.keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json"))
+  let orders = (await Promise.all(
+    keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json"))
   )).filter(Boolean);
   orders.sort((a, b) => (a.dueDate || "9999-12-31").localeCompare(b.dueDate || "9999-12-31"));
+
+  if (role === "driver") {
+    orders = orders.filter((order) => !order.cancelled && !order.fulfilled && !(order.dueDate && order.dueDate < HIDE_ORDERS_DUE_BEFORE));
+    orders = await Promise.all(orders.map(async (order) => {
+      const slim = Object.fromEntries(DRIVER_ORDER_FIELDS.filter((field) => field in order).map((field) => [field, order[field]]));
+      slim.postcode = String(order.postcode || "").replace(/\s+/g, "").slice(0, 4);
+      slim.country = orderCountry(order);
+      // The point from the address cache, so the phone can weigh the detour
+      // without ever holding the address itself.
+      const point = await env.PLANNING_ORDERS.get(geoKeyForOrder(order), "json").catch(() => null);
+      if (point && !point.miss) slim.point = { lat: point.lat, lon: point.lon };
+      return slim;
+    }));
+  }
   return json(orders, 200, env);
 }
 
+// The history screen shows the fifty newest deliveries. The newest are found from
+// the key listing alone (each key carries its delivery time as metadata), so only
+// those fifty are read, not every delivery on record. Planned stops asked for by
+// key come back as a key-to-time map, so a stop delivered a week ago still shows
+// as delivered and not as "not found".
 async function getHistory(request, env) {
-  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const role = roleFor(request, env);
+  if (!role) return unauthorized(env);
 
-  const list = await env.PLANNING_ORDERS.list({ prefix: "delivered:" });
-  const entries = (await Promise.all(
-    list.keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json"))
-  )).filter(Boolean);
+  const url = new URL(request.url);
+  const asked = new Set(String(url.searchParams.get("keys") || "").split(",").map((key) => key.trim()).filter(Boolean).slice(0, 200));
+  const listed = await listAll(env, "delivered:");
+  const delivered = {};
+  for (const key of listed) {
+    const orderKey = key.name.slice("delivered:".length);
+    if (asked.has(orderKey)) delivered[orderKey] = key.metadata?.deliveredAt || "";
+  }
+  if (role === "driver") return json({ entries: [], delivered }, 200, env);
+
+  const newest = [...listed]
+    .sort((a, b) => String(b.metadata?.deliveredAt || "").localeCompare(String(a.metadata?.deliveredAt || "")))
+    .slice(0, 50);
+  const entries = (await Promise.all(newest.map((key) => env.PLANNING_ORDERS.get(key.name, "json")))).filter(Boolean);
   entries.sort((a, b) => String(b.deliveredAt || "").localeCompare(String(a.deliveredAt || "")));
-  return json(entries.slice(0, 50), 200, env);
+  return json({ entries, delivered }, 200, env);
+}
+
+// A delivery on record: sixty days, with the time in the key's metadata so the
+// history can find the newest without reading everything. Phone and customer note
+// are left out; they served the driver at the door and nobody after.
+async function putDelivered(env, key, record) {
+  const order = record.order ? { ...record.order } : null;
+  if (order) {
+    delete order.phone;
+    delete order.customerNote;
+  }
+  await env.PLANNING_ORDERS.put(`delivered:${key}`, JSON.stringify({ ...record, order }), {
+    expirationTtl: DELIVERED_TTL,
+    metadata: { deliveredAt: record.deliveredAt },
+  });
 }
 
 async function receiveShopifyOrder(request, env) {
@@ -193,48 +309,92 @@ async function receiveShopifyOrder(request, env) {
 async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
   const planningOrder = mapShopifyOrder(shopifyOrder, shopDomain);
   const storageKey = orderStorageKey(planningOrder);
-  const historyKey = `delivered:${shopDomain}:${planningOrder.id}`;
+  const key = `${shopDomain}:${planningOrder.id}`;
+  const historyKey = `delivered:${key}`;
+  const announcedKey = `${ANNOUNCED_PREFIX}${key}`;
+  const [storedOrder, history, announced] = await Promise.all([
+    env.PLANNING_ORDERS.get(storageKey, "json"),
+    env.PLANNING_ORDERS.get(historyKey, "json"),
+    env.PLANNING_ORDERS.get(announcedKey, "json"),
+  ]);
+
+  // Shopify does not promise webhooks arrive in order, and one that failed is
+  // sent again hours later with its old contents. Whatever is on record from a
+  // later moment wins; an older payload changes nothing.
+  const incoming = planningOrder.shopifyUpdatedAt || "";
+  const onRecord = storedOrder?.shopifyUpdatedAt || history?.shopifyUpdatedAt || "";
+  if (incoming && onRecord && incoming < onRecord) return planningOrder;
 
   if (planningOrder.fulfilled) {
     // Fulfilled by our own announcement the day before is not delivered: the
     // order stays on the planning, marked, until the driver reports it.
-    const announced = await env.PLANNING_ORDERS.get(`${ANNOUNCED_PREFIX}${shopDomain}:${planningOrder.id}`, "json");
     if (announced) {
       await env.PLANNING_ORDERS.put(storageKey, JSON.stringify({ ...planningOrder, fulfilled: false, announced: true, announcedAt: announced.at }));
       return planningOrder;
     }
-    const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
-    await env.PLANNING_ORDERS.put(historyKey, JSON.stringify({
+    // Reported through the planning already: that record holds the fulfillment
+    // it made, which undo needs, and the real time of delivery. The webhook that
+    // follows the report only refreshes the order details.
+    if (history && history.source !== "shopify") {
+      await putDelivered(env, key, { ...history, order: { ...(history.order || {}), ...planningOrder }, shopifyUpdatedAt: incoming || history.shopifyUpdatedAt });
+      if (storedOrder) await env.PLANNING_ORDERS.delete(storageKey);
+      return planningOrder;
+    }
+    await putDelivered(env, key, {
       id: planningOrder.id,
       shopDomain,
       shopifyOrderId: planningOrder.shopifyOrderId,
-      order: storedOrder ? { ...planningOrder, ...storedOrder, products: planningOrder.products } : planningOrder,
+      order: storedOrder ? { ...storedOrder, ...planningOrder } : planningOrder,
       fulfillment: null,
-      deliveredAt: shopifyFulfilledAt(shopifyOrder) || new Date().toISOString(),
+      deliveredAt: history?.deliveredAt || shopifyFulfilledAt(shopifyOrder) || new Date().toISOString(),
       source: "shopify",
-    }));
-    await env.PLANNING_ORDERS.delete(storageKey);
-  } else if (planningOrder.cancelled) {
-    await env.PLANNING_ORDERS.delete(storageKey);
-  } else {
-    await env.PLANNING_ORDERS.put(storageKey, JSON.stringify(planningOrder));
-    await env.PLANNING_ORDERS.delete(historyKey);
+      shopifyUpdatedAt: incoming,
+    });
+    if (storedOrder) await env.PLANNING_ORDERS.delete(storageKey);
+    return planningOrder;
   }
 
+  // Not (or no longer fully) fulfilled while an announcement marker stands: the
+  // fulfillment was undone in Shopify, or items were added since. The marker no
+  // longer tells the truth, so it goes, and the order is open like any other.
+  if (announced) await env.PLANNING_ORDERS.delete(announcedKey);
+
+  if (planningOrder.cancelled) {
+    // Kept a fortnight, so a route it sat in says "geannuleerd, niet afleveren".
+    await env.PLANNING_ORDERS.put(storageKey, JSON.stringify(planningOrder), { expirationTtl: CANCELLED_TTL });
+  } else {
+    await env.PLANNING_ORDERS.put(storageKey, JSON.stringify(planningOrder));
+  }
+  if (history) await env.PLANNING_ORDERS.delete(historyKey);
   return planningOrder;
 }
 
 // Puts an order on fulfilled in Shopify. Shared by the Bezorgd button, which
 // never mails the customer, and the announcement the day before, which does.
+//
+// Shopify prices a query before running it and refuses anything over 1,000
+// points. Twenty fulfillment orders of a hundred lines each came to 2,063, so
+// every call was turned away; ten of fifty is about 530, and no order of these
+// shops comes near either number.
+//
+// The result says how sure it is: `ambiguous` means the fulfillment request went
+// out and no answer came back, so Shopify may or may not have made it (and mailed
+// the customer). Everything else is certain either way.
+const SHOPIFY_FULFILLMENT_ERRORS = {
+  "no-lines": "Deze order heeft in Shopify geen open regels meer.",
+  "user": "Shopify weigerde de order op verzonden te zetten.",
+};
+
 async function createShopifyFulfillment(shopDomain, token, shopifyOrderId, notifyCustomer) {
-  const fulfillmentOrders = await shopifyGraphql(shopDomain, token, `
+  const lookup = await shopifyGraphql(shopDomain, token, `
     query FulfillmentOrders($id: ID!) {
       order(id: $id) {
-        fulfillmentOrders(first: 20) {
+        displayFulfillmentStatus
+        fulfillmentOrders(first: 10) {
           nodes {
             id
             status
-            lineItems(first: 100) {
+            lineItems(first: 50) {
               nodes { id remainingQuantity }
             }
           }
@@ -243,7 +403,8 @@ async function createShopifyFulfillment(shopDomain, token, shopifyOrderId, notif
     }
   `, { id: shopifyOrderId });
 
-  const nodes = fulfillmentOrders.data?.order?.fulfillmentOrders?.nodes || [];
+  const order = lookup.data?.order;
+  const nodes = order?.fulfillmentOrders?.nodes || [];
   const lineItemsByFulfillmentOrder = nodes
     .filter((node) => !["CLOSED", "CANCELLED"].includes(node.status))
     .map((node) => ({
@@ -254,113 +415,163 @@ async function createShopifyFulfillment(shopDomain, token, shopifyOrderId, notif
     }))
     .filter((item) => item.fulfillmentOrderLineItems.length);
 
-  if (!lineItemsByFulfillmentOrder.length) return { error: "No open fulfillment lines found", status: 409 };
+  if (!lineItemsByFulfillmentOrder.length) {
+    // Nothing left to fulfill because it already is: someone did it in Shopify,
+    // or the announcement did. That is the outcome asked for, not an error.
+    if (order?.displayFulfillmentStatus === "FULFILLED") return { fulfillment: null, alreadyFulfilled: true };
+    return { error: SHOPIFY_FULFILLMENT_ERRORS["no-lines"], status: 409 };
+  }
 
-  const result = await shopifyGraphql(shopDomain, token, `
-    mutation Fulfill($fulfillment: FulfillmentV2Input!) {
-      fulfillmentCreateV2(fulfillment: $fulfillment) {
-        fulfillment { id status }
-        userErrors { field message }
+  let result;
+  try {
+    result = await shopifyGraphql(shopDomain, token, `
+      mutation Fulfill($fulfillment: FulfillmentInput!) {
+        fulfillmentCreate(fulfillment: $fulfillment) {
+          fulfillment { id status }
+          userErrors { field message }
+        }
       }
-    }
-  `, { fulfillment: { lineItemsByFulfillmentOrder, notifyCustomer: Boolean(notifyCustomer) } });
+    `, { fulfillment: { lineItemsByFulfillmentOrder, notifyCustomer: Boolean(notifyCustomer) } });
+  } catch (error) {
+    return { error: String(error?.message || error).slice(0, 200), status: 502, ambiguous: true };
+  }
 
-  const userErrors = result.data?.fulfillmentCreateV2?.userErrors || [];
-  if (userErrors.length) return { error: "Shopify fulfillment failed", userErrors, status: 422 };
-  return { fulfillment: result.data?.fulfillmentCreateV2?.fulfillment };
+  const userErrors = result.data?.fulfillmentCreate?.userErrors || [];
+  if (userErrors.length) {
+    const detail = userErrors.map((item) => item.message).filter(Boolean).join("; ");
+    return { error: `${SHOPIFY_FULFILLMENT_ERRORS.user}${detail ? ` (${detail})` : ""}`, userErrors, status: 422 };
+  }
+  return { fulfillment: result.data?.fulfillmentCreate?.fulfillment || null };
+}
+
+// Planned stops from `from` to `to` (inclusive), as order key -> route. Used to
+// hold the driver to their own routes and to keep one order out of two routes.
+async function plannedStops(env, from, to) {
+  const keys = (await listAll(env, PLAN_PREFIX)).map((key) => key.name)
+    .filter((name) => {
+      const date = name.slice(PLAN_PREFIX.length, PLAN_PREFIX.length + 10);
+      return date >= from && date <= to;
+    });
+  const routes = (await Promise.all(keys.map((name) => env.PLANNING_ORDERS.get(name, "json")))).filter(Boolean);
+  const stops = new Map();
+  for (const route of routes) {
+    if (route.abortedAt) continue;
+    for (const key of route.orderKeys || []) stops.set(key, route);
+  }
+  return stops;
+}
+
+function driverWindow() {
+  const today = amsterdamNow().day;
+  return { from: shiftDay(today, -7), to: shiftDay(today, 7), today };
 }
 
 async function markDelivered(request, env) {
-  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const role = roleFor(request, env);
+  if (!role) return unauthorized(env);
 
-  const payload = await request.json();
+  const payload = await request.json().catch(() => ({}));
   const shopDomain = normalizeShopDomain(payload.shopDomain);
-  const shopifyOrderId = payload.shopifyOrderId;
-  const displayOrderId = payload.id;
-  const token = await shopifyAdminToken(env, shopDomain);
+  const displayOrderId = String(payload.id || "");
+  if (!shopDomain || !displayOrderId) return json({ error: "Order ontbreekt in het verzoek." }, 400, env);
+  const key = `${shopDomain}:${displayOrderId}`;
 
-  if (!shopDomain || !shopifyOrderId) return json({ error: "shopDomain and shopifyOrderId are required" }, 400, env);
-  if (!token) return json({ error: "Shopify Admin API token is not configured for this shop" }, 501, env);
+  // Reported twice (a double tap, or a first try whose answer was lost in a
+  // dead spot): the first one stands and the second is simply told so.
+  const history = await env.PLANNING_ORDERS.get(`delivered:${key}`, "json");
+  if (history) return json({ ok: true, already: true, id: displayOrderId }, 200, env);
 
-  const storageKey = `order:${shopDomain}:${displayOrderId}`;
-  const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
+  const storedOrder = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
+  if (!storedOrder) return json({ error: "Deze order staat niet meer open in de planning. Ververs het scherm." }, 404, env);
 
-  // Announced the day before means already fulfilled in Shopify, customer
-  // mailed. Fulfilling again would fail with no open lines; the delivery is
-  // only written down, and the customer gets no second mail.
-  const announcedKey = `${ANNOUNCED_PREFIX}${shopDomain}:${displayOrderId}`;
-  const announced = await env.PLANNING_ORDERS.get(announcedKey, "json");
-
-  let fulfillment = null;
-  if (!announced) {
-    const created = await createShopifyFulfillment(shopDomain, token, shopifyOrderId, false);
-    if (created.error) return json({ error: created.error, userErrors: created.userErrors }, created.status, env);
-    fulfillment = created.fulfillment;
+  // The driver reports deliveries of their own routes only.
+  if (role === "driver") {
+    const window = driverWindow();
+    const stops = await plannedStops(env, window.from, window.to);
+    if (!stops.has(key)) return json({ error: "Deze order staat niet in een van jouw ritten." }, 403, env);
   }
 
+  const shopifyOrderId = storedOrder.shopifyOrderId || payload.shopifyOrderId;
+  const token = await shopifyAdminToken(env, shopDomain);
+  if (!token || !shopifyOrderId) return json({ error: "Er is geen Shopify-koppeling voor deze winkel. Bel de planner." }, 501, env);
+
+  // Always asked of Shopify, never taken on trust from the announcement marker:
+  // an announced order is already fulfilled and comes back as such, customer
+  // not mailed again (notifyCustomer false). If the marker was wrong (the
+  // announcement failed, or its fulfillment was undone) this still fulfills it.
+  const announcedKey = `${ANNOUNCED_PREFIX}${key}`;
+  const announced = await env.PLANNING_ORDERS.get(announcedKey, "json");
+  const created = await createShopifyFulfillment(shopDomain, token, shopifyOrderId, false);
+  if (created.error) {
+    return json({ error: created.ambiguous
+      ? "Geen antwoord van Shopify. Wacht een minuut, ververs en kijk of de stop als bezorgd staat voor je het opnieuw probeert."
+      : created.error, userErrors: created.userErrors }, created.status, env);
+  }
+  const fulfillment = created.fulfillment || (announced?.fulfillmentId ? { id: announced.fulfillmentId, status: "SUCCESS" } : null);
+
   await appendOrderPlanningNote(shopDomain, token, shopifyOrderId, [
-    announced ? `Bezorgd gemeld via Vervoersplanning (aangekondigd op ${announced.at})` : `Bezorgd gemeld via Vervoersplanning V2`,
+    announced ? `Bezorgd gemeld via Vervoersplanning (aangekondigd op ${announced.at})` : "Bezorgd gemeld via Vervoersplanning",
     `Tijd: ${new Date().toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam" })}`,
   ]);
-  await env.PLANNING_ORDERS.put(`delivered:${shopDomain}:${displayOrderId}`, JSON.stringify({
+  const now = new Date().toISOString();
+  await putDelivered(env, key, {
     id: displayOrderId,
     shopDomain,
     shopifyOrderId,
     order: storedOrder,
     fulfillment,
-    deliveredAt: new Date().toISOString(),
-  }));
-  await env.PLANNING_ORDERS.delete(storageKey);
+    deliveredAt: now,
+    source: role === "driver" ? "bezorger" : "planner",
+    shopifyUpdatedAt: now,
+  });
+  await env.PLANNING_ORDERS.delete(`order:${key}`);
   if (announced) await env.PLANNING_ORDERS.delete(announcedKey);
   return json({ ok: true, id: displayOrderId, fulfillment }, 200, env);
 }
 
 async function undoDelivered(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
 
-  const payload = await request.json();
+  const payload = await request.json().catch(() => ({}));
   const shopDomain = normalizeShopDomain(payload.shopDomain);
-  const displayOrderId = payload.id;
-  if (!shopDomain || !displayOrderId) return json({ error: "shopDomain and id are required" }, 400, env);
+  const displayOrderId = String(payload.id || "");
+  if (!shopDomain || !displayOrderId) return json({ error: "Order ontbreekt in het verzoek." }, 400, env);
 
   const historyKey = `delivered:${shopDomain}:${displayOrderId}`;
-  const history = JSON.parse(await env.PLANNING_ORDERS.get(historyKey) || "null");
-  if (!history) return json({ error: "Historie-item niet gevonden" }, 404, env);
+  const history = await env.PLANNING_ORDERS.get(historyKey, "json");
+  if (!history) return json({ error: "Deze bezorging staat niet (meer) in de historie." }, 404, env);
 
-  const token = await shopifyAdminToken(env, shopDomain);
+  // Only a fulfillment the planning made itself is undone from here. One made
+  // in Shopify (a DHL label, a colleague) is not ours to cancel, and reopening
+  // the order here while Shopify still says shipped would leave the two apart.
   const fulfillmentId = history.fulfillment?.id;
-  if (token && fulfillmentId) {
-    const result = await shopifyGraphql(shopDomain, token, `
-      mutation CancelFulfillment($id: ID!) {
-        fulfillmentCancel(id: $id) {
-          fulfillment { id status }
-          userErrors { field message }
-        }
+  if (!fulfillmentId) {
+    return json({ error: "Deze order is in Shopify zelf op verzonden gezet, niet via de planning. Draai het in Shopify terug; daarna komt hij vanzelf weer in de planning." }, 409, env);
+  }
+  const token = await shopifyAdminToken(env, shopDomain);
+  if (!token) return json({ error: "Er is geen Shopify-koppeling voor deze winkel." }, 501, env);
+  const result = await shopifyGraphql(shopDomain, token, `
+    mutation CancelFulfillment($id: ID!) {
+      fulfillmentCancel(id: $id) {
+        fulfillment { id status }
+        userErrors { field message }
       }
-    `, { id: fulfillmentId });
-    const userErrors = result.data?.fulfillmentCancel?.userErrors || [];
-    if (userErrors.length) return json({ error: "Shopify terugdraaien mislukt", userErrors }, 422, env);
+    }
+  `, { id: fulfillmentId });
+  const userErrors = result.data?.fulfillmentCancel?.userErrors || [];
+  if (userErrors.length) {
+    return json({ error: `Shopify kon de verzending niet terugdraaien (${userErrors.map((item) => item.message).join("; ")}).`, userErrors }, 422, env);
   }
 
   if (history.order) {
-    await env.PLANNING_ORDERS.put(`order:${shopDomain}:${displayOrderId}`, JSON.stringify({ ...history.order, fulfilled: false }));
+    await env.PLANNING_ORDERS.put(`order:${shopDomain}:${displayOrderId}`, JSON.stringify({ ...history.order, fulfilled: false, announced: false, shopifyUpdatedAt: history.shopifyUpdatedAt || "" }));
   }
   await env.PLANNING_ORDERS.delete(historyKey);
   return json({ ok: true, id: displayOrderId }, 200, env);
 }
 
-async function setOwnDelivery(request, env) {
-  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
-
-  const payload = await request.json();
-  const shopDomain = normalizeShopDomain(payload.shopDomain);
-  const shopifyOrderId = payload.shopifyOrderId;
-  const displayOrderId = payload.id;
-  const token = await shopifyAdminToken(env, shopDomain);
-
-  if (!shopDomain || !shopifyOrderId || !displayOrderId) return json({ error: "id, shopDomain and shopifyOrderId are required" }, 400, env);
-  if (!token) return json({ error: "Shopify Admin API token is not configured for this shop" }, 501, env);
-
+async function tagOwnDelivery(env, shopDomain, token, order) {
   const result = await shopifyGraphql(shopDomain, token, `
     mutation AddOwnDeliveryTag($id: ID!, $tags: [String!]!) {
       tagsAdd(id: $id, tags: $tags) {
@@ -368,28 +579,55 @@ async function setOwnDelivery(request, env) {
         userErrors { field message }
       }
     }
-  `, { id: shopifyOrderId, tags: ["eigen bezorging"] });
-
-  const userErrors = result.data?.tagsAdd?.userErrors || [];
-  if (userErrors.length) return json({ error: "Shopify tag toevoegen mislukt", userErrors }, 422, env);
-
-  const storageKey = `order:${shopDomain}:${displayOrderId}`;
-  const storedOrder = JSON.parse(await env.PLANNING_ORDERS.get(storageKey) || "null");
-  await appendOrderPlanningNote(shopDomain, token, shopifyOrderId, [
-    `Handmatig gemarkeerd als eigen bezorging via Vervoersplanning V2`,
-    `Order: ${displayOrderId}`,
-    storedOrder?.dueDate ? `Uiterste leverdatum: ${storedOrder.dueDate}` : "",
-    storedOrder?.fullAddress ? `Adres: ${storedOrder.fullAddress}` : "",
+  `, { id: order.shopifyOrderId, tags: ["eigen bezorging"] });
+  if ((result.data?.tagsAdd?.userErrors || []).length) return false;
+  await appendOrderPlanningNote(shopDomain, token, order.shopifyOrderId, [
+    "Eigen bezorging via Vervoersplanning",
+    order.dueDate ? `Uiterste leverdatum: ${order.dueDate}` : "",
   ]);
-  if (storedOrder) {
-    await env.PLANNING_ORDERS.put(storageKey, JSON.stringify({
-      ...storedOrder,
-      requiresVanRoekelDelivery: true,
-      deliveryMethod: storedOrder.deliveryMethod || "delivery",
-      routeOverride: true,
-    }));
-  }
+  await env.PLANNING_ORDERS.put(`order:${shopDomain}:${order.id}`, JSON.stringify({ ...order, ownDeliveryTagged: true }));
+  return true;
+}
 
+async function untagOwnDelivery(shopDomain, token, order) {
+  try {
+    await shopifyGraphql(shopDomain, token, `
+      mutation RemoveOwnDeliveryTag($id: ID!, $tags: [String!]!) {
+        tagsRemove(id: $id, tags: $tags) { userErrors { field message } }
+      }
+    `, { id: order.shopifyOrderId, tags: ["eigen bezorging"] });
+  } catch {
+    // The route did not change; a tag left behind shows up under Controleren.
+  }
+}
+
+// Tags parcels as own delivery in Shopify, so whoever prints the DHL labels
+// skips them. Returns the keys that failed.
+async function tagKeysOwnDelivery(env, keys) {
+  const failed = [];
+  for (const key of keys) {
+    const order = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
+    if (!order || order.ownDeliveryTagged) continue;
+    const token = await shopifyAdminToken(env, order.shopDomain);
+    try {
+      if (!token || !order.shopifyOrderId || !(await tagOwnDelivery(env, order.shopDomain, token, order))) failed.push(order.id);
+    } catch {
+      failed.push(order.id);
+    }
+  }
+  return failed;
+}
+
+async function setOwnDelivery(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+
+  const payload = await request.json().catch(() => ({}));
+  const shopDomain = normalizeShopDomain(payload.shopDomain);
+  const displayOrderId = String(payload.id || "");
+  if (!shopDomain || !displayOrderId) return json({ error: "Order ontbreekt in het verzoek." }, 400, env);
+  const failed = await tagKeysOwnDelivery(env, [`${shopDomain}:${displayOrderId}`]);
+  if (failed.length) return json({ error: "Shopify kon de tag 'eigen bezorging' niet zetten. Probeer het opnieuw." }, 502, env);
   return json({ ok: true, id: displayOrderId, tag: "eigen bezorging" }, 200, env);
 }
 
@@ -418,11 +656,14 @@ async function appendOrderPlanningNote(shopDomain, token, shopifyOrderId, lines)
 }
 
 async function syncShopify(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
 
   const url = new URL(request.url);
   const payload = await request.json().catch(() => ({}));
-  const days = Math.min(Math.max(Number(payload.days || 7), 1), 60);
+  // One request may touch KV at most 1,000 times, three or four per order: two
+  // weeks of orders fits, sixty days broke off halfway with half written.
+  const days = Math.min(Math.max(Number(payload.days || 7), 1), 14);
   const requestedShop = normalizeShopDomain(payload.shopDomain);
   const shops = requestedShop ? [requestedShop] : await installedShopDomains(env);
   const updatedAtMin = new Date(Date.now() - days * 86_400_000).toISOString();
@@ -457,7 +698,7 @@ async function installedShopDomains(env) {
 
 async function fetchRecentShopifyOrders(shopDomain, token, updatedAtMin) {
   const orders = [];
-  let url = new URL(`https://${shopDomain}/admin/api/2026-07/orders.json`);
+  let url = new URL(`https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/orders.json`);
   url.searchParams.set("status", "any");
   url.searchParams.set("limit", "250");
   url.searchParams.set("updated_at_min", updatedAtMin);
@@ -556,7 +797,7 @@ const GEO_LOOKUPS_PER_REQUEST = 20;
 const GEO_TIME_BUDGET_MS = 8000;
 
 async function geocodeAddresses(request, env) {
-  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  if (!anyRoleAllowed(request, env)) return unauthorized(env);
 
   const payload = await request.json().catch(() => ({}));
   const addresses = [...new Set((Array.isArray(payload.addresses) ? payload.addresses : [])
@@ -614,22 +855,44 @@ function announceLive(env) {
 
 function amsterdamNow(date = new Date()) {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Europe/Amsterdam", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23",
+    timeZone: "Europe/Amsterdam", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
   }).formatToParts(date).map((part) => [part.type, part.value]));
-  return { day: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour) };
+  return { day: `${parts.year}-${parts.month}-${parts.day}`, hour: Number(parts.hour), minute: Number(parts.minute) };
 }
 
-function nextDay(isoDay) {
+function shiftDay(isoDay, days) {
   const date = new Date(`${isoDay}T12:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + 1);
+  date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
 }
 
-async function runAnnouncement(env, date, { preview = false } = {}) {
+function nextDay(isoDay) {
+  return shiftDay(isoDay, 1);
+}
+
+// Each announced order costs two calls to Shopify (look up, fulfill), and one
+// run of the Worker may make 50 on the free plan. Past this many the rest waits
+// for the second run ten minutes later instead of failing at random.
+const ANNOUNCE_FETCH_BUDGET = 44;
+
+async function deleteWithRetry(env, key) {
+  for (let poging = 0; poging < 2; poging += 1) {
+    try {
+      await env.PLANNING_ORDERS.delete(key);
+      return true;
+    } catch {
+      // KV allows one write per key per second; the marker was written a moment ago.
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+    }
+  }
+  return false;
+}
+
+async function runAnnouncement(env, date, { preview = false, report }) {
   const live = !preview && announceLive(env);
   const list = await env.PLANNING_ORDERS.list({ prefix: `${PLAN_PREFIX}${date}:` });
   const routes = (await Promise.all(list.keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json")))).filter(Boolean);
-  const report = { date, ranAt: new Date().toISOString(), mode: live ? "echt" : "proef", routes: [] };
+  let fetches = 0;
 
   for (const route of routes) {
     const entry = { id: route.id, number: route.number, name: route.name, results: [] };
@@ -659,37 +922,83 @@ async function runAnnouncement(env, date, { preview = false } = {}) {
         result.status = order.cancelled ? "geannuleerd" : "wordt opgehaald";
         continue;
       }
+      // "Your order is on its way" to someone who has their money back, or who
+      // has not paid yet, is wrong either way. The planner decides; not this.
+      if (order.refunded) {
+        result.status = "terugbetaald, niet aangekondigd";
+        continue;
+      }
+      if (!order.paid) {
+        result.status = "niet betaald, niet aangekondigd";
+        continue;
+      }
       if (!live) {
         result.status = "zou aangekondigd worden";
+        continue;
+      }
+
+      const token = await shopifyAdminToken(env, shopDomain);
+      if (!token || !order.shopifyOrderId) {
+        result.status = "mislukt: geen Shopify-toegang voor deze winkel";
+        continue;
+      }
+      if (fetches + 2 > ANNOUNCE_FETCH_BUDGET) {
+        result.status = "uitgesteld: volgt om 16:10";
         continue;
       }
 
       // Live from here on. The marker goes in BEFORE Shopify is told: Shopify
       // answers a fulfillment with a webhook straight away, and if that came
       // in first the order would be filed as delivered and leave the route.
-      const token = await shopifyAdminToken(env, shopDomain);
-      if (!token || !order.shopifyOrderId) {
-        result.status = "mislukt: geen Shopify-toegang voor deze winkel";
-        continue;
-      }
+      const markerKey = `${ANNOUNCED_PREFIX}${key}`;
       const marker = { at: new Date().toISOString(), routeId: route.id, number: route.number, date };
-      await env.PLANNING_ORDERS.put(`${ANNOUNCED_PREFIX}${key}`, JSON.stringify(marker), { expirationTtl: 30 * 24 * 3600 });
       try {
+        // A year: Bezorgd clears it, and an announced order must never fall back
+        // to "delivered" just because a route was broken off for a while.
+        await env.PLANNING_ORDERS.put(markerKey, JSON.stringify(marker), { expirationTtl: 365 * DAY_SECONDS });
+        fetches += 2;
         const created = await createShopifyFulfillment(shopDomain, token, order.shopifyOrderId, true);
+        if (created.error && created.ambiguous) {
+          // The request went out and no answer came: Shopify may have fulfilled
+          // it and mailed the customer. The marker stays, so the order stays on
+          // the route and is not mailed twice; a person looks in Shopify.
+          result.status = "onzeker: kijk in Shopify of de mail is verstuurd";
+          continue;
+        }
         if (created.error) throw new Error(created.error);
-        await appendOrderPlanningNote(shopDomain, token, order.shopifyOrderId, [
-          `Aangekondigd via Vervoersplanning: rit ${route.number || "?"}, bezorging ${date}`,
-          `Tijd: ${new Date().toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam" })}`,
-        ]);
-        result.status = "aangekondigd";
+        if (created.fulfillment?.id) await env.PLANNING_ORDERS.put(markerKey, JSON.stringify({ ...marker, fulfillmentId: created.fulfillment.id }), { expirationTtl: 365 * DAY_SECONDS }).catch(() => {});
+        result.status = created.alreadyFulfilled ? "stond al op verzonden in Shopify, geen mail" : "aangekondigd";
       } catch (error) {
-        await env.PLANNING_ORDERS.delete(`${ANNOUNCED_PREFIX}${key}`);
-        result.status = `mislukt: ${String(error.message || error).slice(0, 120)}`;
+        // Certain that nothing was made: the lookup failed, or Shopify said no.
+        const cleared = await deleteWithRetry(env, markerKey);
+        result.status = `mislukt${cleared ? "" : " (markering bleef staan, meld het)"}: ${String(error?.message || error).slice(0, 120)}`;
       }
     }
   }
 
   return report;
+}
+
+// The run at 16:10 does the same walk again: orders announced at 16:00 answer
+// "al aangekondigd" and keep the result they had; anything that failed or had to
+// wait gets its second chance, and its new outcome replaces the old.
+function mergeAnnounceReports(earlier, later) {
+  if (!earlier) return later;
+  const merged = { ...earlier, retriedAt: later.ranAt, routes: [...(earlier.routes || [])] };
+  if (later.error) merged.error = later.error;
+  for (const route of later.routes || []) {
+    const existing = merged.routes.find((entry) => entry.id === route.id);
+    if (!existing) {
+      merged.routes.push(route);
+      continue;
+    }
+    for (const result of route.results || []) {
+      const index = existing.results.findIndex((entry) => entry.key === result.key);
+      if (index === -1) existing.results.push(result);
+      else if (result.status !== "al aangekondigd") existing.results[index] = result;
+    }
+  }
+  return merged;
 }
 
 // A planned route is its own record, plan:<date>:<id>, never one record per day.
@@ -698,86 +1007,153 @@ async function runAnnouncement(env, date, { preview = false } = {}) {
 // other's route. The date is whatever the browser calls today in Dutch local
 // time and is only ever compared as text, so the worker's UTC clock cannot shift
 // a route onto the wrong day.
+//
+// Records expire 60 days after their date, day notes too. Everything under
+// "plan" is read in one listing on each refresh, so what lies there has to stay
+// bounded: before this, about 470 routes in, the listing would have been full
+// and the newest routes, which sort last, would have dropped out of sight.
 const PLAN_PREFIX = "plan:";
+const ORDER_KEY_PATTERN = /^[a-z0-9-]+\.myshopify\.com:#?[A-Za-z0-9_-]{1,40}$/;
 
 function isPlanDate(value) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+  const text = String(value || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+  const date = new Date(`${text}T12:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === text;
+}
+
+function planExpiration(date) {
+  const at = Math.floor(new Date(`${shiftDay(date, PLAN_KEEP_DAYS)}T12:00:00Z`).getTime() / 1000);
+  return Math.max(at, Math.floor(Date.now() / 1000) + 3600);
+}
+
+// Order keys as the planning writes them, shop and order number. Anything else
+// (markup, a made-up string) is refused before it reaches a record that the
+// planner's screen will later show.
+function cleanKeys(value) {
+  return [...new Set((Array.isArray(value) ? value : []).map(String).filter((key) => ORDER_KEY_PATTERN.test(key)))];
+}
+
+function cleanName(value, fallback = "Rit") {
+  return String(value || fallback).replace(/[<>]/g, "").trim().slice(0, 60) || fallback;
 }
 
 async function getPlan(request, env) {
-  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const role = roleFor(request, env);
+  if (!role) return unauthorized(env);
 
-  const from = new URL(request.url).searchParams.get("from");
-  // One listing for routes and day notes together. The free plan allows 1,000
-  // list operations a day, and this runs on every refresh of every open screen.
-  const list = await env.PLANNING_ORDERS.list({ prefix: "plan" });
-  const na = (name, prefix) => !isPlanDate(from) || name.slice(prefix.length, prefix.length + 10) >= from;
-  const routeKeys = list.keys.map((key) => key.name).filter((name) => name.startsWith(PLAN_PREFIX) && na(name, PLAN_PREFIX));
-  const dayKeys = list.keys.map((key) => key.name).filter((name) => name.startsWith("plan-day:") && na(name, "plan-day:"));
-  const logKeys = list.keys.map((key) => key.name).filter((name) => name.startsWith(ANNOUNCE_LOG_PREFIX) && na(name, ANNOUNCE_LOG_PREFIX));
+  const url = new URL(request.url);
+  let from = url.searchParams.get("from");
+  let to = null;
+  // The driver sees the week behind and the week ahead, whatever is asked for.
+  if (role === "driver") ({ from, to } = driverWindow());
+
+  // One listing for routes, day notes and announcement reports together. The
+  // free plan allows 1,000 list operations a day, and this runs on every
+  // refresh of every open screen.
+  const names = (await listAll(env, "plan")).map((key) => key.name);
+  const inWindow = (name, prefix) => {
+    const date = name.slice(prefix.length, prefix.length + 10);
+    return (!isPlanDate(from) || date >= from) && (!to || date <= to);
+  };
+  const routeKeys = names.filter((name) => name.startsWith(PLAN_PREFIX) && inWindow(name, PLAN_PREFIX));
+  const dayKeys = names.filter((name) => name.startsWith("plan-day:") && inWindow(name, "plan-day:"));
+  const logKeys = names.filter((name) => name.startsWith(ANNOUNCE_LOG_PREFIX) && inWindow(name, ANNOUNCE_LOG_PREFIX));
 
   const [routes, dayNotes, announcements] = await Promise.all([
     Promise.all(routeKeys.map((name) => env.PLANNING_ORDERS.get(name, "json"))),
     Promise.all(dayKeys.map((name) => env.PLANNING_ORDERS.get(name, "json"))),
     Promise.all(logKeys.map((name) => env.PLANNING_ORDERS.get(name, "json"))),
   ]);
-  routes.sort((a, b) => `${a?.date}${a?.assignedAt}`.localeCompare(`${b?.date}${b?.assignedAt}`));
+  const planned = routes.filter(Boolean);
+  planned.sort((a, b) => `${a.date}${String(a.number || 0).padStart(6, "0")}`.localeCompare(`${b.date}${String(b.number || 0).padStart(6, "0")}`));
 
-  return json({ routes: routes.filter(Boolean), dayNotes: dayNotes.filter(Boolean), announcements: announcements.filter(Boolean), announceLive: announceLive(env) }, 200, env);
+  const body = { routes: planned, dayNotes: dayNotes.filter(Boolean), announcements: announcements.filter(Boolean), announceLive: announceLive(env) };
+  if (role === "driver") {
+    // Name, address, phone and note of the stops on the driver's own routes: the
+    // only customers whose details the phone is given.
+    const stopKeys = [...new Set(planned.filter((route) => !route.abortedAt).flatMap((route) => route.orderKeys || []))];
+    body.stops = (await Promise.all(stopKeys.map((key) => env.PLANNING_ORDERS.get(`order:${key}`, "json")))).filter(Boolean);
+  }
+  return json(body, 200, env);
 }
 
 async function assignPlanRoute(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
 
   const payload = await request.json().catch(() => ({}));
   const date = String(payload.date || "");
   // A stop is identified by shop and order number together, the way the
   // planning keys orders everywhere else. The number alone is only unique
   // while the two shops keep their #DRS and #DSP prefixes apart.
-  const orderKeys = [...new Set((Array.isArray(payload.orderKeys) ? payload.orderKeys : []).map(String).filter((key) => key.includes(":")))];
-  if (!isPlanDate(date)) return json({ error: "date moet JJJJ-MM-DD zijn" }, 400, env);
-  if (!orderKeys.length) return json({ error: "orderKeys zijn verplicht" }, 400, env);
+  const orderKeys = cleanKeys(payload.orderKeys);
+  if (!isPlanDate(date)) return json({ error: "Kies een geldige dag." }, 400, env);
+  if (!orderKeys.length) return json({ error: "Deze rit heeft geen stops." }, 400, env);
 
-  const id = String(payload.id || crypto.randomUUID());
-  const bestaand = isPlanDate(payload.fromDate)
-    ? await env.PLANNING_ORDERS.get(`${PLAN_PREFIX}${payload.fromDate}:${id}`, "json")
-    : await env.PLANNING_ORDERS.get(`${PLAN_PREFIX}${date}:${id}`, "json");
+  const id = /^[A-Za-z0-9-]{8,64}$/.test(String(payload.id || "")) ? String(payload.id) : crypto.randomUUID();
+  const fromDate = isPlanDate(payload.fromDate) ? String(payload.fromDate) : null;
+  const bestaand = await readPlanRecord(env, fromDate || date, id);
+
+  // Sent twice for the same day (a double click, a retry after a lost answer):
+  // the route that was made stands, and no second number is used up.
+  if (bestaand && !fromDate && bestaand.orderKeys?.join("|") === orderKeys.join("|")) {
+    return json({ route: bestaand, already: true }, 200, env);
+  }
+
+  // One order, one route. The same van load planned on two days would have the
+  // driver arrive at a door that was served the day before.
+  const stops = await plannedStops(env, amsterdamNow().day, "9999-12-31");
+  const conflicts = orderKeys.filter((key) => stops.has(key) && stops.get(key).id !== id);
+  if (conflicts.length) {
+    const first = stops.get(conflicts[0]);
+    return json({
+      error: `${conflicts.map((key) => key.split(":").pop()).join(", ")} ${conflicts.length === 1 ? "staat" : "staan"} al in rit ${first.number || "?"} op ${first.date}. Haal ${conflicts.length === 1 ? "die" : "ze"} daar eerst uit.`,
+      conflicts,
+    }, 409, env);
+  }
+
+  // Parcels in the route are tagged "eigen bezorging" in Shopify before the
+  // route is saved, so whoever prints the DHL labels leaves them be. If Shopify
+  // says no, nothing is planned: a parcel in a route but still on DHL's pile
+  // would go out twice.
+  const failed = await tagKeysOwnDelivery(env, cleanKeys(payload.tagKeys).filter((key) => orderKeys.includes(key)));
+  if (failed.length) {
+    return json({ error: `Shopify kon ${failed.join(", ")} niet als eigen bezorging taggen. Er is niets ingepland; probeer het opnieuw.` }, 502, env);
+  }
 
   const record = {
+    ...(bestaand || {}),
     id,
     // A route keeps the number it was given, whatever day it is moved to.
     number: bestaand?.number || await claimRouteNumber(env),
     date,
-    name: String(payload.name || "Rit").slice(0, 60),
+    name: cleanName(payload.name),
     orderKeys,
-    assignedAt: bestaand?.assignedAt || payload.assignedAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    assignedAt: bestaand?.assignedAt || new Date().toISOString(),
   };
 
+  await writePlanRecord(env, record);
   // Moving a route to another day writes the new record and drops the old one,
   // so the same route can never sit on two days at once.
-  const previous = String(payload.fromDate || "");
-  if (isPlanDate(previous) && previous !== date) {
-    await env.PLANNING_ORDERS.delete(`${PLAN_PREFIX}${previous}:${id}`);
-  }
-
-  await env.PLANNING_ORDERS.put(`${PLAN_PREFIX}${date}:${id}`, JSON.stringify(record));
+  if (fromDate && fromDate !== date) await env.PLANNING_ORDERS.delete(`${PLAN_PREFIX}${fromDate}:${id}`);
   return json({ route: record }, 200, env);
 }
 
 // Route numbers run on for good: rit 1 today, rit 500 in a year or two. The
 // driver is told a number, so it has to mean one route and never come round
-// again. KV cannot increment atomically, so the counter is read and written
-// back, and the number is only kept once claiming its marker succeeds: two
-// people assigning a route in the same second would otherwise both be told 137.
+// again. The counter only goes up. KV cannot increment atomically, so a number is
+// also claimed with a short-lived marker: two routes assigned in the same second
+// would otherwise both be told 137. Markers live outside the "plan" listing.
 async function claimRouteNumber(env) {
   const teller = (await env.PLANNING_ORDERS.get("plan-counter", "json")) || { next: 1 };
   let nummer = Number(teller.next) || 1;
 
   for (let poging = 0; poging < 8; poging += 1) {
-    const marker = `plan-number:${nummer}`;
-    if (!(await env.PLANNING_ORDERS.get(marker))) {
-      await env.PLANNING_ORDERS.put(marker, new Date().toISOString());
+    const marker = `ritnummer:${nummer}`;
+    const taken = (await env.PLANNING_ORDERS.get(marker)) || (await env.PLANNING_ORDERS.get(`plan-number:${nummer}`));
+    if (!taken) {
+      await env.PLANNING_ORDERS.put(marker, new Date().toISOString(), { expirationTtl: 7 * DAY_SECONDS });
       await env.PLANNING_ORDERS.put("plan-counter", JSON.stringify({ next: nummer + 1 }));
       return nummer;
     }
@@ -796,22 +1172,76 @@ async function readPlanRecord(env, date, id) {
 
 async function writePlanRecord(env, record) {
   record.updatedAt = new Date().toISOString();
-  await env.PLANNING_ORDERS.put(`${PLAN_PREFIX}${record.date}:${record.id}`, JSON.stringify(record));
+  await env.PLANNING_ORDERS.put(`${PLAN_PREFIX}${record.date}:${record.id}`, JSON.stringify(record), { expiration: planExpiration(record.date) });
   return record;
 }
 
-// The driver taking one more stop along. Kept apart from /plan/assign, which
-// rewrites a whole route and is the planner's alone.
+// One more stop onto a route, by the driver ("kan er nog bij") or the planner
+// opening a planned route. Kept apart from /plan/assign, which rewrites a whole
+// route and is the planner's alone. A parcel is tagged in Shopify in the same
+// request, and untagged again if the route cannot be saved: the step between the
+// two no longer depends on the phone's signal.
 async function addPlanStop(request, env) {
-  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const role = roleFor(request, env);
+  if (!role) return unauthorized(env);
+  const payload = await request.json().catch(() => ({}));
+  const [key] = cleanKeys([payload.orderKey]);
+  if (!key) return json({ error: "Onbekende order." }, 400, env);
+  const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
+  if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
+  if (record.abortedAt) return json({ error: "Deze rit is afgebroken." }, 409, env);
+  if (role === "driver") {
+    const window = driverWindow();
+    if (record.date < window.from || record.date > window.to) return json({ error: "Deze rit valt buiten jouw week." }, 403, env);
+  }
+  if ((record.orderKeys || []).includes(key)) return json({ route: record, already: true }, 200, env);
+
+  const order = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
+  if (!order || order.cancelled) return json({ error: "Deze order staat niet meer open." }, 404, env);
+  const stops = await plannedStops(env, amsterdamNow().day, "9999-12-31");
+  const other = stops.get(key);
+  if (other && other.id !== record.id) return json({ error: `Deze order staat al in rit ${other.number || "?"} op ${other.date}.` }, 409, env);
+
+  let tagged = false;
+  if (payload.tag && !order.ownDeliveryTagged) {
+    const failed = await tagKeysOwnDelivery(env, [key]);
+    if (failed.length) return json({ error: "Shopify kon de tag 'eigen bezorging' niet zetten. De stop is niet toegevoegd." }, 502, env);
+    tagged = true;
+  }
+
+  const keys = [...(record.orderKeys || [])];
+  const position = Number.isInteger(payload.position) ? Math.max(0, Math.min(keys.length, payload.position)) : keys.length;
+  keys.splice(position, 0, key);
+  record.orderKeys = [...new Set(keys)];
+  if (payload.name) record.name = cleanName(payload.name, record.name);
+  try {
+    await writePlanRecord(env, record);
+  } catch (error) {
+    if (tagged) {
+      const token = await shopifyAdminToken(env, order.shopDomain);
+      if (token) await untagOwnDelivery(order.shopDomain, token, order);
+    }
+    throw error;
+  }
+  return json({ route: record }, 200, env);
+}
+
+// The planner taking a stop out of a planned route. Before this existed the
+// "−" on an opened route changed only the screen, and the driver still went.
+async function removePlanStop(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
   const payload = await request.json().catch(() => ({}));
   const key = String(payload.orderKey || "");
   const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
-  if (!record) return json({ error: "Rit niet gevonden" }, 404, env);
-  if (record.abortedAt) return json({ error: "Deze rit is afgebroken" }, 409, env);
-  if (!key.includes(":")) return json({ error: "orderKey ontbreekt" }, 400, env);
-
-  record.orderKeys = [...new Set([...(record.orderKeys || []), key])];
+  if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
+  if (record.abortedAt) return json({ error: "Deze rit is afgebroken." }, 409, env);
+  record.orderKeys = (record.orderKeys || []).filter((entry) => entry !== key);
+  if (payload.name) record.name = cleanName(payload.name, record.name);
+  if (!record.orderKeys.length) {
+    await env.PLANNING_ORDERS.delete(`${PLAN_PREFIX}${record.date}:${record.id}`);
+    return json({ removed: true }, 200, env);
+  }
   return json({ route: await writePlanRecord(env, record) }, 200, env);
 }
 
@@ -822,11 +1252,15 @@ async function addPlanStop(request, env) {
 // again, and are kept apart so the planner can see what came back and why.
 async function abortPlanRoute(request, env) {
   const role = roleFor(request, env);
-  if (!role) return json({ error: "Unauthorized" }, 401, env);
+  if (!role) return unauthorized(env);
   const payload = await request.json().catch(() => ({}));
   const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
-  if (!record) return json({ error: "Rit niet gevonden" }, 404, env);
+  if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
   if (record.abortedAt) return json({ route: record }, 200, env);
+  if (role === "driver") {
+    const window = driverWindow();
+    if (record.date < window.from || record.date > window.to) return json({ error: "Deze rit valt buiten jouw week." }, 403, env);
+  }
 
   const keys = record.orderKeys || [];
   const delivered = await Promise.all(keys.map(async (key) =>
@@ -842,23 +1276,25 @@ async function abortPlanRoute(request, env) {
 }
 
 async function setPlanNote(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
   const payload = await request.json().catch(() => ({}));
   const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
-  if (!record) return json({ error: "Rit niet gevonden" }, 404, env);
+  if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
   record.note = String(payload.note || "").trim().slice(0, 1000);
   return json({ route: await writePlanRecord(env, record) }, 200, env);
 }
 
 // A note for a whole day, "bus in onderhoud", apart from any one route.
 async function setDayNote(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
   const payload = await request.json().catch(() => ({}));
   const date = String(payload.date || "");
-  if (!isPlanDate(date)) return json({ error: "date moet JJJJ-MM-DD zijn" }, 400, env);
+  if (!isPlanDate(date)) return json({ error: "Kies een geldige dag." }, 400, env);
   const note = String(payload.note || "").trim().slice(0, 1000);
   if (note) {
-    await env.PLANNING_ORDERS.put(`plan-day:${date}`, JSON.stringify({ date, note, updatedAt: new Date().toISOString() }));
+    await env.PLANNING_ORDERS.put(`plan-day:${date}`, JSON.stringify({ date, note, updatedAt: new Date().toISOString() }), { expiration: planExpiration(date) });
   } else {
     await env.PLANNING_ORDERS.delete(`plan-day:${date}`);
   }
@@ -866,12 +1302,13 @@ async function setDayNote(request, env) {
 }
 
 async function removePlanRoute(request, env) {
-  if (!operatorAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
 
   const payload = await request.json().catch(() => ({}));
   const date = String(payload.date || "");
   const id = String(payload.id || "");
-  if (!isPlanDate(date) || !id) return json({ error: "date en id zijn verplicht" }, 400, env);
+  if (!isPlanDate(date) || !id) return json({ error: "Rit ontbreekt in het verzoek." }, 400, env);
 
   await env.PLANNING_ORDERS.delete(`${PLAN_PREFIX}${date}:${id}`);
   return json({ removed: true }, 200, env);
@@ -897,7 +1334,7 @@ function driveCacheKey(from) {
 // it has been measured, which keeps a refresh to a handful of KV reads and only
 // writes when an address is new.
 async function estimateRoute(request, env) {
-  if (!anyRoleAllowed(request, env)) return json({ error: "Unauthorized" }, 401, env);
+  if (!anyRoleAllowed(request, env)) return unauthorized(env);
   if (!env.GOOGLE_MAPS_API_KEY) return json({ error: "Google Maps API key is not configured" }, 501, env);
 
   const payload = await request.json().catch(() => ({}));
@@ -976,22 +1413,34 @@ async function fillDriveMatrix(env, known, missingFor) {
   return measured;
 }
 
+// The version is bumped once a year: Shopify supports each for twelve months,
+// then quietly answers with the oldest one it still has.
 async function shopifyGraphql(shopDomain, token, query, variables) {
-  const response = await fetch(`https://${shopDomain}/admin/api/2026-07/graphql.json`, {
+  const response = await fetch(`https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       "x-shopify-access-token": token,
     },
     body: JSON.stringify({ query, variables }),
+    signal: AbortSignal.timeout(15000),
   });
   const data = await response.json();
-  if (!response.ok || data.errors) throw new Error(JSON.stringify(data.errors || data));
+  if (!response.ok || data.errors) throw new Error(JSON.stringify(data.errors || data).slice(0, 300));
   return data;
 }
 
-function operatorAllowed(request, env) {
-  return roleFor(request, env) === "planner";
+function unauthorized(env) {
+  return json({ error: "Unauthorized" }, 401, env);
+}
+
+// 401 means the code is wrong, and makes the page ask for it again. A right code
+// that may not do this gets 403, so the driver's phone keeps its code.
+function plannerOnly(request, env) {
+  const role = roleFor(request, env);
+  if (!role) return unauthorized(env);
+  if (role !== "planner") return json({ error: "Dit mag alleen de planner." }, 403, env);
+  return null;
 }
 
 // Two codes, two roles. The planner's code opens everything. The driver's code,
@@ -1012,20 +1461,45 @@ function anyRoleAllowed(request, env) {
   return roleFor(request, env) !== null;
 }
 
+// Installing is only offered for the two shops of this planning, and the state
+// that ties the callback to its start is signed rather than stored: starting an
+// install costs no KV write, so opening this link a thousand times cannot use
+// up the day's write budget and stop webhooks and deliveries being saved.
+function allowedShop(shopDomain, env) {
+  const extra = String(env.SHOPIFY_SHOPS || "").split(",").map(normalizeShopDomain).filter(Boolean);
+  return /^[a-z0-9-]+\.myshopify\.com$/.test(shopDomain) && [...KNOWN_SHOPS, ...extra].includes(shopDomain);
+}
+
+async function hmacHex(secret, message) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function signedOAuthState(secret, shopDomain) {
+  const at = String(Date.now());
+  return `${at}.${await hmacHex(secret, `${shopDomain}|${at}`)}`;
+}
+
+async function oauthStateValid(secret, shopDomain, state) {
+  const [at, signature] = String(state || "").split(".");
+  if (!at || !signature || Date.now() - Number(at) > 10 * 60 * 1000) return false;
+  return timingSafeEqual(await hmacHex(secret, `${shopDomain}|${at}`), signature);
+}
+
 async function startShopifyOAuth(request, env) {
   const url = new URL(request.url);
   const shopDomain = normalizeShopDomain(url.searchParams.get("shop"));
   const appCredentials = shopifyAppCredentials(env, shopDomain);
 
-  if (!shopDomain.endsWith(".myshopify.com")) {
-    return html("Shopify shop ontbreekt. Open deze link met ?shop=jouw-shop.myshopify.com", 400);
+  if (!allowedShop(shopDomain, env)) {
+    return html("Deze koppeling is alleen voor de winkels van De Specialisten.", 400);
   }
   if (!appCredentials.clientId || !appCredentials.clientSecret) {
     return html("Shopify Client ID en Secret staan nog niet in Cloudflare voor deze shop.", 501);
   }
 
-  const state = crypto.randomUUID();
-  await env.PLANNING_ORDERS.put(`oauth-state:${state}`, shopDomain, { expirationTtl: 600 });
+  const state = await signedOAuthState(appCredentials.clientSecret, shopDomain);
 
   const redirectUri = `${url.origin}/auth/shopify/callback`;
   const scopes = env.SHOPIFY_ADMIN_SCOPES || [
@@ -1055,14 +1529,11 @@ async function finishShopifyOAuth(request, env) {
   const state = url.searchParams.get("state");
   const appCredentials = shopifyAppCredentials(env, shopDomain);
 
-  if (!(await verifyShopifyOAuthCallback(url, appCredentials.clientSecret))) {
+  if (!allowedShop(shopDomain, env) || !(await verifyShopifyOAuthCallback(url, appCredentials.clientSecret))) {
     return html("Ongeldige Shopify OAuth callback.", 401);
   }
 
-  const expectedShop = await env.PLANNING_ORDERS.get(`oauth-state:${state}`);
-  await env.PLANNING_ORDERS.delete(`oauth-state:${state}`);
-
-  if (!expectedShop || expectedShop !== shopDomain || !code) {
+  if (!code || !(await oauthStateValid(appCredentials.clientSecret, shopDomain, state))) {
     return html("OAuth sessie verlopen of ongeldig. Start de installatie opnieuw.", 400);
   }
 
@@ -1099,7 +1570,7 @@ async function registerShopifyWebhooks(shopDomain, token, origin) {
 
 async function createShopifyWebhook(shopDomain, token, topic, address) {
   try {
-    const response = await fetch(`https://${shopDomain}/admin/api/2026-07/webhooks.json`, {
+    const response = await fetch(`https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/webhooks.json`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -1153,9 +1624,29 @@ function shopifyAppCredentials(env, shopDomain) {
   };
 }
 
+// Lines still on the order. An order edit leaves a removed line in line_items
+// with current_quantity 0: counted anyway, a swapped-out XXL bak kept an order
+// on the van and a removed hay house still booked 90 minutes of unloading.
+function orderedLines(order) {
+  return (Array.isArray(order.line_items) ? order.line_items : [])
+    .map((item) => ({ ...item, quantity: Number(item.current_quantity ?? item.quantity ?? 1) }))
+    .filter((item) => item.quantity > 0);
+}
+
+// Whatever the planning appended to the order note, "[Vervoersplanning] ...",
+// is its own text and not the customer's: cut off before the driver reads it.
+function customerNoteOf(order) {
+  return String(order.note || "").split(/\n*\[Vervoersplanning\]/)[0].trim().slice(0, 500);
+}
+
+function shopifyTime(value) {
+  const date = new Date(value || "");
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
 export function mapShopifyOrder(order, shopDomain = "") {
   const shipping = order.shipping_address || {};
-  const lineItems = Array.isArray(order.line_items) ? order.line_items : [];
+  const lineItems = orderedLines(order);
   const tags = String(order.tags || "").toLowerCase();
   const deliveryMethod = inferDeliveryMethod(order, tags);
 
@@ -1173,6 +1664,7 @@ export function mapShopifyOrder(order, shopDomain = "") {
     dueDate: extractDueDate(order) || defaultDueDate(order, shopDomain),
     paid: order.financial_status === "paid" || order.financial_status === "partially_refunded",
     paymentStatus: paymentStatus(order),
+    refunded: ["refunded", "voided"].includes(order.financial_status),
     cancelled: Boolean(order.cancelled_at),
     fulfilled: order.fulfillment_status === "fulfilled",
     deliveryMethod,
@@ -1185,7 +1677,12 @@ export function mapShopifyOrder(order, shopDomain = "") {
     // What the driver needs at the door: a number to ring when nobody answers,
     // and whatever the customer wrote at checkout ("achterom, hond los").
     phone: String(shipping.phone || order.phone || order.customer?.phone || "").trim(),
-    customerNote: String(order.note || "").trim().slice(0, 500),
+    customerNote: customerNoteOf(order),
+    country: String(shipping.country_code || "").toUpperCase(),
+    // Tagged in Shopify as delivered by the van, by the planning or by hand. A
+    // parcel tagged so is skipped by whoever prints the DHL labels.
+    ownDeliveryTagged: /(^|,)\s*eigen bezorging\s*(,|$)/.test(tags),
+    shopifyUpdatedAt: shopifyTime(order.updated_at),
   };
 }
 
@@ -1261,7 +1758,11 @@ function sameDate(a, b) {
 }
 
 function paymentStatus(order) {
-  if (order.financial_status === "paid" || order.financial_status === "partially_refunded") return "Betaald";
+  const status = order.financial_status;
+  if (status === "paid" || status === "partially_refunded") return "Betaald";
+  if (status === "refunded") return "Terugbetaald";
+  if (status === "voided") return "Betaling vervallen";
+  if (status === "authorized") return "Betaling gereserveerd";
   return "In afwachting van betaling";
 }
 
@@ -1273,7 +1774,7 @@ function shopifyFulfilledAt(order) {
 
 function deliveryAppointmentLocked(order) {
   const attributes = Array.isArray(order.note_attributes) ? order.note_attributes : [];
-  const text = [order.note, order.tags, ...attributes.map((item) => `${item.name}: ${item.value}`)].join(" ").toLowerCase();
+  const text = [customerNoteOf(order), order.tags, ...attributes.map((item) => `${item.name}: ${item.value}`)].join(" ").toLowerCase();
   return text.includes("aflevermoment afgestemd") || text.includes("afgesproken") || text.includes("klant geïnformeerd");
 }
 
@@ -1296,12 +1797,14 @@ function requiresOwnDelivery(order, tags, shopDomain = "") {
   return tags.includes("eigen bezorging") || tags.includes("van roekel") || shippingTitle.includes("van roekel") || shippingTitle.includes("bezorg");
 }
 
+// A cart attribute can be set by anyone visiting the shop, and "2026-13-01"
+// used to take the whole planning down. Only a date that exists is taken.
 function extractDueDate(order) {
   const attributes = Array.isArray(order.note_attributes) ? order.note_attributes : [];
   const dateAttribute = attributes.find((item) => /bezorg|lever|delivery|date|datum/i.test(String(item.name || "")));
   const value = dateAttribute?.value || order.metafields?.delivery_date;
   const match = String(value || "").match(/\d{4}-\d{2}-\d{2}/);
-  return match ? match[0] : null;
+  return match && isPlanDate(match[0]) ? match[0] : null;
 }
 
 function totalWeightKg(lineItems) {

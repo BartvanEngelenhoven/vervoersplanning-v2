@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Experimenteel dashboard voor automatische vervoersplanning vanuit Shopify orders.",
   "scripts": {
-    "check": "node --check app.js && node --check backend-worker.js && node --check config.js && node test-backend-mapping.mjs",
+    "check": "node --check app.js && node --check backend-worker.js && node --check config.js && node test-backend-mapping.mjs && node test-backend-flows.mjs && node test-planning.mjs",
     "worker:deploy": "wrangler deploy",
     "worker:dev": "wrangler dev backend-worker.js"
   },

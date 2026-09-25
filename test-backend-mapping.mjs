@@ -50,6 +50,10 @@ assert.deepEqual(mapShopifyOrder(deliveryOrder, "slowfeeder-specialist.myshopify
   products: ["20x Kunststof rijplaat", "4x Koppelstuk"],
   phone: "",
   customerNote: "",
+  refunded: false,
+  country: "NL",
+  ownDeliveryTagged: true,
+  shopifyUpdatedAt: "",
 });
 
 const pickupOrder = {
@@ -107,5 +111,13 @@ assert.equal(mappedDoorstep.customerNote, "Achterom, de hond loopt los");
 // The Shopify title never says "houten": a hay house must still get its 90 minutes.
 const hayHouseOrder = { ...deliveryOrder, line_items: [{ title: "Slowfeeder hooihuisje voor paarden. Compleet geleverd", grams: 0, quantity: 1 }] };
 assert.equal(mapShopifyOrder(hayHouseOrder, "slowfeeder-specialist.myshopify.com").deliveryMinutes, 90);
+
+// A line taken off the order in an edit stays in line_items at quantity zero.
+const editedOrder = { ...deliveryOrder, line_items: [{ title: "Slowfeeder XXL Pony Edition", quantity: 1, current_quantity: 0 }, { title: "Koppelstuk", quantity: 2, current_quantity: 2, grams: 2500 }] };
+assert.deepEqual(mapShopifyOrder(editedOrder, "slowfeeder-specialist.myshopify.com").products, ["2x Koppelstuk"]);
+
+// The planning's own block in the note is not the customer's.
+const notedOrder = { ...deliveryOrder, note: "Bel even aan\n\n[Vervoersplanning]\nBezorgd gemeld via Vervoersplanning" };
+assert.equal(mapShopifyOrder(notedOrder, "slowfeeder-specialist.myshopify.com").customerNote, "Bel even aan");
 
 console.log("backend mapping tests passed");

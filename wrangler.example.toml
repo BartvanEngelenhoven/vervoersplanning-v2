@@ -22,7 +22,8 @@ CORS_ORIGIN = "https://bartvanengelenhoven.github.io"
 
 # The announcement at 16:00 Amsterdam time the day before a planned route.
 # Cron runs in UTC: 14:00 is 16:00 in summer time, 15:00 in winter time. The
-# worker checks which of the two it is and skips the other. It stays a trial
-# that only reports until AUTO_FULFILL is set to "aan".
+# worker checks which of the two it is and skips the other. The :10 run picks up
+# what the first could not finish. It stays a trial that only reports until
+# AUTO_FULFILL is set to "aan".
 [triggers]
-crons = ["0 14,15 * * *"]
+crons = ["0 14,15 * * *", "10 14,15 * * *"]

@@ -17,10 +17,20 @@ const CONFIG = {
   nearlyOverMinutes: 15,
   farRouteCombineMinutes: 75,
   exceptionRouteMinutes: 480,
+  // Orders on either side of a compass line pool their budgets when they lie
+  // this close together: Dalfsen and Ommen, 12 km apart, fell into two sectors
+  // and were each too far alone, although together they fit.
+  neighbourPoolKm: 30,
+  // The route rules checked in September 2026: a hay house no longer lends an
+  // endless budget to its whole sector, addresses abroad are not guessed onto
+  // the depot, routes either side of a sector line are merged when that is
+  // shorter, stops are put in the shortest order, and a group just over budget
+  // is shown as a route to check. Off, the planning decides as before.
+  ritregelsV3: false,
 };
 
-const state = { orders: [], decisions: [], routes: [], history: [], selected: new Set(), manualRoute: null, suggestions: [], plan: [], dayNotes: [], announcements: [], announceLive: false, allOrders: [], geo: {}, role: null, driverRouteId: null, openPlan: null, routeInHand: null, lastFetchOk: false, driveMinutes: null, driveDepot: "" };
-const decisionLabels = { include: "Meenemen", review: "Controleren", dhl: "DHL", far: "Te ver", exclude: "Niet meenemen" };
+const state = { orders: [], decisions: [], routes: [], reviewRoutes: [], history: [], deliveredKeys: new Map(), historyLoaded: false, selected: new Set(), manualRoute: null, suggestions: [], plan: [], planStops: [], dayNotes: [], announcements: [], announceLive: false, allOrders: [], geo: {}, role: null, driverRouteId: null, openPlan: null, routeInHand: null, placing: false, lastFetchOk: false, driveMinutes: null, driveDepot: "", driveEstimateUnavailable: false };
+const decisionLabels = { include: "Meenemen", planned: "Ingepland", review: "Controleren", dhl: "DHL", far: "Te ver", exclude: "Niet meenemen" };
 
 // Every order brings its own travel budget to the trip and the budgets pool, so
 // two rijplaten may share a 240 minute drive although neither pays for 120 on
@@ -46,8 +56,14 @@ const alwaysOwnTransportProducts = [
   "compacte vierkante slowfeeder hooiruif",
   "patura klima",
 ];
-const forcedIncludeKey = "vervoersplanning.forceInclude.v1";
+// v1 also collected every order ever put in a manual route, which then stayed on
+// "Meenemen" in that browser for good. Only "Toch zelf bezorgen" writes here now,
+// so the old list is left behind rather than carried over.
+const forcedIncludeKey = "vervoersplanning.forceInclude.v2";
 const operatorKeyStorageKey = "vervoersplanning.operatorKey.v1";
+// The role that code opened last time, so a phone that loses its signal before
+// asking again keeps showing the driver's screen and not the planner's portal.
+const roleStorageKey = "vervoersplanning.role.v1";
 // One-off clean-up of leftovers from before the planning went live: orders due
 // before this date stay out of sight here. Shopify is untouched and the records
 // are still in the store, so this is undone by removing the date. An order due
@@ -63,7 +79,7 @@ const businessLogos = {
   "De Rijplaten Specialist": "assets/rijplaten-logo.svg",
   "De Slowfeeder Specialist": "assets/slowfeeder-logo.png",
 };
-const forcedIncludes = new Set(JSON.parse(localStorage.getItem(forcedIncludeKey) || "[]"));
+const forcedIncludes = new Set(readStored(forcedIncludeKey, []));
 // Goorsteeg 46 as PDOK places it. The old point sat 3.5 km off, south-east of Ede.
 const DEPOT_POINT = { lat: 52.07309, lon: 5.63884 };
 // Fitted on real depot-to-customer drive times for 25 Dutch addresses from the
@@ -77,10 +93,16 @@ const MINUTES_PER_KM = 0.975;
 // road that straight-line km do not see: routes of several stops came out 225
 // minutes short over 46 extra stops against the same OpenStreetMap routing.
 const STOP_MINUTES = 5;
+// Stop orders worked out during one rebuild, by the set of stops. The same few
+// sets are asked for hundreds of times while budgets and parcels are weighed.
+let stopOrderCache = new Map();
 let planningView = "map";
 let activeMapRouteIndex = 0;
 let activeLooseOrderKey = "";
 let allOrdersLeafletMap = null;
+let allOrdersMarkers = null;
+let allOrdersFitted = false;
+let refreshSeq = 0;
 
 function productText(order) {
   return String((order.products || []).join(" ")).toLowerCase();
@@ -117,12 +139,24 @@ function transportPlan(order) {
 function decide(order) {
   if (order.cancelled) return { decision: "exclude", reason: "Order is geannuleerd" };
   if (order.fulfilled) return { decision: "exclude", reason: "Order is al volledig bezorgd" };
+  if (order.refunded) return { decision: "exclude", reason: "Order is terugbetaald" };
   if (order.deliveryMethod === "pickup") return { decision: "exclude", reason: "Klant haalt de bestelling af" };
 
   const plan = transportPlan(order);
-  if (!plan) return { decision: "dhl", reason: "Staat niet in de vaste eigen-bezorgingslijst en is geen XXL bak; gaat als pakket via DHL" };
+  if (!plan) {
+    // Tagged "eigen bezorging" in Shopify (by hand, or it rode along in a route
+    // that was later broken off) and in no route now: DHL skips it because of
+    // the tag, so leaving it under DHL would mean nobody delivers it.
+    if (order.ownDeliveryTagged) {
+      return { decision: "review", taggedParcel: true, reason: "In Shopify getagd als eigen bezorging, maar zit in geen rit. Neem hem mee in een rit, of haal de tag in Shopify weg zodat hij met DHL gaat" };
+    }
+    return { decision: "dhl", reason: "Staat niet in de vaste eigen-bezorgingslijst en is geen XXL bak; gaat als pakket via DHL" };
+  }
 
   if (!order.addressComplete) return { decision: "review", reason: "Bezorgadres is onvolledig" };
+  if (CONFIG.ritregelsV3 && !hasKnownPoint(order)) {
+    return { decision: "review", reason: "Adres buiten Nederland en België of zonder geldige postcode: de rijtijd is niet te schatten, zelf beoordelen" };
+  }
   if (order.deliveryAppointmentLocked) return { decision: "review", reason: "Aflevermoment is afgestemd; niet verplaatsen zonder toestemming" };
   if (!order.paid) return { decision: "review", reason: "Betaling nog niet binnen; alleen optioneel meenemen als dit logisch op de route ligt" };
 
@@ -132,15 +166,16 @@ function decide(order) {
 
 function applyManualDecision(order, automatic) {
   if (!forcedIncludes.has(orderKey(order))) return automatic;
-  if (order.cancelled || order.fulfilled || order.deliveryMethod === "pickup") return automatic;
-  return { decision: "include", reason: `Handmatig meegenomen. Systeemadvies: ${automatic.reason}` };
+  if (order.cancelled || order.fulfilled || order.refunded || order.deliveryMethod === "pickup") return automatic;
+  // Chosen by hand, but not without an address to drive to.
+  if (!order.addressComplete) return automatic;
+  return { decision: "include", forced: true, reason: "Handmatig meegenomen (Toch zelf bezorgen)" };
 }
 
 function dueDateReason(order) {
   if (!order.dueDate) return "Geldige bezorgorder; uiterste leverdatum ontbreekt";
-  const today = startOfDay(new Date());
-  const due = dateFromIso(order.dueDate);
-  const days = Math.ceil((due - today) / 86_400_000);
+  const days = daysUntil(order.dueDate);
+  if (days === null) return "Uiterste leverdatum is onleesbaar";
   if (days < 0) return `Te laat: uiterste leverdatum was ${formatDate(order.dueDate)}`;
   if (days <= 2) return `Urgent: uiterlijk ${formatDate(order.dueDate)}`;
   return `Bezorgorder, uiterlijk ${formatDate(order.dueDate)}`;
@@ -157,12 +192,17 @@ function regionFor(order) {
 }
 
 function buildRoutes(included) {
-  if (state.manualRoute?.orders?.length) {
-    return [routeSummary("Handmatige selectie", optimizedStopOrder(state.manualRoute.orders))];
+  if (state.manualRoute || state.openPlan) {
+    const orders = manualRouteOrders();
+    if (!orders.length) return [];
+    const inOrder = state.manualRoute.keepOrder ? orders : optimizedStopOrder(orders);
+    return [routeSummary(state.openPlan ? `Rit ${state.openPlan.number || "?"}` : "Handmatige selectie", inOrder)];
   }
   const groups = new Map();
   for (const item of included) {
-    const region = regionFor(item.order);
+    // An order pooled with a neighbour across a sector line drives with that
+    // neighbour, so it is grouped with it.
+    const region = item.poolRegion || regionFor(item.order);
     if (!groups.has(region)) groups.set(region, []);
     groups.get(region).push(item.order);
   }
@@ -176,7 +216,7 @@ function buildRoutes(included) {
       const candidateSummary = routeSummary(region, candidate);
       const currentSummary = current.length ? routeSummary(region, current) : null;
       const addedMinutes = currentSummary ? candidateSummary.totalMinutes - currentSummary.totalMinutes : candidateSummary.totalMinutes;
-      const loadTooHigh = candidateSummary.load > CONFIG.vehicleCapacityKg;
+      const loadTooHigh = candidateSummary.loadKnown && candidateSummary.load > CONFIG.vehicleCapacityKg;
       const routeTooLong = candidateSummary.totalMinutes > CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
       const usefulFarCombination = sameRouteCorridor(current, order)
         && candidateSummary.totalMinutes <= CONFIG.exceptionRouteMinutes
@@ -190,11 +230,13 @@ function buildRoutes(included) {
     }
     if (current.length) routes.push(routeSummary(region, optimizedStopOrder(current)));
   }
-  return routes;
+  return CONFIG.ritregelsV3 ? mergeNeighbourRoutes(routes) : routes;
 }
 
 function routeSummary(region, orders) {
   const deliveryMinutesTotal = orders.reduce((sum, order) => sum + deliveryMinutes(order), 0);
+  // Shopify has no weights for most products, so an unknown weight is not a 0.
+  const loadKnown = orders.some((order) => Number(order.weightKg) > 0);
   const load = orders.reduce((sum, order) => sum + Number(order.weightKg || 0), 0);
   const driveEstimate = routeDriveMinutes(orders);
   const totalMinutes = driveEstimate + deliveryMinutesTotal;
@@ -202,6 +244,7 @@ function routeSummary(region, orders) {
     region,
     orders,
     load,
+    loadKnown,
     deliveryMinutes: deliveryMinutesTotal,
     driveMinutes: driveEstimate,
     totalMinutes,
@@ -245,9 +288,21 @@ function routeDriveMinutes(orders) {
   return Math.max(20, Math.round(TRIP_OVERHEAD_MINUTES + STOP_MINUTES * (orders.length - 1) + km * MINUTES_PER_KM));
 }
 
+// The stop order the van drives. Closest-first alone left routes of three or
+// four stops more than ten minutes long in one case in six; up to seven stops
+// every order is tried, beyond that closest-first is straightened out by
+// swapping legs (2-opt) until no swap shortens it.
 function optimizedStopOrder(orders) {
+  if (orders.length < 2) return [...orders];
+  const cacheKey = `${CONFIG.ritregelsV3 ? 3 : 2}|${orders.map(orderKey).sort().join("|")}`;
+  const cached = stopOrderCache.get(cacheKey);
+  if (cached) {
+    const byKey = new Map(orders.map((order) => [orderKey(order), order]));
+    return cached.map((key) => byKey.get(key));
+  }
+
   const remaining = [...orders];
-  const ordered = [];
+  let ordered = [];
   let currentPoint = DEPOT_POINT;
   while (remaining.length) {
     remaining.sort((a, b) => distanceKm(currentPoint, orderPoint(a)) - distanceKm(currentPoint, orderPoint(b)));
@@ -255,6 +310,42 @@ function optimizedStopOrder(orders) {
     ordered.push(next);
     currentPoint = orderPoint(next);
   }
+
+  if (CONFIG.ritregelsV3 && ordered.length <= 7) {
+    let best = ordered;
+    let bestKm = loopKm(ordered);
+    const permute = (prefix, rest) => {
+      if (!rest.length) {
+        const km = loopKm(prefix);
+        if (km < bestKm - 1e-9) {
+          best = prefix;
+          bestKm = km;
+        }
+        return;
+      }
+      for (let index = 0; index < rest.length; index += 1) {
+        permute([...prefix, rest[index]], [...rest.slice(0, index), ...rest.slice(index + 1)]);
+      }
+    };
+    permute([], ordered);
+    ordered = best;
+  } else if (CONFIG.ritregelsV3) {
+    let improved = true;
+    while (improved) {
+      improved = false;
+      for (let i = 0; i < ordered.length - 1; i += 1) {
+        for (let j = i + 1; j < ordered.length; j += 1) {
+          const trial = [...ordered.slice(0, i), ...ordered.slice(i, j + 1).reverse(), ...ordered.slice(j + 1)];
+          if (loopKm(trial) < loopKm(ordered) - 1e-9) {
+            ordered = trial;
+            improved = true;
+          }
+        }
+      }
+    }
+  }
+
+  stopOrderCache.set(cacheKey, ordered.map(orderKey));
   return ordered;
 }
 
@@ -273,8 +364,8 @@ function deliveryMinutes(order) {
 }
 
 function routeWarning(route) {
-  if (route.load > CONFIG.vehicleCapacityKg) return `Let op laadcapaciteit: ${route.load.toLocaleString("nl-NL")} kg`;
-  if (!route.overByMinutes) return "Binnen 5:30 uur op basis van ruwe schatting";
+  if (route.loadKnown && route.load > CONFIG.vehicleCapacityKg) return `Let op laadcapaciteit: ${route.load.toLocaleString("nl-NL")} kg`;
+  if (!route.overByMinutes) return "Binnen 5:30 uur op basis van de schatting";
   if (route.overByMinutes <= CONFIG.nearlyOverMinutes) return `Bijna passend: ${route.overByMinutes} min boven 5:30 uur`;
   return `Te lang: ${route.overByMinutes} min boven 5:30 uur; apart plannen of uitzondering bespreken`;
 }
@@ -283,51 +374,61 @@ function routeMinutesFromDepot(order) {
   return `heen/terug ca. ${formatMinutes(routeDriveMinutes([order]))}`;
 }
 
+// A detour that turns out shorter than nothing (a stop that lies on the way)
+// reads as 0:00, not "-1:-24".
 function formatMinutes(minutes) {
-  const hours = Math.floor(minutes / 60);
-  const rest = minutes % 60;
+  const whole = Math.max(0, Math.round(Number(minutes) || 0));
+  const hours = Math.floor(whole / 60);
+  const rest = whole % 60;
   return `${hours}:${String(rest).padStart(2, "0")} uur`;
 }
 
+// A date that does not exist ("2026-13-01") reads as "Onbekend" instead of
+// throwing, which used to stop the whole planning from drawing.
 function formatDate(value) {
   if (!value) return "Niet ingevuld";
-  return new Intl.DateTimeFormat("nl-NL", { day: "2-digit", month: "2-digit", year: "numeric" }).format(new Date(`${value}T12:00:00`));
+  const date = new Date(`${value}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return "Onbekend";
+  return new Intl.DateTimeFormat("nl-NL", { day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
 }
 
 function dateFromIso(value) {
-  return startOfDay(new Date(`${value}T12:00:00`));
+  const date = new Date(`${value}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return null;
+  return startOfDay(date);
 }
 
 function startOfDay(date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }
 
-// Three counters the planner acts on, as buttons that filter the order list.
-// Everything that needs no decision today is named once in a quiet line below,
-// so it is accounted for without competing for attention.
+// Three counters the planner acts on, as buttons that open the order list on
+// that group. Everything that needs no decision today is named once in a quiet
+// line below, so it is accounted for without competing for attention.
 function renderSummary() {
   const count = (key) => state.decisions.filter((item) => item.decision === key).length;
-  const stops = state.routes.reduce((sum, route) => sum + route.orders.length, 0);
-  const urgent = state.decisions.filter((item) => {
-    if (item.decision !== "include" && item.decision !== "review") return false;
-    if (!item.order.dueDate) return false;
-    return Math.ceil((dateFromIso(item.order.dueDate) - startOfDay(new Date())) / 86_400_000) <= 0;
-  }).length;
+  const urgent = urgentDecisions().length;
 
   const dagLine = document.querySelector("#dayLine");
   if (dagLine) {
     const dag = new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(new Date());
-    const rit = state.routes.length === 1 ? "1 rit" : `${state.routes.length} ritten`;
-    dagLine.textContent = state.routes.length
-      ? `${dag} · ${rit} met ${stops} ${stops === 1 ? "stop" : "stops"}`
-      : `${dag} · nog geen rit gepland`;
+    const vandaag = isoDay(new Date());
+    const vandaagGepland = state.plan.filter((planned) => planned.date === vandaag && !planned.abortedAt).length;
+    const voorstellen = state.routes.length + state.reviewRoutes.length;
+    const delen = state.openPlan
+      ? [`Rit ${state.openPlan.number || "?"} geopend`]
+      : [
+        voorstellen ? `${voorstellen} ${voorstellen === 1 ? "voorstel" : "voorstellen"}` : "geen nieuwe voorstellen",
+        vandaagGepland ? `${vandaagGepland} ${vandaagGepland === 1 ? "rit" : "ritten"} vandaag in de agenda` : "",
+      ].filter(Boolean);
+    dagLine.textContent = `${capitalize(dag)} · ${delen.join(" · ")}`;
   }
 
-  const vandaag = document.querySelector("#todayLabel");
-  if (vandaag) vandaag.textContent = new Intl.DateTimeFormat("nl-NL", { day: "numeric", month: "long" }).format(new Date());
+  const vandaagLabel = document.querySelector("#todayLabel");
+  if (vandaagLabel) vandaagLabel.textContent = new Intl.DateTimeFormat("nl-NL", { day: "numeric", month: "long" }).format(new Date());
 
   const tellers = [
-    { key: "include", label: "Meenemen", value: count("include"), sub: "gaan met de bus" },
+    { key: "include", label: "Meenemen", value: count("include"), sub: "nog niet ingepland" },
     { key: "review", label: "Controleren", value: count("review"), sub: "wachten op jou" },
     { key: "urgent", label: "Vandaag of te laat", value: urgent, sub: "deadline verstreken of nu" },
   ];
@@ -338,17 +439,17 @@ function renderSummary() {
 
   document.querySelectorAll("#summary .metric").forEach((button) => {
     button.addEventListener("click", () => {
-      const filter = button.dataset.filter;
       const select = document.querySelector("#decisionFilter");
-      if (select) select.value = filter === "urgent" ? "all" : filter;
+      if (select) select.value = button.dataset.filter;
+      showView("orders");
       renderOrders();
-      document.querySelector(".orders-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   });
 
   const rest = document.querySelector("#summaryRest");
   if (rest) {
     const delen = [
+      count("planned") ? `${count("planned")} ingepland` : "",
       count("dhl") ? `${count("dhl")} via DHL` : "",
       count("far") ? `${count("far")} te ver` : "",
       count("exclude") ? `${count("exclude")} vervallen of opgehaald` : "",
@@ -363,19 +464,25 @@ function renderSummary() {
 function renderRules() {
   const holder = document.querySelector("#rulesBody");
   if (!holder) return;
+  const v3 = CONFIG.ritregelsV3;
   const budget = (rule) => rule.budgetMinutes === Infinity ? "hoe ver ook" : `tot ${formatMinutes(rule.budgetMinutes)} heen/terug`;
+  const dagGrens = formatMinutes(CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes);
   const kaarten = [
-    ["Rijplaten", `Altijd eigen bezorging ${budget(transportRules.rijplaten)}. Orders dezelfde kant op tellen hun tijd bij elkaar op, dus samen mogen ze verder.`],
-    ["Grote slowfeeders", `${alwaysOwnTransportProducts.length} producttitels uit de vaste lijst gaan altijd zelf, ${budget(transportRules.alwaysOwn)}.`],
-    ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld.`],
-    ["Al het andere", "Gaat als pakket via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit " + formatMinutes(CONFIG.packageDetourMinutes) + " langer van worden."],
-    ["Net erover", `Zit een rit tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan komt hij bij Controleren te staan in plaats van dat hij afvalt.`],
+    ["Rijplaten", `Altijd eigen bezorging ${budget(transportRules.rijplaten)}. Orders dezelfde kant op tellen hun tijd bij elkaar op, dus samen mogen ze verder${v3 ? `. Liggen twee orders vlak bij elkaar maar net aan weerszijden van een windrichting (binnen ${CONFIG.neighbourPoolKm} km), dan tellen ze toch samen` : ""}.`],
+    ["Grote slowfeeders", `${alwaysOwnTransportProducts.length} producttitels uit de vaste lijst gaan altijd zelf, ${budget(transportRules.alwaysOwn)}.${v3 ? " Rijplaten en XXL bakken dezelfde kant op rijden mee als de extra rijtijd binnen hun eigen budget past; het hooihuisje maakt hun budget niet groter." : ""}`],
+    ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Anders via DHL.`],
+    ["Al het andere", `Gaat als pakket via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit ${formatMinutes(CONFIG.packageDetourMinutes)} langer van worden. Zo'n pakket krijgt bij het inplannen in Shopify de tag 'eigen bezorging', zodat het niet ook met DHL meegaat.`],
+    ["Net erover", v3
+      ? `Zit een groep orders tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan staat hij als rit onder Controleren: met één klik inplannen, of eerst een order eruit halen.`
+      : `Zit een rit tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan komen de orders bij Controleren te staan in plaats van dat ze afvallen.`],
+    ["Al ingepland", "Een order die al in een rit in de agenda staat, wordt niet nog eens voorgesteld. Nieuwe orders komen bij een ingeplande rit via Rit openen → Kan er makkelijk bij."],
+    ["Rijtijd", `Geschat uit de afstand hemelsbreed tussen de echte adressen (via PDOK, gratis): ${Math.round(TRIP_OVERHEAD_MINUTES)} minuten op- en afrijden per rit, ${STOP_MINUTES} minuten per extra stop en ${String(MINUTES_PER_KM).replace(".", ",")} minuut per kilometer. Lossen: 20 minuten per stop, 90 voor een hooihuisje.`],
     ["Aankondiging", state.announceLive
-      ? "Om 16:00 de dag voor een ingeplande rit gaan de orders in Shopify op fulfilled, met de verzendmail aan de klant. Bezorgd melden stuurt daarna geen tweede mail."
+      ? "Om 16:00 de dag voor een ingeplande rit gaan de betaalde orders in Shopify op verzonden, met de verzendmail aan de klant. Bezorgd melden stuurt daarna geen tweede mail."
       : "Staat op proef. Om 16:00 de dag voor een ingeplande rit schrijft het systeem in de agenda op welke orders het zou aankondigen, maar er gaat niets naar Shopify en niets naar klanten."],
-    ["Lengte van een dag", `Ritten starten en eindigen op ${CONFIG.depot}. Boven ${formatMinutes(CONFIG.maxRouteMinutes)} volgt een waarschuwing, en er liften geen pakketten meer bij.`],
+    ["Lengte van een dag", `Ritten starten en eindigen op ${CONFIG.depot}. Boven ${formatMinutes(CONFIG.maxRouteMinutes)} volgt een waarschuwing. Pakketten liften mee zolang de rit onder ${dagGrens} blijft.`],
   ];
-  holder.innerHTML = kaarten.map(([titel, tekst]) => `<article><b>${titel}</b><p>${tekst}</p></article>`).join("");
+  holder.innerHTML = kaarten.map(([titel, tekst]) => `<article><b>${titel}</b><p>${escapeHtml(tekst)}</p></article>`).join("");
 }
 
 // ---------------------------------------------------------------------------
@@ -394,27 +501,36 @@ async function fetchRole() {
 }
 
 function applyRole(role) {
+  if (role) {
+    try {
+      localStorage.setItem(roleStorageKey, role);
+    } catch {
+      // Not remembered; asked again next time.
+    }
+  }
   state.role = role;
   document.body.classList.toggle("role-driver", role === "driver");
   if (role === "driver") showView("bezorger");
 }
 
 // While the driver or the planner is typing in one of the inline panels, the
-// minute refresh must not redraw it away under their thumbs.
+// refresh must not redraw it away under their thumbs. Only a panel that can be
+// seen counts: one left open on another screen used to block the agenda.
 function isEditing() {
-  return Boolean(document.querySelector(".inline-editor textarea:focus, .inline-editor[data-open='1']"));
+  return [...document.querySelectorAll(".inline-editor[data-open='1'], .inline-editor textarea:focus")]
+    .some((element) => !element.closest(".view")?.hidden);
 }
 
-// ---------------------------------------------------------------------------
-// The driver's screen: their routes, then one route with everything needed at
-// each door, one stop at a time.
-// ---------------------------------------------------------------------------
+// The driver's week, plus any route of the last seven days that still has stops
+// open: a delivery that could not be reported yesterday is reported this morning.
 function driverRoutes() {
   const vandaag = isoDay(new Date());
   const tot = daysFromToday(7);
+  const van = daysFromToday(-7);
   return state.plan
-    .filter((planned) => planned.date >= vandaag && planned.date <= tot)
-    .sort((a, b) => `${a.date}${a.number}`.localeCompare(`${b.date}${b.number}`));
+    .filter((planned) => planned.date <= tot && (planned.date >= vandaag
+      || (planned.date >= van && !planned.abortedAt && plannedRouteStatus(planned).open.length)))
+    .sort((a, b) => a.date.localeCompare(b.date) || (Number(a.number) || 0) - (Number(b.number) || 0));
 }
 
 function dayNoteFor(date) {
@@ -438,54 +554,62 @@ function renderDriverList(holder) {
     <div class="view-head"><h1>Jouw ritten</h1>
       <p>${ritten.length ? "Tik op een rit om de stops te zien." : "Er staat deze week nog geen rit voor je klaar."}</p></div>
     ${perDag.map((dag) => {
-      const naam = new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag));
+      const naam = capitalize(new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag)));
       const dagnotitie = dayNoteFor(dag);
-      return `<section class="driver-day${dag === vandaag ? " vandaag" : ""}">
-        <h2>${dag === vandaag ? `Vandaag · ${naam}` : naam}</h2>
+      const kop = dag === vandaag ? `Vandaag · ${naam}` : dag < vandaag ? `Nog open van ${naam.toLowerCase()}` : naam;
+      return `<section class="driver-day${dag === vandaag ? " vandaag" : ""}${dag < vandaag ? " eerder" : ""}">
+        <h2>${kop}</h2>
         ${dagnotitie ? `<p class="note-box">${escapeHtml(dagnotitie)}</p>` : ""}
         ${ritten.filter((planned) => planned.date === dag).map((planned) => {
           const status = plannedRouteStatus(planned);
           const klaar = status.stops.filter((stop) => stop.status === "bezorgd").length;
-          return `<button class="driver-route${planned.abortedAt ? " afgebroken" : ""}" type="button" data-planned="${planned.id}">
-            <span class="rit-nummer">Rit ${planned.number || "?"}</span>
+          return `<button class="driver-route${planned.abortedAt ? " afgebroken" : ""}" type="button" data-planned="${escapeHtml(planned.id)}">
+            <span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span>
             <b>${escapeHtml(planned.name)}</b>
             <span>${planned.abortedAt ? "Afgebroken" : `${status.open.length} te gaan${klaar ? ` · ${klaar} bezorgd` : ""}`}</span>
             ${planned.note ? `<em>${escapeHtml(planned.note)}</em>` : ""}
           </button>`;
         }).join("")}
       </section>`;
-    }).join("")}`;
+    }).join("")}
+    <div class="driver-foot"><button class="button subtle-action logout-button" type="button">Uitloggen op deze telefoon</button>
+    <a class="button subtle-action" href="handleiding.html#bezorger">Handleiding</a></div>`;
 
   holder.querySelectorAll(".driver-route").forEach((button) => {
     button.addEventListener("click", async () => {
       state.driverRouteId = button.dataset.planned;
       // Opening is the moment to check: what Shopify says now, not this morning.
-      await refreshData();
+      // The route counts as open while that check runs, so what it offers is
+      // weighed against this route and not against suggestions of the day.
       state.openPlan = state.plan.find((planned) => planned.id === state.driverRouteId) || null;
+      await refreshData();
       renderDriver();
       window.scrollTo({ top: 0 });
     });
   });
+  holder.querySelector(".logout-button")?.addEventListener("click", logout);
 }
 
 function renderDriverRoute(holder, planned) {
   const status = plannedRouteStatus(planned);
-  const volgorde = optimizedStopOrder(status.open);
+  // The order the route was planned in, which is the order it is driven in.
+  // Worked out again from the depot after every stop, it sent the driver back
+  // west from Arnhem before going on east.
+  const volgorde = status.open;
   const erbij = state.lastFetchOk && !planned.abortedAt ? nearbyAdditions(status.open) : [];
   const dagnotitie = dayNoteFor(planned.date);
-  const telLink = (nummer) => `tel:${String(nummer).replace(/[^\d+]/g, "")}`;
 
   holder.innerHTML = `
     <button id="driverBack" class="button subtle-action driver-back" type="button">‹ Alle ritten</button>
     <div class="driver-route-head">
-      <h1><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${escapeHtml(planned.name)}</h1>
+      <h1><span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span> ${escapeHtml(planned.name)}</h1>
       <p>${formatDate(planned.date)} · ${status.open.length} te gaan</p>
     </div>
     ${planned.note ? `<p class="note-box"><b>Van de planner:</b> ${escapeHtml(planned.note)}</p>` : ""}
     ${dagnotitie ? `<p class="note-box"><b>Deze dag:</b> ${escapeHtml(dagnotitie)}</p>` : ""}
     ${state.lastFetchOk ? "" : '<p class="plan-offline">Geen verbinding. Je ziet de rit zoals hij bij het laatste verversen was.</p>'}
     ${planned.abortedAt ? `<p class="note-box afgebroken">Deze rit is afgebroken${planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : ""}.</p>` : ""}
-    ${volgorde.length ? `<a class="button primary driver-maps" href="${googleMapsUrl(volgorde)}" target="_blank" rel="noreferrer">Hele rit openen in Google Maps</a>` : ""}
+    ${volgorde.length ? `<a class="button primary driver-maps" href="${driverMapsUrl(volgorde)}" target="_blank" rel="noreferrer">Rit openen in Google Maps</a>` : ""}
 
     <ol class="driver-stops">
       ${volgorde.map((order, index) => `<li class="driver-stop">
@@ -493,7 +617,7 @@ function renderDriverRoute(holder, planned) {
         <div class="driver-stop-body">
           <b>${escapeHtml(order.customer || "Onbekende klant")}${order.announced ? '<span class="badge-announced">aangekondigd</span>' : ""}</b>
           <a class="driver-address" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">${addressSummary(order)}</a>
-          ${order.phone ? `<a class="driver-phone" href="${telLink(order.phone)}">Bel ${escapeHtml(order.phone)}</a>` : ""}
+          ${order.phone ? `<a class="driver-phone" href="${telHref(order.phone)}">Bel ${escapeHtml(order.phone)}</a>` : ""}
           <span class="driver-products">${productSummary(order)}</span>
           ${order.customerNote ? `<span class="driver-customer-note">Klant schreef: ${escapeHtml(order.customerNote)}</span>` : ""}
           <span class="driver-meta">${escapeHtml(order.id)} · ${escapeHtml(order.webshop || "")} · ${deliveryMinutes(order)} min lossen</span>
@@ -502,12 +626,7 @@ function renderDriverRoute(holder, planned) {
       </li>`).join("")}
     </ol>
 
-    ${status.stops.filter((stop) => stop.status !== "open").length ? `<ul class="plan-stops">${status.stops.filter((stop) => stop.status !== "open").map((stop) =>
-      stop.status === "bezorgd"
-        ? `<li class="plan-stop klaar"><s>${escapeHtml(stop.id)}</s> bezorgd${stop.at ? ` om ${formatDateTime(stop.at)}` : ""}</li>`
-        : stop.status === "geannuleerd"
-          ? `<li class="plan-stop fout">${escapeHtml(stop.id)} is geannuleerd, niet afleveren</li>`
-          : `<li class="plan-stop fout">${escapeHtml(stop.id)} niet gevonden. Bel de planner.</li>`).join("")}</ul>` : ""}
+    ${status.stops.filter((stop) => stop.status !== "open").length ? `<ul class="plan-stops">${status.stops.filter((stop) => stop.status !== "open").map(stopStatusLine).join("")}</ul>` : ""}
 
     ${erbij.length ? `<div class="plan-additions"><h3>Kan er nog bij</h3>${erbij.map((kandidaat) => {
       const o = kandidaat.item.order;
@@ -532,7 +651,8 @@ function renderDriverRoute(holder, planned) {
   holder.querySelector("#driverBack").addEventListener("click", () => {
     state.driverRouteId = null;
     state.openPlan = null;
-    renderDriver();
+    state.manualRoute = null;
+    rebuildPlanning();
     window.scrollTo({ top: 0 });
   });
   holder.querySelectorAll(".driver-deliver").forEach((button) => {
@@ -541,7 +661,7 @@ function renderDriverRoute(holder, planned) {
   });
   holder.querySelectorAll(".accept-addition").forEach((button) => {
     const kandidaat = erbij.find((k) => orderKey(k.item.order) === button.dataset.key);
-    button.addEventListener("click", () => acceptAddition(kandidaat.item.order, button));
+    button.addEventListener("click", () => acceptAddition(kandidaat, button));
   });
 
   const box = holder.querySelector("#abortBox");
@@ -641,9 +761,10 @@ function noteEditor({ label, value, onSave }) {
     wrap.querySelector("textarea").focus();
   });
   wrap.querySelector(".note-cancel").addEventListener("click", () => {
-    form.hidden = true;
-    toggle.hidden = false;
     delete wrap.dataset.open;
+    document.activeElement?.blur?.();
+    // Whatever was held back while typing (a route placed, a refresh) shows now.
+    renderAgenda();
   });
   wrap.querySelector(".note-save").addEventListener("click", async (event) => {
     const button = event.currentTarget;
@@ -670,15 +791,20 @@ function routeLabel(route) {
   return `${steden[0]}, ${steden[1]} en ${steden.length - 2} meer`;
 }
 
-// The planned route an order already sits in, from today on, if any.
+// The planned route an order sits in, from today on and not broken off.
 function plannedFor(order) {
   const key = orderKey(order);
   const vandaag = isoDay(new Date());
-  return state.plan.find((planned) => planned.date >= vandaag && planKeys(planned).includes(key)) || null;
+  return state.plan.find((planned) => planned.date >= vandaag && !planned.abortedAt && planKeys(planned).includes(key)) || null;
 }
 
 function showView(name) {
-  document.querySelectorAll(".view").forEach((view) => { view.hidden = view.dataset.view !== name; });
+  document.querySelectorAll(".view").forEach((view) => {
+    // Leaving a screen closes what was being typed there: an editor left open on
+    // the agenda used to keep the agenda from ever redrawing.
+    if (view.dataset.view !== name) view.querySelectorAll(".inline-editor[data-open='1']").forEach((editor) => { delete editor.dataset.open; });
+    view.hidden = view.dataset.view !== name;
+  });
   document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === name));
 
   // One map, moved rather than duplicated: beside the routes on Vandaag, on its
@@ -689,6 +815,7 @@ function showView(name) {
   if (name === "kaart") planningView = "all-orders";
   if (name === "vandaag") planningView = "map";
   if (name === "vandaag" || name === "kaart") renderPlanningOverview();
+  if (name === "agenda") renderAgenda();
   if (name !== "agenda" && state.routeInHand) {
     state.routeInHand = null;
     renderRouteInHand();
@@ -698,6 +825,9 @@ function showView(name) {
 
 function putRouteInHand(route) {
   state.routeInHand = route;
+  // One id for this route from the moment it is picked up: sent twice (a double
+  // click, a retry), the backend knows it is the same route.
+  state.routeInHandId = globalThis.crypto?.randomUUID ? crypto.randomUUID() : `rit-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   showView("agenda");
   renderRouteInHand();
   renderAgenda();
@@ -723,10 +853,23 @@ function renderRouteInHand() {
 
 async function placeRouteOnDay(date) {
   const route = state.routeInHand;
-  if (!route) return;
-  const saved = await savePlan({ date, name: routeLabel(route), keys: route.orders.map(orderKey) });
-  if (!saved) {
-    window.alert("Inplannen is niet gelukt. Probeer het opnieuw.");
+  if (!route || state.placing) return;
+  state.placing = true;
+  document.querySelectorAll(".place-here").forEach((button) => {
+    button.disabled = true;
+    button.textContent = "Bezig…";
+  });
+  const result = await savePlan({
+    id: state.routeInHandId,
+    date,
+    name: routeLabel(route),
+    keys: route.orders.map(orderKey),
+    tagKeys: route.orders.filter(needsOwnDeliveryTag).map(orderKey),
+  });
+  state.placing = false;
+  if (!result.route) {
+    window.alert(result.error || "Inplannen is niet gelukt. Probeer het opnieuw.");
+    renderAgenda();
     return;
   }
   state.routeInHand = null;
@@ -746,22 +889,38 @@ function previousDay(isoDate) {
 // it is still the trial that sends nothing to customers.
 function announceLine(planned) {
   if (planned.abortedAt) return "";
+  const status = plannedRouteStatus(planned);
+  const eerder = status.open.filter((order) => order.announced).length;
+  const eerderTekst = eerder
+    ? `<p class="agenda-announce laat">${eerder} ${eerder === 1 ? "order is" : "orders zijn"} al eerder aangekondigd: ${eerder === 1 ? "die klant krijgt" : "die klanten krijgen"} geen nieuwe mail. Laat ze zelf weten welke dag het wordt.</p>`
+    : "";
+
   const log = state.announcements.find((entry) => entry.date === planned.date);
   const routeLog = log?.routes?.find((entry) => entry.id === planned.id);
   if (routeLog) {
     const telling = {};
-    (routeLog.results || []).forEach((result) => { telling[result.status] = (telling[result.status] || 0) + 1; });
-    const tekst = Object.entries(telling).map(([status, aantal]) => `${aantal} ${status}`).join(", ") || "geen orders";
+    (routeLog.results || []).forEach((result) => {
+      const soort = String(result.status || "").split(":")[0];
+      telling[soort] = (telling[soort] || 0) + 1;
+    });
+    const tekst = Object.entries(telling).map(([soort, aantal]) => `${aantal} ${soort}`).join(", ") || "geen orders";
+    const probleem = (routeLog.results || []).some((result) => /^(mislukt|onzeker)/.test(result.status || ""));
     const soort = log.mode === "echt" ? "Aangekondigd" : "Proef";
-    return `<p class="agenda-announce ${log.mode === "echt" ? "echt" : "proef"}">${soort} ${formatDateTime(log.ranAt)}: ${escapeHtml(tekst)}</p>`;
+    return `<p class="agenda-announce ${probleem ? "fout" : log.mode === "echt" ? "echt" : "proef"}">${soort} ${formatDateTime(log.retriedAt || log.ranAt)}: ${escapeHtml(tekst)}${probleem ? ". Kijk in Shopify bij deze orders." : ""}</p>`;
   }
   const vandaag = isoDay(new Date());
-  if (planned.date <= vandaag) return "";
+  if (planned.date <= vandaag) return eerderTekst;
   const dagErvoor = previousDay(planned.date);
-  if (dagErvoor === vandaag && new Date().getHours() >= 16) {
-    return `<p class="agenda-announce laat">Na 16:00 ingepland, dus niet aangekondigd</p>`;
+  const nu = new Date();
+  if (dagErvoor === vandaag && nu.getHours() >= 16) {
+    const zestienUur = new Date(nu);
+    zestienUur.setHours(16, 0, 0, 0);
+    const wasErOp = planned.assignedAt && new Date(planned.assignedAt) < zestienUur;
+    if (!wasErOp) return `<p class="agenda-announce laat">Na 16:00 ingepland, dus niet aangekondigd.</p>${eerderTekst}`;
+    if (nu.getHours() === 16 && nu.getMinutes() < 30) return `<p class="agenda-announce gepland">Aankondiging van 16:00 loopt; het verslag verschijnt hier zo.</p>${eerderTekst}`;
+    return `<p class="agenda-announce fout">Geen verslag van de aankondiging van 16:00 gevonden. Kijk in Shopify of de klanten bericht kregen.</p>${eerderTekst}`;
   }
-  return `<p class="agenda-announce gepland">Aankondiging ${formatDate(dagErvoor)} om 16:00${state.announceLive ? "" : " · proef, er gaat niets naar klanten"}</p>`;
+  return `<p class="agenda-announce gepland">Aankondiging ${formatDate(dagErvoor)} om 16:00${state.announceLive ? "" : " · proef, er gaat niets naar klanten"}</p>${eerderTekst}`;
 }
 
 function renderAgenda() {
@@ -770,7 +929,7 @@ function renderAgenda() {
   if (!holder) return;
 
   const vandaag = isoDay(new Date());
-  const komend = state.plan.filter((planned) => planned.date >= vandaag);
+  const komend = state.plan.filter((planned) => planned.date >= vandaag && !planned.abortedAt);
   if (teller) {
     teller.textContent = komend.length;
     teller.hidden = !komend.length;
@@ -779,38 +938,46 @@ function renderAgenda() {
 
   const dagen = [];
   for (let stap = 0; stap < 14; stap += 1) dagen.push(daysFromToday(stap));
-  // A route left on a past day was never driven; it stays until someone deals
-  // with it rather than quietly disappearing.
-  const achterstallig = [...new Set(state.plan.filter((planned) => planned.date < vandaag).map((planned) => planned.date))].sort();
+  // A past route with stops still open was not (fully) driven: it stays in sight
+  // until someone deals with it. Routes that were driven, or broken off with
+  // their stops handed back, have nothing left to do here.
+  const openVanEerder = (planned) => !planned.abortedAt && plannedRouteStatus(planned).open.length > 0;
+  const achterstallig = [...new Set(state.plan.filter((planned) => planned.date < vandaag && openVanEerder(planned)).map((planned) => planned.date))].sort();
   const inHand = Boolean(state.routeInHand);
 
   holder.innerHTML = [...achterstallig, ...dagen].map((dag) => {
-    const ritten = state.plan.filter((planned) => planned.date === dag);
-    const naam = new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag));
-    const label = dag === vandaag ? `${naam} · vandaag` : dag < vandaag ? `${naam} · niet gereden` : naam;
-    const kiesbaar = inHand && dag >= vandaag;
-    return `<article class="agenda-day${dag === vandaag ? " vandaag" : ""}${dag < vandaag ? " achterstallig" : ""}${ritten.length ? "" : " leeg"}${kiesbaar ? " kiesbaar" : ""}" data-day="${dag}">
+    const verleden = dag < vandaag;
+    const ritten = state.plan.filter((planned) => planned.date === dag && (!verleden || openVanEerder(planned)));
+    const naam = capitalize(new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag)));
+    const label = dag === vandaag ? `${naam} · vandaag` : verleden ? `${naam} · niet (helemaal) gereden` : naam;
+    const kiesbaar = inHand && !verleden;
+    return `<article class="agenda-day${dag === vandaag ? " vandaag" : ""}${verleden ? " achterstallig" : ""}${ritten.length ? "" : " leeg"}${kiesbaar ? " kiesbaar" : ""}" data-day="${dag}">
       <h3>${label}</h3>
       ${dayNoteFor(dag) ? `<p class="agenda-day-note">${escapeHtml(dayNoteFor(dag))}</p>` : ""}
-      ${dag >= vandaag ? `<div class="day-note-slot" data-day="${dag}"></div>` : ""}
-      ${kiesbaar ? `<button class="button primary place-here" type="button" data-day="${dag}">Rit hier inplannen</button>` : ""}
+      ${verleden ? "" : `<div class="day-note-slot" data-day="${dag}"></div>`}
+      ${kiesbaar ? `<button class="button primary place-here" type="button" data-day="${dag}"${state.placing ? " disabled" : ""}>Rit hier inplannen</button>` : ""}
       ${ritten.map((planned) => {
         const status = plannedRouteStatus(planned);
-        const weg = status.stops.length - status.open.length;
+        const bezorgd = status.stops.filter((stop) => stop.status === "bezorgd").length;
+        const anders = status.stops.length - status.open.length - bezorgd;
+        const terug = (planned.droppedKeys || []).map((key) => escapeHtml(key.split(":").pop())).join(", ") || "geen";
         const afgebroken = planned.abortedAt
-          ? `<p class="agenda-aborted">Afgebroken door ${planned.abortedBy || "iemand"} om ${formatDateTime(planned.abortedAt)}${planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : ""}. ${(planned.droppedKeys || []).length} terug naar de planning: ${(planned.droppedKeys || []).map((key) => key.split(":").pop()).join(", ") || "geen"}.</p>`
+          ? `<p class="agenda-aborted">Afgebroken door ${escapeHtml(planned.abortedBy || "iemand")} om ${formatDateTime(planned.abortedAt)}${planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : ""}. ${(planned.droppedKeys || []).length} terug naar de planning: ${terug}.</p>`
           : "";
+        const telling = planned.abortedAt
+          ? `${bezorgd} bezorgd`
+          : [`${status.open.length} ${status.open.length === 1 ? "stop" : "stops"} te gaan`, bezorgd ? `${bezorgd} bezorgd` : "", anders ? `${anders} geannuleerd of onbekend` : ""].filter(Boolean).join(" · ");
         return `<div class="agenda-route${planned.abortedAt ? " afgebroken" : ""}">
-          <b><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${escapeHtml(planned.name)}</b>
-          <span>${planned.abortedAt ? `${status.stops.filter((stop) => stop.status === "bezorgd").length} bezorgd` : `${status.open.length} ${status.open.length === 1 ? "stop" : "stops"}${weg ? ` · ${weg} al afgehandeld of niet gevonden` : ""}`}</span>
+          <b><span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span> ${escapeHtml(planned.name)}</b>
+          <span>${telling}</span>
           ${planned.note ? `<p class="agenda-note">${escapeHtml(planned.note)}</p>` : ""}
           ${announceLine(planned)}
           ${afgebroken}
-          ${planned.abortedAt ? "" : `<div class="note-slot" data-planned="${planned.id}"></div>`}
-          <div class="agenda-route-actions">
-            <button class="button primary open-planned" type="button" data-planned="${planned.id}">Rit openen</button>
-            <button class="button subtle-action drop-planned" type="button" data-planned="${planned.id}">Uit agenda</button>
-          </div>
+          ${planned.abortedAt || verleden ? "" : `<div class="note-slot" data-planned="${escapeHtml(planned.id)}"></div>`}
+          ${planned.abortedAt ? "" : `<div class="agenda-route-actions">
+            <button class="button primary open-planned" type="button" data-planned="${escapeHtml(planned.id)}">Rit openen</button>
+            <button class="button subtle-action drop-planned" type="button" data-planned="${escapeHtml(planned.id)}">Uit agenda</button>
+          </div>`}
         </div>`;
       }).join("")}
       ${!ritten.length && !kiesbaar ? '<p class="empty">Niets ingepland.</p>' : ""}
@@ -840,8 +1007,9 @@ function renderAgenda() {
 // judged is what Shopify says now and not what this phone had this morning.
 async function openPlannedRoute(planned) {
   if (!planned) return;
+  state.openPlan = planned;
+  state.manualRoute = null;
   await refreshData();
-  state.openPlan = state.plan.find((entry) => entry.id === planned.id) || planned;
   applyOpenPlan();
   showView("vandaag");
 }
@@ -850,10 +1018,6 @@ async function openPlannedRoute(planned) {
 // used to be pushed into forcedIncludes as well, which left every order ever
 // opened this way stuck on "Meenemen" on that phone for good.
 function applyOpenPlan() {
-  const planned = state.openPlan;
-  if (!planned) return;
-  const status = plannedRouteStatus(planned);
-  state.manualRoute = status.open.length ? { orders: optimizedStopOrder(status.open) } : null;
   activeMapRouteIndex = 0;
   rebuildPlanning();
 }
@@ -869,7 +1033,7 @@ function renderOpenPlan() {
   const holder = document.querySelector("#openPlan");
   if (!holder) return;
   const planned = state.openPlan;
-  if (!planned) {
+  if (!planned || state.role === "driver") {
     holder.hidden = true;
     holder.innerHTML = "";
     return;
@@ -878,35 +1042,29 @@ function renderOpenPlan() {
   const status = plannedRouteStatus(planned);
   const bijzonder = status.stops.filter((stop) => stop.status !== "open");
   const erbij = state.lastFetchOk ? nearbyAdditions(status.open) : [];
-  const huidig = status.open.length ? routeSummary("Rit", optimizedStopOrder(status.open)) : null;
-
-  const regel = (stop) => {
-    if (stop.status === "bezorgd") return `<li class="plan-stop klaar"><s>${escapeHtml(stop.id)}</s> al bezorgd${stop.at ? ` op ${formatDateTime(stop.at)}` : ""}</li>`;
-    if (stop.status === "geannuleerd") return `<li class="plan-stop fout">${escapeHtml(stop.id)} is geannuleerd, niet afleveren</li>`;
-    return `<li class="plan-stop fout">${escapeHtml(stop.id)} niet gevonden. Overleg met de planner voor je gaat.</li>`;
-  };
+  const huidig = status.open.length ? routeSummary("Rit", status.open) : null;
 
   holder.hidden = false;
   holder.innerHTML = `
     <div class="panel-heading compact">
       <div>
-        <h2><span class="rit-nummer">Rit ${planned.number || "?"}</span> ${escapeHtml(planned.name)}</h2>
+        <h2><span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span> ${escapeHtml(planned.name)}</h2>
         <p class="open-plan-meta">${formatDate(planned.date)} · ${status.open.length} ${status.open.length === 1 ? "stop" : "stops"}${huidig ? ` · ongeveer ${formatMinutes(huidig.totalMinutes)} onderweg` : ""}</p>
       </div>
       <button id="closeOpenPlan" class="button subtle-action" type="button">Sluiten</button>
     </div>
+    <p class="open-plan-hint">Wat je hier verandert, wordt meteen opgeslagen en ziet de bezorger ook: een stop eruit met − bij de rit, een order erbij met Meenemen hieronder.</p>
     ${state.lastFetchOk ? "" : '<p class="plan-offline">Geen verbinding. Je ziet de rit zoals hij bij het laatste verversen was; of er iets bij kan, valt nu niet na te gaan.</p>'}
-    ${bijzonder.length ? `<ul class="plan-stops">${bijzonder.map(regel).join("")}</ul>` : ""}
+    ${bijzonder.length ? `<ul class="plan-stops">${bijzonder.map(stopStatusLine).join("")}</ul>` : ""}
     ${state.lastFetchOk ? `<div class="plan-additions">
-      <h3>${erbij.length ? "Sinds het inplannen binnengekomen, kan er makkelijk bij" : "Niets nieuws dat er makkelijk bij kan"}</h3>
+      <h3>${erbij.length ? "Kan er makkelijk bij" : "Niets dat er makkelijk bij kan"}</h3>
       ${erbij.map((kandidaat) => {
         const o = kandidaat.item.order;
-        const dhl = kandidaat.item.decision !== "include";
         return `<div class="plan-addition">
           <div>
             <b>${escapeHtml(o.id)} · ${escapeHtml(o.city || "plaats onbekend")}</b>
             <span>${productSummary(o)}</span>
-            <span>+${formatMinutes(kandidaat.extra)}, rit wordt dan ${formatMinutes(kandidaat.totaal)}${dhl ? " · gaat in Shopify van DHL naar eigen bezorging" : ""}</span>
+            <span>+${formatMinutes(kandidaat.extra)}, rit wordt dan ${formatMinutes(kandidaat.totaal)}${needsOwnDeliveryTag(o) ? " · krijgt in Shopify de tag eigen bezorging" : ""}</span>
           </div>
           <button class="button primary accept-addition" type="button" data-key="${orderKey(o)}">Meenemen</button>
         </div>`;
@@ -916,13 +1074,13 @@ function renderOpenPlan() {
   holder.querySelector("#closeOpenPlan").addEventListener("click", closeOpenPlan);
   holder.querySelectorAll(".accept-addition").forEach((button) => {
     const kandidaat = erbij.find((k) => orderKey(k.item.order) === button.dataset.key);
-    button.addEventListener("click", () => acceptAddition(kandidaat.item.order, button));
+    button.addEventListener("click", () => acceptAddition(kandidaat, button));
   });
 }
 
 function renderManualRouteBar() {
   const bar = document.querySelector("#manualRouteBar");
-  if (bar) bar.hidden = !state.manualRoute?.orders?.length;
+  if (bar) bar.hidden = !state.manualRoute || Boolean(state.openPlan);
 }
 
 function renderPlanningOverview() {
@@ -948,14 +1106,15 @@ function renderPlanningMap() {
     renderAllOrdersMap(holder);
     return;
   }
-  if (!state.routes.length) {
+  const routes = allRoutes();
+  if (!routes.length) {
     holder.innerHTML = '<p class="empty">Nog geen rit om op Google Maps te tonen.</p>';
     return;
   }
-  activeMapRouteIndex = Math.min(activeMapRouteIndex, state.routes.length - 1);
-  const route = state.routes[activeMapRouteIndex];
-  const routeButtons = state.routes.map((item, index) => `<button class="${index === activeMapRouteIndex ? "active" : ""}" type="button" data-route-index="${index}">
-    Rit ${index + 1}: ${escapeHtml(routeLabel(item))} · ${formatMinutes(item.totalMinutes)}
+  activeMapRouteIndex = Math.min(activeMapRouteIndex, routes.length - 1);
+  const route = routes[activeMapRouteIndex];
+  const routeButtons = routes.map((item, index) => `<button class="${index === activeMapRouteIndex ? "active" : ""}" type="button" data-route-index="${index}">
+    ${escapeHtml(routeTitle(item, index))}: ${escapeHtml(routeLabel(item))} · ${formatMinutes(item.totalMinutes)}
   </button>`).join("");
   const stops = route.orders.map((order, index) => `<li>
     <div>
@@ -965,37 +1124,45 @@ function renderPlanningMap() {
     </div>
     <button class="button subtle-action remove-from-active-route" type="button" data-order-key="${orderKey(order)}">Uit rit halen</button>
   </li>`).join("");
+  // Adding from this list builds a route of the planner's own. On an opened
+  // planned route that would change the screen and not the saved route, so
+  // there the panel above, which saves, is the way to add.
   const routeKeys = new Set(route.orders.map(orderKey));
-  const addableOrders = state.decisions
-    .filter((item) => !routeKeys.has(orderKey(item.order)) && !item.order.cancelled && !item.order.fulfilled && item.order.deliveryMethod !== "pickup")
+  const addableOrders = state.openPlan ? [] : state.decisions
+    .filter((item) => !routeKeys.has(orderKey(item.order)) && !["exclude", "planned"].includes(item.decision))
+    .filter((item) => !CONFIG.ritregelsV3 || hasKnownPoint(item.order))
     .map((item) => item.order)
     .map((order) => {
       const nextRoute = routeSummary(route.region, optimizedStopOrder([...route.orders, order]));
-      return { ...order, extraMinutes: Math.max(0, nextRoute.totalMinutes - route.totalMinutes), routeWouldBeMinutes: nextRoute.totalMinutes };
+      return { order, extraMinutes: Math.max(0, nextRoute.totalMinutes - route.totalMinutes), routeWouldBeMinutes: nextRoute.totalMinutes };
     })
     .sort((a, b) => a.extraMinutes - b.extraMinutes)
     .slice(0, 6);
   const addableList = addableOrders.length
     ? `<div class="route-add-box compact-add">
         <label><span>Toevoegen aan deze rit</span><select id="addToRouteSelect">
-          ${addableOrders.map((order) => `<option value="${orderKey(order)}">${escapeHtml(order.id)} · ${escapeHtml(order.city || "Plaats onbekend")} · +${order.extraMinutes} min · route ${formatMinutes(order.routeWouldBeMinutes)}</option>`).join("")}
+          ${addableOrders.map(({ order, extraMinutes, routeWouldBeMinutes }) => `<option value="${orderKey(order)}">${escapeHtml(order.id)} · ${escapeHtml(order.city || "Plaats onbekend")} · +${extraMinutes} min · rit ${formatMinutes(routeWouldBeMinutes)}</option>`).join("")}
         </select></label>
         <button class="button manual-action add-to-active-route" type="button">Toevoegen aan rit</button>
       </div>`
     : "";
-  holder.innerHTML = `<div class="google-map-card">
-    <iframe title="Google Maps route ${escapeHtml(routeLabel(route))}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${googleMapsEmbedUrl(route.orders)}"></iframe>
-  </div>
-  <div class="map-side">
+
+  // The map itself stays put while its route is the same: rebuilding it on
+  // every refresh threw away the planner's zoom every two minutes.
+  const src = googleMapsEmbedUrl(route.orders);
+  if (holder.querySelector(".google-map-card iframe")?.getAttribute("src") !== src) {
+    holder.innerHTML = `<div class="google-map-card"><iframe title="Google Maps route" loading="lazy" referrerpolicy="no-referrer-when-downgrade" src="${src}"></iframe></div><div class="map-side"></div>`;
+  }
+  holder.querySelector(".google-map-card iframe").title = `Google Maps route ${routeLabel(route)}`;
+  holder.querySelector(".map-side").innerHTML = `
     <div class="map-route-picker">${routeButtons}</div>
     <div class="map-route-summary">
-      <b>Rit ${activeMapRouteIndex + 1}: ${escapeHtml(routeLabel(route))}</b>
+      <b>${escapeHtml(routeTitle(route, activeMapRouteIndex))}: ${escapeHtml(routeLabel(route))}</b>
       <span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span>
       <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open groot in Google Maps</a>
     </div>
     ${addableList}
-    <ol class="map-order-list">${stops}</ol>
-  </div>`;
+    <ol class="map-order-list">${stops}</ol>`;
   holder.querySelectorAll(".map-route-picker button").forEach((button) => {
     button.addEventListener("click", () => {
       activeMapRouteIndex = Number(button.dataset.routeIndex);
@@ -1017,44 +1184,52 @@ function renderPlanningMap() {
 function renderAllOrdersMap(holder) {
   const openOrders = state.decisions
     .filter((item) => !item.order.cancelled && !item.order.fulfilled)
-    .map((item) => item.order);
+    .filter((item) => !CONFIG.ritregelsV3 || hasKnownPoint(item.order));
   if (!openOrders.length) {
-    holder.innerHTML = '<p class="empty">Geen losse open orders om op Google Maps te tonen.</p>';
+    holder.innerHTML = '<p class="empty">Geen open orders om op de kaart te tonen.</p>';
     return;
   }
-  holder.innerHTML = `<div id="allOrdersMap" class="real-orders-map" aria-label="Echte kaart met open orders"></div>
-  <div class="map-side">
+  if (!holder.querySelector("#allOrdersMap")) {
+    allOrdersLeafletMap?.remove();
+    allOrdersLeafletMap = null;
+    holder.innerHTML = `<div id="allOrdersMap" class="real-orders-map" aria-label="Kaart met open orders"></div><div class="map-side"></div>`;
+  }
+  holder.querySelector(".map-side").innerHTML = `
     <div class="map-route-summary">
-      <b>Alle open orders op kaart</b>
-      <span>${openOrders.length} losse punten. Hover over een punt voor de bestelling.</span>
-      <a class="button ghost" href="${googleMapsUrl(openOrders)}" target="_blank" rel="noreferrer">Open alle orders in Google Maps</a>
+      <b>Alle open orders op de kaart</b>
+      <span>${openOrders.length} punten. Tik op een punt, of wijs het aan, voor de bestelling.</span>
+      <a class="button ghost" href="${googleMapsUrl(openOrders.map((item) => item.order))}" target="_blank" rel="noreferrer">Open alle orders in Google Maps</a>
     </div>
     <div class="map-legend">
       <span><i class="map-dot include"></i> Meenemen</span>
+      <span><i class="map-dot planned"></i> Ingepland</span>
       <span><i class="map-dot review"></i> Controleren</span>
       <span><i class="map-dot dhl"></i> DHL</span>
       <span><i class="map-dot far"></i> Te ver</span>
       <span><i class="map-dot exclude"></i> Niet meenemen</span>
-    </div>
-  </div>`;
+    </div>`;
   renderLeafletOrderMap(openOrders);
 }
 
-function renderLeafletOrderMap(openOrders) {
+// One map for as long as its screen is up; a refresh only swaps the markers.
+// Made anew each time, it jumped back to the whole country every two minutes.
+function renderLeafletOrderMap(items) {
   const mapElement = document.querySelector("#allOrdersMap");
-  if (!mapElement || !window.L) {
+  if (!mapElement) return;
+  if (!window.L) {
     mapElement.innerHTML = '<p class="empty">Kaart wordt geladen. Ververs als hij niet verschijnt.</p>';
     return;
   }
-  if (allOrdersLeafletMap) {
-    allOrdersLeafletMap.remove();
-    allOrdersLeafletMap = null;
+  if (!allOrdersLeafletMap) {
+    allOrdersLeafletMap = L.map(mapElement, { scrollWheelZoom: false });
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 18,
+      attribution: "&copy; OpenStreetMap",
+    }).addTo(allOrdersLeafletMap);
+    allOrdersMarkers = L.layerGroup().addTo(allOrdersLeafletMap);
+    allOrdersFitted = false;
   }
-  allOrdersLeafletMap = L.map(mapElement, { scrollWheelZoom: false });
-  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 18,
-    attribution: "&copy; OpenStreetMap",
-  }).addTo(allOrdersLeafletMap);
+  allOrdersMarkers.clearLayers();
 
   const markerPoints = [[DEPOT_POINT.lat, DEPOT_POINT.lon]];
   L.circleMarker([DEPOT_POINT.lat, DEPOT_POINT.lon], {
@@ -1063,11 +1238,10 @@ function renderLeafletOrderMap(openOrders) {
     weight: 2,
     fillColor: "#0d3029",
     fillOpacity: 1,
-  }).addTo(allOrdersLeafletMap).bindTooltip("Goorsteeg 46, Ede");
+  }).addTo(allOrdersMarkers).bindTooltip("Goorsteeg 46, Ede");
 
-  openOrders.forEach((order) => {
+  items.forEach(({ order, decision }) => {
     const point = orderPoint(order);
-    const decision = state.decisions.find((item) => item.order === order)?.decision || "exclude";
     markerPoints.push([point.lat, point.lon]);
     L.circleMarker([point.lat, point.lon], {
       radius: 7,
@@ -1075,19 +1249,23 @@ function renderLeafletOrderMap(openOrders) {
       weight: 2,
       fillColor: markerColor(decision),
       fillOpacity: 1,
-    }).addTo(allOrdersLeafletMap).bindTooltip(orderTooltip(order), {
+    }).addTo(allOrdersMarkers).bindTooltip(orderTooltip(order), {
       direction: "top",
       opacity: 1,
       sticky: true,
     });
   });
 
-  allOrdersLeafletMap.fitBounds(markerPoints, { padding: [32, 32], maxZoom: 8 });
+  if (!allOrdersFitted) {
+    allOrdersLeafletMap.fitBounds(markerPoints, { padding: [32, 32], maxZoom: 8 });
+    allOrdersFitted = true;
+  }
   setTimeout(() => allOrdersLeafletMap?.invalidateSize(), 0);
 }
 
 function markerColor(decision) {
   if (decision === "include") return "#168a54";
+  if (decision === "planned") return "#1f6f78";
   if (decision === "review") return "#c7810c";
   if (decision === "dhl") return "#2f6fb3";
   if (decision === "far") return "#6b5b95";
@@ -1106,12 +1284,13 @@ function orderTooltip(order) {
 function renderRoutesOverview() {
   const holder = document.querySelector("#routesOverview");
   if (!holder) return;
-  if (!state.routes.length) {
+  const routes = allRoutes();
+  if (!routes.length) {
     holder.innerHTML = '<p class="empty">Nog geen ritten om te tonen.</p>';
     return;
   }
-  holder.innerHTML = state.routes.map((route, index) => `<article class="route-overview-card">
-    <div><b>${index + 1}. ${escapeHtml(routeLabel(route))}</b><span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span></div>
+  holder.innerHTML = routes.map((route, index) => `<article class="route-overview-card${route.review ? " review" : ""}">
+    <div><b>${escapeHtml(routeTitle(route, index))}: ${escapeHtml(routeLabel(route))}</b><span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span></div>
     <ol>${route.orders.map((order) => `<li>${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)} · ${productSummary(order)}</li>`).join("")}</ol>
     <div class="route-overview-actions">
       <button class="button manual-action show-route-map" type="button" data-route-index="${index}">Toon op kaart</button>
@@ -1130,9 +1309,11 @@ function renderRoutesOverview() {
 function renderOrders() {
   const term = document.querySelector("#searchInput").value.trim().toLowerCase();
   const filter = document.querySelector("#decisionFilter").value;
+  const urgent = new Set(urgentDecisions());
   const visible = state.decisions.filter((item) => {
-    const haystack = [item.order.id, item.order.webshop, item.order.customer, item.order.city, item.order.postcode, item.order.products.join(" ")].join(" ").toLowerCase();
-    return (!term || haystack.includes(term)) && (filter === "all" || item.decision === filter);
+    const haystack = [item.order.id, item.order.webshop, item.order.customer, item.order.city, item.order.postcode, (item.order.products || []).join(" ")].join(" ").toLowerCase();
+    const matches = filter === "all" || (filter === "urgent" ? urgent.has(item) : item.decision === filter);
+    return (!term || haystack.includes(term)) && matches;
   });
 
   document.querySelector("#ordersBody").innerHTML = groupedOrderSections(visible);
@@ -1153,11 +1334,12 @@ function renderOrders() {
 
 function groupedOrderSections(items) {
   const groups = [
-    ["include", "Meenemen", "Orders die automatisch of handmatig mee kunnen"],
-    ["review", "Controleren", "Orders met betaling, afspraak of ontbrekende info om te beoordelen"],
-    ["dhl", "DHL", "Slowfeeder-orders zonder hooihuisje of XXL bak, en XXL bakken die te ver liggen"],
+    ["include", "Meenemen", "Gaan met de bus en staan nog niet in de agenda"],
+    ["planned", "Ingepland", "Staan al in een rit in de agenda"],
+    ["review", "Controleren", "Betaling, afspraak, adres of net boven het budget: jij beslist"],
+    ["dhl", "DHL", "Niet in de vaste eigen-bezorgingslijst en geen XXL bak, of een XXL bak die te ver ligt"],
     ["far", "Te ver voor eigen vervoer", "Rijplaten buiten het bereik die op geen enkele rit passen"],
-    ["exclude", "Niet meenemen", "Orders die nu niet voor eigen bezorging of ritplanning gelden"],
+    ["exclude", "Niet meenemen", "Geannuleerd, terugbetaald, afgehaald of al verzonden"],
   ];
   return groups
     .map(([key, title, subtitle]) => {
@@ -1178,17 +1360,19 @@ function orderCard(item) {
   const order = item.order;
   const key = orderKey(order);
   const isForced = forcedIncludes.has(key);
+  const planned = item.decision === "planned" ? item.planned : null;
   return `<article class="order-card">
     <div class="order-main">
       <div class="order-title-row">
-        <label class="select-order"><input class="order-select" type="checkbox" data-order-key="${key}" ${state.selected.has(key) ? "checked" : ""} /><span>Selecteer</span></label>
+        <label class="select-order"><input class="order-select" type="checkbox" data-order-key="${key}" ${state.selected.has(key) ? "checked" : ""}${planned ? " disabled" : ""} /><span>Selecteer</span></label>
         <span class="shop-chip ${businessClass(order)}">${businessLogo(order)}</span>
         <span class="badge ${item.decision}">${decisionLabels[item.decision]}</span>
+        ${planned ? `<span class="badge-planned"><span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span> ${formatDate(planned.date)}</span>` : ""}
       </div>
       <h3>${escapeHtml(order.id)} · ${escapeHtml(order.customer)}${order.announced ? '<span class="badge-announced">aangekondigd</span>' : ""}</h3>
       <p class="product-line">${productSummary(order)}</p>
       <p class="address-line">${addressSummary(order)}</p>
-      <p class="reason">${item.reason}</p>
+      <p class="reason">${escapeHtml(item.reason)}</p>
     </div>
     <div class="order-side">
       <span><b>Uiterlijk</b>${formatDate(order.dueDate)}</span>
@@ -1213,7 +1397,8 @@ function selectedOrdersList() {
 }
 
 function manualActionButton(item, key, isForced) {
-  if (item.order.cancelled || item.order.fulfilled || item.order.deliveryMethod === "pickup") return "";
+  if (item.decision === "planned") return "";
+  if (item.order.cancelled || item.order.fulfilled || item.order.refunded || item.order.deliveryMethod === "pickup") return "";
   if (isForced) return `<button class="button subtle-action clear-force-include" type="button" data-order-key="${key}">Automatisch advies</button>`;
   if (item.decision === "include") return "";
   return `<button class="button manual-action force-include" type="button" data-order-key="${key}">Toch zelf bezorgen</button>`;
@@ -1224,35 +1409,34 @@ function renderRoutes() {
   const template = document.querySelector("#routeTemplate");
   renderSuggestions();
   holder.innerHTML = "";
-  if (!state.routes.length) {
-    holder.innerHTML = '<p class="empty">Nog geen geschikte orders voor een rit.</p>';
+  const routes = allRoutes();
+  if (!routes.length) {
+    holder.innerHTML = state.openPlan
+      ? '<p class="empty">Alle stops van deze rit zijn afgehandeld.</p>'
+      : '<p class="empty">Geen nieuwe orders voor een rit. Wat al ingepland is, staat in de Agenda.</p>';
     return;
   }
-  state.routes.forEach((route, index) => {
+  routes.forEach((route, index) => {
     const fragment = template.content.cloneNode(true);
-    fragment.querySelector(".route-number").textContent = index + 1;
-    fragment.querySelector(".route-name").textContent = routeLabel(route);
-    fragment.querySelector(".route-meta").textContent = `${CONFIG.depot} · ${route.orders.length} stops · ruwe rijtijd ${formatMinutes(route.driveMinutes)}`;
-    fragment.querySelector(".route-load").textContent = `${route.load.toLocaleString("nl-NL")} kg · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)} · ${routeWarning(route)}`;
+    const card = fragment.querySelector(".route-card");
+    if (route.review) card.classList.add("review");
+    fragment.querySelector(".route-number").textContent = state.openPlan ? String(state.openPlan.number || "?") : state.manualRoute ? "✓" : routeLetter(index);
+    fragment.querySelector(".route-name").textContent = `${routeTitle(route, index)} · ${routeLabel(route)}`;
+    fragment.querySelector(".route-meta").textContent = `${CONFIG.depot} · ${route.orders.length} ${route.orders.length === 1 ? "stop" : "stops"} · rijtijd ${formatMinutes(route.driveMinutes)}`;
+    fragment.querySelector(".route-load").textContent = [
+      route.loadKnown ? `${route.load.toLocaleString("nl-NL")} kg` : "",
+      `afleveren ${formatMinutes(route.deliveryMinutes)}`,
+      `totaal ${formatMinutes(route.totalMinutes)}`,
+      route.review ? "net boven het budget, zelf beoordelen" : routeWarning(route),
+    ].filter(Boolean).join(" · ");
     fragment.querySelector(".route-map").href = googleMapsUrl(route.orders);
-    // A computed route whose every stop already sits in a planned route says so,
-    // so the planner does not put the same van load on the calendar twice.
-    const alGepland = route.orders.length ? plannedFor(route.orders[0]) : null;
-    const helemaalGepland = alGepland && route.orders.every((order) => plannedFor(order)?.id === alGepland.id);
-    if (!state.openPlan) {
-      if (helemaalGepland) {
-        const label = document.createElement("span");
-        label.className = "al-gepland";
-        label.innerHTML = `<span class="rit-nummer">Rit ${alGepland.number || "?"}</span> ${formatDate(alGepland.date)}`;
-        fragment.querySelector(".route-footer").appendChild(label);
-      } else {
-        const planKnop = document.createElement("button");
-        planKnop.type = "button";
-        planKnop.className = "button primary plan-route";
-        planKnop.textContent = "Inplannen";
-        planKnop.addEventListener("click", () => putRouteInHand(route));
-        fragment.querySelector(".route-footer").appendChild(planKnop);
-      }
+    if (!state.openPlan && state.role !== "driver") {
+      const planKnop = document.createElement("button");
+      planKnop.type = "button";
+      planKnop.className = "button primary plan-route";
+      planKnop.textContent = "Inplannen";
+      planKnop.addEventListener("click", () => putRouteInHand(route));
+      fragment.querySelector(".route-footer").appendChild(planKnop);
     }
     // Buttons carry shop and number together: the number alone is only unique
     // for as long as the two shops keep different prefixes.
@@ -1268,6 +1452,9 @@ function renderRoutes() {
   });
 }
 
+// Orders that fit with a route the planner is putting together by hand. Only
+// then: against all proposals at once the minutes it showed were for a route
+// that did not exist, and "Voeg toe" did something else than it said.
 function renderSuggestions() {
   const holder = document.querySelector("#suggestions");
   if (!holder) return;
@@ -1277,52 +1464,42 @@ function renderSuggestions() {
     holder.innerHTML = "";
     return;
   }
-  holder.innerHTML = `<div class="suggestion-box"><b>Mogelijk combineren</b><p>Deze orders liggen logisch bij je handmatige selectie of route.</p>${suggestions.map((order) => `
+  holder.innerHTML = `<div class="suggestion-box"><b>Kan er makkelijk bij</b><p>Deze orders liggen bij de rit die je samenstelt.</p>${suggestions.map(({ order, extraMinutes, routeWouldBeMinutes }) => `
     <article>
       <span>${escapeHtml(order.id)} · ${escapeHtml(order.city)}</span>
       <small>${productSummary(order)}</small>
-      <em>+${order.extraMinutes} min geschat · route wordt ${formatMinutes(order.routeWouldBeMinutes)}</em>
+      <em>+${extraMinutes} min · rit wordt ${formatMinutes(routeWouldBeMinutes)}</em>
       <button class="button subtle-action add-suggestion" type="button" data-order-key="${orderKey(order)}">Voeg toe</button>
     </article>`).join("")}</div>`;
   holder.querySelectorAll(".add-suggestion").forEach((button) => {
     const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
-    button.addEventListener("click", () => forceInclude(order));
+    button.addEventListener("click", () => addOrderToRoute(order, 0));
   });
 }
 
 function nearbySuggestions() {
-  const routeOrders = state.manualRoute?.orders?.length
-    ? state.manualRoute.orders
-    : selectedOrdersList().length
-      ? selectedOrdersList()
-      : state.orders.filter((order) => forcedIncludes.has(orderKey(order))).length
-        ? state.orders.filter((order) => forcedIncludes.has(orderKey(order)))
-        : state.routes.flatMap((route) => route.orders);
+  if (!state.manualRoute || state.openPlan) return [];
+  const routeOrders = manualRouteOrders();
   if (!routeOrders.length) return [];
   const routeKeys = new Set(routeOrders.map(orderKey));
-  const currentRouteMinutes = routeSummary("huidige route", optimizedStopOrder(routeOrders)).totalMinutes;
+  const currentRouteMinutes = routeSummary("rit", optimizedStopOrder(routeOrders)).totalMinutes;
   return state.decisions
     .filter((item) => suggestionCandidate(item, routeKeys))
-    .map((item) => item.order)
-    .map((order) => {
-      const nextRoute = routeSummary("suggestie", optimizedStopOrder([...routeOrders, order]));
-      return {
-        ...order,
-        extraMinutes: Math.max(0, nextRoute.totalMinutes - currentRouteMinutes),
-        routeWouldBeMinutes: nextRoute.totalMinutes,
-      };
+    .map((item) => {
+      const nextRoute = routeSummary("rit", optimizedStopOrder([...routeOrders, item.order]));
+      return { order: item.order, extraMinutes: Math.max(0, nextRoute.totalMinutes - currentRouteMinutes), routeWouldBeMinutes: nextRoute.totalMinutes };
     })
-    .filter((order) => order.extraMinutes <= 120)
+    .filter((entry) => entry.extraMinutes <= 120 && entry.routeWouldBeMinutes <= CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes)
     .sort((a, b) => a.extraMinutes - b.extraMinutes)
     .slice(0, 3);
 }
 
 function suggestionCandidate(item, routeKeys) {
   const order = item.order;
-  if (routeKeys.has(orderKey(order)) || state.selected.has(orderKey(order))) return false;
-  if (order.cancelled || order.fulfilled || order.deliveryMethod === "pickup") return false;
-  if (!order.addressComplete || !order.paid) return false;
-  return item.decision === "include" || item.decision === "review" || item.decision === "exclude";
+  if (routeKeys.has(orderKey(order)) || state.manualRoute?.removed?.has(orderKey(order))) return false;
+  if (["exclude", "planned"].includes(item.decision)) return false;
+  if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) return false;
+  return !CONFIG.ritregelsV3 || hasKnownPoint(order);
 }
 
 function sameRouteCorridor(routeOrders, candidate) {
@@ -1336,19 +1513,26 @@ function countryName(order) {
   return "";
 }
 
-// The real point when PDOK knows the address; otherwise the old estimate, which
-// puts the whole of a postcode region on a single spot. Only Dutch addresses are
-// looked up, so orders abroad and ones with an incomplete address stay estimated.
+// Where an order is: the point the backend sent (the driver's phone gets no
+// addresses), else the real point from PDOK, else the rough estimate.
 function orderPoint(order) {
+  if (order.point) return order.point;
   const known = state.geo[orderAddress(order)];
   if (known) return known;
-  return estimatedPoint(order);
+  return estimatedPoint(order) || DEPOT_POINT;
 }
 
 function estimatedPoint(order) {
   const postcode = String(order.postcode || "").replace(/\s+/g, "").toUpperCase();
   const country = countryName(order);
   const number = Number((postcode.match(/\d+/) || [0])[0]);
+  if (CONFIG.ritregelsV3) {
+    // Only a Dutch or Belgian postcode says where an order is. A German or Czech
+    // one used to land on the depot itself: 0:20 to Velké Březno.
+    if (country === "BE") return /^\d{4}$/.test(postcode) ? belgiumPoint(number, order) : null;
+    if ((country === "NL" || !country) && /^\d{4}([A-Z]{2})?$/.test(postcode) && number >= 1000) return netherlandsPoint(number, order);
+    return null;
+  }
   if (country === "BE" || number < 1000) return belgiumPoint(number, order);
   return netherlandsPoint(number, order);
 }
@@ -1441,83 +1625,90 @@ function clearSelection() {
   rebuildPlanning();
 }
 
+// A route of the planner's own choosing, shown on its own until "Toon weer alle
+// ritten". It lives on this screen only: nothing is remembered or tagged until
+// it is planned, so trying something out leaves no trace.
 function makeRouteFromSelection() {
-  const orders = selectedOrdersList();
+  const orders = selectedOrdersList().filter((order) => !plannedFor(order));
   if (!orders.length) return;
-  const load = orders.reduce((sum, order) => sum + Number(order.weightKg || 0), 0);
-  const deliveryTotal = orders.reduce((sum, order) => sum + deliveryMinutes(order), 0);
-  for (const order of orders) forcedIncludes.add(orderKey(order));
-  saveForcedIncludes();
-  state.manualRoute = { orders, load, deliveryMinutes: deliveryTotal };
+  state.openPlan = null;
+  state.manualRoute = { keys: orders.map(orderKey), removed: new Set() };
+  activeMapRouteIndex = 0;
+  showView("vandaag");
   rebuildPlanning();
 }
 
-// routeIndex says which route the button belongs to. It used to be implicit, and
-// every route's buttons acted on whichever route the map had selected.
-async function addOrderToRoute(order, routeIndex) {
-  if (!order || !state.routes[routeIndex]) return;
-  // Anything the rules did not already put on own transport gets tagged as own
-  // delivery in Shopify first, so the webshop and the planning agree.
-  if (state.decisions.find((item) => item.order === order)?.decision !== "include") {
-    const tagged = await forceInclude(order);
-    if (!tagged) return;
-    order.deliveryMethod = "delivery";
-  }
-  const route = state.routes[routeIndex];
-  const nextOrders = optimizedStopOrder([...route.orders.filter((item) => orderKey(item) !== orderKey(order)), order]);
-  for (const item of nextOrders) forcedIncludes.add(orderKey(item));
-  saveForcedIncludes();
-  state.manualRoute = { orders: nextOrders };
+// The chosen route plus one order, as a route of the planner's own. The route is
+// taken by its stops, not by its place in the list: the list is rebuilt, and a
+// place can then hold another route.
+function addOrderToRoute(order, routeIndex) {
+  const route = allRoutes()[routeIndex];
+  if (!order || !route || state.openPlan) return;
+  const key = orderKey(order);
+  const keys = [...route.orders.map(orderKey).filter((entry) => entry !== key), key];
+  const removed = new Set(state.manualRoute?.removed || []);
+  removed.delete(key);
+  state.manualRoute = { keys, removed };
   activeMapRouteIndex = 0;
   planningView = "map";
   rebuildPlanning();
 }
 
 function removeOrderFromRoute(key, routeIndex) {
-  if (!key || !state.routes[routeIndex]) return;
-  const route = state.routes[routeIndex];
-  const stop = route.orders.find((order) => orderKey(order) === key);
-  if (!stop) return;
-  // Taking a stop out cannot be undone, and it drops the planning into manual
-  // mode where the other routes are hidden. Both deserve saying out loud.
-  if (!window.confirm(`${stop.id} uit deze rit halen? Dit kan niet ongedaan gemaakt worden. De andere ritten verdwijnen zolang van het scherm.`)) return;
-  const nextOrders = route.orders.filter((order) => orderKey(order) !== key);
-  if (!nextOrders.length) {
-    state.manualRoute = null;
-    forcedIncludes.delete(key);
-    saveForcedIncludes();
-    activeMapRouteIndex = 0;
-    rebuildPlanning();
+  // On an opened planned route a stop comes out of the saved route itself.
+  if (state.openPlan) {
+    removePlannedStop(key);
     return;
   }
-  state.manualRoute = { orders: optimizedStopOrder(nextOrders) };
-  forcedIncludes.delete(key);
-  saveForcedIncludes();
+  const route = allRoutes()[routeIndex];
+  if (!key || !route) return;
+  const stop = route.orders.find((order) => orderKey(order) === key);
+  if (!stop) return;
+  if (!state.manualRoute && !window.confirm(`${stop.id} uit deze rit halen? Je ziet dan alleen deze rit; met "Toon weer alle ritten" komen de andere voorstellen terug.`)) return;
+  const keys = route.orders.map(orderKey).filter((entry) => entry !== key);
+  // Remembered, so a parcel taken out is not slipped straight back in.
+  const removed = new Set(state.manualRoute?.removed || []);
+  removed.add(key);
+  state.manualRoute = keys.length ? { keys, removed } : null;
   activeMapRouteIndex = 0;
   planningView = "map";
   rebuildPlanning();
 }
 
+// Every selected order is tried. What failed stays selected and is named; the
+// rest is reported. It used to stop at the first failure and clear the selection,
+// so the orders after it were silently never reported.
 async function markSelectedDelivered() {
   const orders = selectedOrdersList();
   if (!orders.length) return;
   if (!ensureOperatorKey()) return;
   if (!window.confirm(`${orders.length} geselecteerde orders als bezorgd melden?`)) return;
+  const button = document.querySelector("#markSelectedDeliveredButton");
+  if (button) button.disabled = true;
 
+  const failed = [];
+  let done = 0;
   for (const order of orders) {
-    const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      window.alert(`${order.id}: ${payload.error || "Bezorgd melden mislukt"}`);
-      break;
+    let response = null;
+    try {
+      response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
+      });
+    } catch {
+      response = null;
+    }
+    if (response?.ok) {
+      done += 1;
+      state.selected.delete(orderKey(order));
+    } else {
+      failed.push(`${order.id}: ${response ? await errorText(response, "niet gelukt") : "geen verbinding"}`);
     }
   }
-  state.selected.clear();
-  state.manualRoute = null;
+  if (button) button.disabled = false;
+  if (failed.length) window.alert(`${done} gemeld als bezorgd. Niet gelukt:\n${failed.join("\n")}\n\nDie staan nog geselecteerd.`);
+  if (!state.selected.size) state.manualRoute = null;
   await refreshData();
 }
 
@@ -1529,12 +1720,14 @@ function renderHistory() {
   if (counter) counter.textContent = state.history.length ? `${state.history.length} bezorgd` : "leeg";
 
   if (!state.history.length) {
-    holder.innerHTML = '<p class="empty">Nog geen bezorgde orders in de historie.</p>';
+    holder.innerHTML = `<p class="empty">${state.historyLoaded ? "Nog geen bezorgde orders in de historie." : "De historie is nog niet geladen."}</p>`;
     return;
   }
   holder.innerHTML = state.history.map((item) => `<article class="history-item">
     <div><b>${escapeHtml(item.id)}</b><span>${escapeHtml(item.order?.customer || "Onbekende klant")} · ${escapeHtml(item.order?.webshop || item.shopDomain)}</span><small>${historySourceLabel(item)}: ${formatDateTime(item.deliveredAt)}</small></div>
-    <button class="button ghost undo-delivered" type="button" data-order-id="${encodeURIComponent(item.id)}" data-shop-domain="${encodeURIComponent(item.shopDomain)}">Terugdraaien</button>
+    ${item.fulfillment?.id
+      ? `<button class="button ghost undo-delivered" type="button" data-order-id="${encodeURIComponent(item.id)}" data-shop-domain="${encodeURIComponent(item.shopDomain)}">Terugdraaien</button>`
+      : '<small class="history-note">Terugdraaien kan alleen in Shopify</small>'}
   </article>`).join("");
   holder.querySelectorAll(".undo-delivered").forEach((button) => {
     button.addEventListener("click", () => undoDelivered(decodeURIComponent(button.dataset.orderId), decodeURIComponent(button.dataset.shopDomain), button));
@@ -1542,7 +1735,9 @@ function renderHistory() {
 }
 
 function historySourceLabel(item) {
-  return item.source === "shopify" ? "Fulfilled via Shopify" : "Bezorgd gemeld";
+  if (item.source === "shopify") return "In Shopify verzonden";
+  if (item.source === "bezorger") return "Bezorgd gemeld door de bezorger";
+  return "Bezorgd gemeld";
 }
 
 function googleMapsUrl(orders) {
@@ -1607,29 +1802,42 @@ function orderKey(order) {
 }
 
 function saveForcedIncludes() {
-  localStorage.setItem(forcedIncludeKey, JSON.stringify([...forcedIncludes]));
+  try {
+    localStorage.setItem(forcedIncludeKey, JSON.stringify([...forcedIncludes]));
+  } catch {
+    // Kept for this visit only.
+  }
 }
 
+// "Toch zelf bezorgen". A parcel or XXL bak is tagged as own delivery in
+// Shopify, so the DHL pile leaves it alone; rijplaten go by van anyway.
 async function forceInclude(order) {
-  if (!order) return;
+  if (!order) return false;
   if (!ensureOperatorKey()) return false;
-  if (!window.confirm(`${order.id} als eigen bezorging taggen in Shopify?`)) return false;
-  try {
-    const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/set-own-delivery`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Shopify tag toevoegen mislukt");
-    forcedIncludes.add(orderKey(order));
-    saveForcedIncludes();
-    await refreshData();
-    return true;
-  } catch (error) {
-    window.alert(error.message);
-    return false;
+  const tag = needsOwnDeliveryTag(order);
+  if (!window.confirm(tag
+    ? `${order.id} toch zelf bezorgen? Hij krijgt in Shopify de tag 'eigen bezorging', zodat hij niet ook met DHL meegaat.`
+    : `${order.id} toch zelf bezorgen?`)) return false;
+  if (tag) {
+    let response = null;
+    try {
+      response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/set-own-delivery`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
+      });
+    } catch {
+      response = null;
+    }
+    if (!response?.ok) {
+      window.alert(response ? await errorText(response, "Shopify tag toevoegen is niet gelukt.") : "Geen verbinding. Probeer het opnieuw.");
+      return false;
+    }
   }
+  forcedIncludes.add(orderKey(order));
+  saveForcedIncludes();
+  await refreshData();
+  return true;
 }
 
 function clearForceInclude(order) {
@@ -1650,54 +1858,8 @@ function qualifyCandidates() {
     if (!byRegion.has(region)) byRegion.set(region, []);
     byRegion.get(region).push(item);
   }
-
-  for (const [region, candidates] of byRegion) {
-    const kept = [...candidates];
-    let verdict = "include";
-    while (kept.length) {
-      // In driving order, as buildRoutes will show it. The order list's own
-      // sequence can zigzag: Maastricht, Nijmegen, Geleen read as 476 minutes
-      // against 292 for the route actually driven.
-      const drive = routeDriveMinutes(optimizedStopOrder(kept.map((item) => item.order)));
-      const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
-      if (drive <= budget) {
-        verdict = "include";
-        break;
-      }
-      if (drive <= budget * (1 + CONFIG.budgetTolerance)) {
-        verdict = "review";
-        break;
-      }
-
-      let worst = null;
-      for (const item of kept) {
-        const others = kept.filter((entry) => entry !== item).map((entry) => entry.order);
-        const causes = drive - routeDriveMinutes(optimizedStopOrder(others));
-        const overspend = causes - item.plan.budgetMinutes;
-        if (!worst || overspend > worst.overspend) worst = { item, overspend };
-      }
-
-      kept.splice(kept.indexOf(worst.item), 1);
-      worst.item.decision = worst.item.plan.overflow;
-      worst.item.reason = worst.item.plan.overflow === "dhl"
-        ? `${worst.item.plan.label} kost meer omrijden dan de ${formatMinutes(worst.item.plan.budgetMinutes)} die deze order meebrengt; gaat als pakket via DHL`
-        : `${worst.item.plan.label} kost meer omrijden dan de ${formatMinutes(worst.item.plan.budgetMinutes)} die deze order meebrengt, ook samen met de andere orders richting ${region}`;
-    }
-
-    if (!kept.length) continue;
-    const drive = routeDriveMinutes(optimizedStopOrder(kept.map((item) => item.order)));
-    const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
-    const samen = kept.length > 1 ? `${kept.length} orders richting ${region} samen ` : "";
-    const shared = budget === Infinity
-      ? `${formatMinutes(drive)} rijden richting ${region}; deze slowfeeders gaan altijd zelf, hoe ver ook`
-      : verdict === "review"
-        ? `${samen}${formatMinutes(drive)} rijden, ${formatMinutes(drive - budget)} over de ${kept.length > 1 ? "gezamenlijke " : ""}${formatMinutes(budget)}; net erover, zelf beoordelen`
-        : `${samen}${formatMinutes(drive)} rijden, binnen de ${kept.length > 1 ? "gezamenlijke " : ""}${formatMinutes(budget)}`;
-    for (const item of kept) {
-      item.decision = verdict;
-      item.reason = `${item.plan.label}: ${shared}. ${dueDateReason(item.order)}`;
-    }
-  }
+  for (const [region, candidates] of byRegion) applyPool(region, candidates, evaluatePool(candidates));
+  if (CONFIG.ritregelsV3) poolAcrossSectorLines();
 }
 
 // A parcel that happens to sit next to a planned route is cheaper to drop off
@@ -1709,9 +1871,14 @@ function addNearbyPackages() {
   // them one by one and saved when accepted. Slipping them in here would put
   // them on screen but in neither the saved route nor Shopify.
   if (state.openPlan) return;
-  for (const item of state.decisions.filter((entry) => entry.decision === "dhl")) {
+  const removed = state.manualRoute?.removed || new Set();
+  const parcels = state.decisions.filter((entry) => entry.decision === "dhl" || entry.taggedParcel);
+  for (const item of parcels) {
     const order = item.order;
     if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) continue;
+    // Taken out of this route by the planner: it stays out.
+    if (removed.has(orderKey(order))) continue;
+    if (CONFIG.ritregelsV3 && !hasKnownPoint(order)) continue;
 
     // Routes are packed to the edge of a day before parcels are offered them,
     // so without this a couple of parcels would quietly turn 5:30 into 7:30.
@@ -1727,14 +1894,28 @@ function addNearbyPackages() {
 
     state.routes[best.index] = best.merged;
     item.decision = "include";
-    item.reason = `Pakketorder, maar rit ${best.merged.region} wordt er maar ${formatMinutes(best.grows)} langer van; goedkoper zelf meenemen. ${dueDateReason(order)}`;
+    item.parcel = true;
+    item.reason = `Pakketorder, maar de rit naar ${routeLabel(best.merged)} wordt er maar ${formatMinutes(best.grows)} langer van; goedkoper zelf meenemen. ${dueDateReason(order)}`;
   }
 }
 
 function rebuildPlanning() {
-  state.decisions = state.orders.map((order) => ({ order, ...applyManualDecision(order, decide(order)) }));
+  stopOrderCache = new Map();
+  syncOpenPlan();
+  state.decisions = state.orders.map((order) => {
+    // Already in a route from today on: planned, and out of the weighing, so it
+    // is neither offered as a new route nor lends its budget to one.
+    const planned = plannedFor(order);
+    if (planned) return { order, decision: "planned", planned, reason: `Ingepland in rit ${planned.number || "?"} op ${formatDate(planned.date)}` };
+    return { order, ...applyManualDecision(order, decide(order)) };
+  });
   qualifyCandidates();
   state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
+  // A group just over its budget is still a route to consider, shown apart so
+  // the planner can plan it with one click or take an order out first.
+  state.reviewRoutes = CONFIG.ritregelsV3 && !state.manualRoute && !state.openPlan
+    ? buildRoutes(state.decisions.filter((item) => item.decision === "review" && item.poolReview)).map((route) => ({ ...route, review: true }))
+    : [];
   addNearbyPackages();
   renderSummary();
   renderAgenda();
@@ -1753,45 +1934,60 @@ function formatDateTime(value) {
 }
 
 async function markDelivered(order, button) {
+  if (!order) return;
   if (!ensureOperatorKey()) return;
   if (!window.confirm(`${order.id} als bezorgd melden?`)) return;
+  const reset = () => {
+    button.disabled = false;
+    button.textContent = "Bezorgd";
+  };
   button.disabled = true;
   button.textContent = "Bezig…";
+  let response = null;
   try {
-    const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
+    response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Bezorgd melden mislukt");
-    await refreshData();
-  } catch (error) {
-    window.alert(error.message);
-    button.disabled = false;
-    button.textContent = "Bezorgd";
+  } catch {
+    response = null;
   }
+  if (!response) {
+    window.alert("Bezorgd melden is niet gelukt: geen verbinding. Probeer het opnieuw als je bereik hebt.");
+    reset();
+    return;
+  }
+  if (!response.ok) {
+    window.alert(await errorText(response, "Bezorgd melden is niet gelukt. Probeer het opnieuw."));
+    reset();
+    return;
+  }
+  await refreshData();
 }
 
 async function undoDelivered(id, shopDomain, button) {
   if (!ensureOperatorKey()) return;
-  if (!window.confirm(`${id} terugzetten naar open en Shopify fulfillment proberen te annuleren?`)) return;
+  if (!window.confirm(`${id} terugzetten naar open? De verzending in Shopify wordt dan geannuleerd.`)) return;
   button.disabled = true;
   button.textContent = "Bezig…";
+  let response = null;
   try {
-    const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/undo-delivered`, {
+    response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/undo-delivered`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id, shopDomain }),
     });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Terugdraaien mislukt");
-    await refreshData();
-  } catch (error) {
-    window.alert(error.message);
+  } catch {
+    response = null;
+  }
+  if (!response?.ok) {
+    window.alert(response ? await errorText(response, "Terugdraaien is niet gelukt.") : "Geen verbinding. Probeer het opnieuw.");
     button.disabled = false;
     button.textContent = "Terugdraaien";
+    return;
   }
+  await refreshData();
 }
 
 function storedOperatorKey() {
@@ -1828,6 +2024,8 @@ function ensureOperatorKey() {
 
 // Every backend call carries the operator code. On a rejected code the planner
 // gets one chance to retype it, so a changed code does not need a page reload.
+// A right code that may not do something (403) is not a wrong code: the code
+// stays, and the caller shows why.
 async function backendFetch(url, options = {}) {
   const send = () =>
     fetch(url, {
@@ -1837,7 +2035,12 @@ async function backendFetch(url, options = {}) {
 
   let response = await send();
   if (response.status === 401 && usesBackend && !operatorPromptDeclined) {
-    localStorage.removeItem(operatorKeyStorageKey);
+    try {
+      localStorage.removeItem(operatorKeyStorageKey);
+      localStorage.removeItem(roleStorageKey);
+    } catch {
+      // Nothing stored to forget.
+    }
     state.role = null;
     if (!askOperatorKey("Die code klopt niet. Probeer het opnieuw:")) return response;
     response = await send();
@@ -1845,49 +2048,86 @@ async function backendFetch(url, options = {}) {
   return response;
 }
 
-// full: also fetch the history and the planned routes. Each of those costs a
-// list operation, so the timer only asks for them every fifth tick; anything
-// the planner or driver does, and opening a route, always asks for everything.
+// full: also fetch the planned routes and the deliveries. Each costs a list
+// operation, so the timer only asks for them every fifth tick; anything the
+// planner or driver does, and opening a route, always asks for everything.
+//
+// Refreshes can overlap (the timer, a button, coming back to the tab). Each one
+// is numbered, and an answer that arrives after a newer refresh has started is
+// dropped, so an old list can never put a just-delivered order back on screen.
 async function refreshData(full = true) {
-  const button = document.querySelector("#refreshButton");
-  button.disabled = true;
-  button.textContent = "Bezig…";
+  const seq = ++refreshSeq;
+  const buttons = [document.querySelector("#refreshButton"), document.querySelector("#refreshMobile")].filter(Boolean);
+  buttons.forEach((button) => {
+    button.disabled = true;
+    button.textContent = "Bezig…";
+  });
   try {
     const separator = CONFIG.dataUrl.includes("?") ? "&" : "?";
     const response = await backendFetch(`${CONFIG.dataUrl}${separator}t=${Date.now()}`, { cache: "no-store" });
     if (response.status === 401) throw new Error("Code ontbreekt of klopt niet");
     if (!response.ok) throw new Error("Data kon niet worden geladen");
     const loaded = await response.json();
-    state.allOrders = loaded;
+    if (seq !== refreshSeq) return;
+
+    if (full) {
+      const plan = await fetchPlan();
+      if (seq !== refreshSeq) return;
+      state.plan = plan;
+      const history = await fetchHistory([...new Set(state.plan.flatMap(planKeys))]);
+      if (seq !== refreshSeq) return;
+      if (history) {
+        state.history = history.entries;
+        state.deliveredKeys = new Map([
+          ...history.entries.map((entry) => [`${entry.shopDomain}:${entry.id}`, entry.deliveredAt]),
+          ...Object.entries(history.delivered),
+        ]);
+        state.historyLoaded = true;
+      }
+      state.lastFullAt = Date.now();
+    }
+
+    // The driver's phone gets orders without names or addresses, and the full
+    // details of its own stops alongside the routes: the two are put together.
+    const byKey = new Map(loaded.map((order) => [orderKey(order), order]));
+    for (const stop of state.planStops) byKey.set(orderKey(stop), stop);
+    state.allOrders = [...byKey.values()];
     state.lastFetchOk = true;
-    state.orders = loaded.filter((order) => !(order.dueDate && order.dueDate < hideOrdersDueBefore));
+    state.orders = state.allOrders.filter((order) => !(order.dueDate && order.dueDate < hideOrdersDueBefore));
     // Before rebuildPlanning, because the travel budgets are judged against these.
     await fetchGeo(state.allOrders);
     state.driveMinutes = await fetchDriveMinutes(state.orders);
-    if (full) {
-      state.history = await fetchHistory();
-      state.plan = await fetchPlan();
-    }
+    if (seq !== refreshSeq) return;
     if (!state.role) applyRole(await fetchRole());
     rebuildPlanning();
     renderHistory();
+    state.lastRefreshAt = Date.now();
     const klok = new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date());
-    const bron = state.driveMinutes ? "echte rijtijden" : "geschatte rijtijden";
+    const bron = state.driveMinutes ? "gemeten rijtijden" : "geschatte rijtijden";
     document.querySelector("#syncText").textContent = `Laatst ververst om ${klok} · ${bron}`;
   } catch (error) {
+    if (seq !== refreshSeq) return;
     state.lastFetchOk = false;
-    document.querySelector("#syncText").textContent = `${error.message} — bestaande gegevens blijven staan`;
+    const offline = error instanceof TypeError ? "Geen verbinding" : error.message;
+    document.querySelector("#syncText").textContent = `${offline} — bestaande gegevens blijven staan`;
+    // Redrawn without new data, so screens that depend on the connection say so.
+    renderDriver();
+    renderOpenPlan();
   } finally {
-    button.disabled = false;
-    button.textContent = "Ververs";
+    if (seq === refreshSeq) {
+      buttons.forEach((button) => {
+        button.disabled = false;
+        button.textContent = "Ververs";
+      });
+    }
   }
 }
 
-// Real driving times from the backend, which holds the Google key and caches a
-// measured journey so an address is only ever looked up once. Any failure here
-// leaves state.driveMinutes null and the planning falls back to its estimate.
+// Measured driving times, only when a Google key is set in the backend, which
+// it is not: the planning runs on its own estimate. Once the backend has said
+// so, it is not asked again.
 async function fetchDriveMinutes(orders) {
-  if (!usesBackend) return null;
+  if (!usesBackend || state.driveEstimateUnavailable || state.role === "driver") return null;
   const stops = [...new Set(orders.map(orderAddress).filter(Boolean))];
   if (!stops.length) return null;
   try {
@@ -1896,6 +2136,7 @@ async function fetchDriveMinutes(orders) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ stops }),
     });
+    if (response.status === 501) state.driveEstimateUnavailable = true;
     if (!response.ok) return null;
     const payload = await response.json();
     state.driveDepot = payload.depot || "";
@@ -1928,6 +2169,7 @@ async function fetchPlan() {
     state.dayNotes = payload.dayNotes || [];
     state.announcements = payload.announcements || [];
     state.announceLive = Boolean(payload.announceLive);
+    state.planStops = payload.stops || [];
     return payload.routes || [];
   } catch {
     return state.plan;
@@ -1944,146 +2186,160 @@ function planKeys(planned) {
   });
 }
 
-async function savePlan({ id, date, fromDate, name, keys }) {
+async function savePlan({ id, date, fromDate, name, keys, tagKeys = [] }) {
+  let response = null;
   try {
-    const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/assign`, {
+    response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/assign`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id, date, fromDate, name, orderKeys: keys }),
+      body: JSON.stringify({ id, date, fromDate, name, orderKeys: keys, tagKeys }),
     });
-    if (!response.ok) return null;
-    return (await response.json()).route || null;
   } catch {
-    return null;
+    return { error: "Inplannen is niet gelukt: geen verbinding. Probeer het opnieuw." };
   }
+  if (!response.ok) return { error: await errorText(response, "Inplannen is niet gelukt. Probeer het opnieuw.") };
+  return { route: (await response.json()).route || null };
 }
 
 async function removePlannedRoute(planned) {
-  if (!window.confirm(`Rit ${planned.number || "?"} naar ${planned.name} van ${formatDate(planned.date)} uit de agenda halen?`)) return;
+  if (!planned) return;
+  if (!window.confirm(`Rit ${planned.number || "?"} naar ${planned.name} van ${formatDate(planned.date)} uit de agenda halen? De orders komen terug in de planning.`)) return;
   const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/remove`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ id: planned.id, date: planned.date }),
   }).catch(() => null);
   if (!response?.ok) {
-    window.alert("Uit de agenda halen is niet gelukt. Probeer het opnieuw.");
+    window.alert(response ? await errorText(response, "Uit de agenda halen is niet gelukt.") : "Geen verbinding. Probeer het opnieuw.");
     return;
   }
-  if (state.openPlan?.id === planned.id) closeOpenPlan();
+  if (state.openPlan?.id === planned.id) {
+    state.openPlan = null;
+    state.manualRoute = null;
+  }
   state.plan = await fetchPlan();
   rebuildPlanning();
 }
 
 // Each stored stop, matched against everything the backend returned, not just
 // what the planning shows: an order whose date moved back in Shopify is hidden
-// from the planning but very much alive. Only what can be shown is claimed:
-// delivered when the history says so, otherwise just not found.
+// from the planning but very much alive. Delivered is taken from the delivery
+// records asked for by key, so a stop done a week ago still reads as done; until
+// those have loaded a missing stop is "not yet confirmed", never "not found".
 function plannedRouteStatus(planned) {
   const byKey = new Map(state.allOrders.map((order) => [orderKey(order), order]));
-  const delivered = new Map(state.history.map((entry) => [`${entry.shopDomain}:${entry.id}`, entry]));
   const stops = planKeys(planned).map((key) => {
     const order = byKey.get(key);
-    if (order) return { key, id: order.id, order, status: order.cancelled ? "geannuleerd" : "open" };
-    const done = delivered.get(key);
-    if (done) return { key, id: done.id, status: "bezorgd", at: done.deliveredAt };
-    return { key, id: key.split(":").pop(), status: "onbekend" };
+    if (order && !order.fulfilled) {
+      const status = order.cancelled ? "geannuleerd" : order.refunded ? "terugbetaald" : "open";
+      return { key, id: order.id, order, status };
+    }
+    if (state.deliveredKeys.has(key)) return { key, id: key.split(":").pop(), status: "bezorgd", at: state.deliveredKeys.get(key) };
+    return { key, id: key.split(":").pop(), status: state.historyLoaded ? "onbekend" : "onbevestigd" };
   });
   return { stops, open: stops.filter((stop) => stop.status === "open").map((stop) => stop.order) };
 }
 
 // The same bar the planning applies before a parcel rides along: paid, fully
-// addressed, no slot agreed with the customer. The driver's offer used to skip
-// it, which made it the one door an unpaid order could walk through into the van.
+// addressed, no slot agreed with the customer. Never an order that is already in
+// a route, or it would end up in two.
 function additionAllowed(item) {
   const order = item.order;
-  if (item.decision === "exclude") return false;
+  if (item.decision === "exclude" || item.decision === "planned") return false;
+  if (order.refunded || order.cancelled) return false;
+  if (CONFIG.ritregelsV3 && !hasKnownPoint(order)) return false;
   return Boolean(order.addressComplete && order.paid && !order.deliveryAppointmentLocked);
 }
 
-// Measured against the route as it stands right now. After every acceptance the
+// Measured against the route as it is driven now, stops in their saved order,
+// with the new stop slotted in where it costs least. After every acceptance the
 // list is rebuilt against the grown route, so five offers of "+25 min" can never
 // add up to two hours unnoticed.
+//
+// What may join is what the rules would let join: a parcel when the route grows
+// by at most an hour, unloading included; a rijplaten order or XXL bak when the
+// extra driving stays within its own budget, the same as it would in a new
+// route; a hay house always. Before, every order was held to the parcel's hour,
+// and a rijplaten order an hour and a half's drive away was never offered.
 function nearbyAdditions(orders) {
   if (!orders.length) return [];
   const inRoute = new Set(orders.map(orderKey));
-  const basis = routeSummary("Rit", optimizedStopOrder(orders));
+  const basis = routeSummary("Rit", orders);
   const dayLimit = CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
 
   return state.decisions
     .filter((item) => !inRoute.has(orderKey(item.order)) && additionAllowed(item))
     .map((item) => {
-      const merged = routeSummary("Rit", optimizedStopOrder([...orders, item.order]));
-      return { item, extra: merged.totalMinutes - basis.totalMinutes, totaal: merged.totalMinutes, load: merged.load };
+      let position = orders.length;
+      let bestKm = Infinity;
+      for (let index = 0; index <= orders.length; index += 1) {
+        const km = loopKm([...orders.slice(0, index), item.order, ...orders.slice(index)]);
+        if (km < bestKm) {
+          bestKm = km;
+          position = index;
+        }
+      }
+      const merged = routeSummary("Rit", [...orders.slice(0, position), item.order, ...orders.slice(position)]);
+      return { item, position, extra: merged.totalMinutes - basis.totalMinutes, extraDrive: merged.driveMinutes - basis.driveMinutes, totaal: merged.totalMinutes, load: merged.load, loadKnown: merged.loadKnown };
     })
-    .filter((kandidaat) => kandidaat.extra <= CONFIG.packageDetourMinutes
-      && kandidaat.totaal <= dayLimit
-      && kandidaat.load <= CONFIG.vehicleCapacityKg)
+    .filter((kandidaat) => {
+      if (kandidaat.totaal > dayLimit) return false;
+      if (kandidaat.loadKnown && kandidaat.load > CONFIG.vehicleCapacityKg) return false;
+      const plan = CONFIG.ritregelsV3 ? transportPlan(kandidaat.item.order) : null;
+      if (plan && kandidaat.item.decision !== "dhl") return kandidaat.extraDrive <= plan.budgetMinutes;
+      return kandidaat.extra <= CONFIG.packageDetourMinutes;
+    })
     .sort((a, b) => a.extra - b.extra)
     .slice(0, 5);
 }
 
-// A parcel the rules had on DHL is tagged as own delivery in Shopify before it
-// joins, so whoever prints the DHL labels that morning does not ship it twice.
-async function tagOwnDelivery(order) {
-  try {
-    const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/set-own-delivery`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId }),
-    });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
 
-// The screen only changes once both the Shopify tag and the saved route have
-// gone through. Poor signal at a van is the normal case, and a driver told a
-// stop was added when it was not is worse off than one told it failed.
-async function acceptAddition(order, button) {
+// One stop onto a planned route, by the driver or the planner: saved, tagged in
+// Shopify when it is a parcel, and put where it costs the least driving, all in
+// one request. The screen only changes once that has gone through: a driver told
+// a stop was added when it was not is worse off than one told it failed.
+async function acceptAddition(kandidaat, button) {
   const planned = state.openPlan;
-  if (!planned) return;
+  if (!planned || !kandidaat) return;
+  const order = kandidaat.item.order;
   if (button) {
     button.disabled = true;
     button.textContent = "Bezig…";
   }
+  const open = plannedRouteStatus(planned).open;
+  const keys = planKeys(planned);
+  const volgende = open[kandidaat.position];
+  const position = volgende ? Math.max(0, keys.indexOf(orderKey(volgende))) : keys.length;
+  const nieuw = [...open.slice(0, kandidaat.position), order, ...open.slice(kandidaat.position)];
 
-  const decision = state.decisions.find((item) => orderKey(item.order) === orderKey(order))?.decision;
-  if (decision !== "include" && !(await tagOwnDelivery(order))) {
-    window.alert("Toevoegen is niet gelukt, je rijdt de oorspronkelijke rit. Probeer het opnieuw als je bereik hebt.");
-    renderOpenPlan();
-    return;
-  }
-
-  // One stop onto an existing route, the only change the driver may make to it.
-  let saved = null;
+  let response = null;
   try {
-    const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/add-stop`, {
+    response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/add-stop`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: planned.id, date: planned.date, orderKey: orderKey(order) }),
+      body: JSON.stringify({ id: planned.id, date: planned.date, orderKey: orderKey(order), tag: needsOwnDeliveryTag(order), position, name: routeLabel({ orders: nieuw, region: planned.name }) }),
     });
-    if (response.ok) saved = (await response.json()).route || null;
   } catch {
-    saved = null;
+    response = null;
   }
-  if (!saved) {
-    window.alert("Toevoegen is niet gelukt, je rijdt de oorspronkelijke rit. Probeer het opnieuw als je bereik hebt.");
+  if (!response?.ok) {
+    window.alert(response
+      ? `${await errorText(response, "Toevoegen is niet gelukt.")} Je rijdt de oorspronkelijke rit.`
+      : "Toevoegen is niet gelukt: geen verbinding. Je rijdt de oorspronkelijke rit; probeer het opnieuw als je bereik hebt.");
     renderOpenPlan();
+    renderDriver();
     return;
   }
-
-  state.openPlan = saved;
-  state.plan = await fetchPlan();
-  applyOpenPlan();
+  await refreshData();
 }
 
 // Coordinates for every address not yet known in this browser. The backend
 // keeps what PDOK returned, so after the first time this costs one KV read per
-// address and never another lookup.
+// address and never another lookup. The driver's phone holds no addresses but
+// those of its own stops; the other orders arrive with their point.
 async function fetchGeo(orders) {
   if (!usesBackend) return;
-  const missing = [...new Set(orders.map(orderAddress).filter((address) => address && !(address in state.geo)))];
+  const missing = [...new Set(orders.filter((order) => order.fullAddress && !order.point).map(orderAddress).filter((address) => address && !(address in state.geo)))];
   // Forty at a time, matching the backend's limit per request.
   for (let start = 0; start < missing.length; start += 40) {
     try {
@@ -2106,15 +2362,345 @@ async function fetchGeo(orders) {
   }
 }
 
-async function fetchHistory() {
+// The newest deliveries for the history screen, and for each stop of the
+// routes in view whether and when it was delivered. null on failure: what was
+// known stays, rather than every delivered stop turning into "not found".
+async function fetchHistory(keys = []) {
+  if (!usesBackend) return { entries: [], delivered: {} };
   try {
-    const response = await backendFetch(`${CONFIG.apiBaseUrl}/history?t=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) return [];
-    return await response.json();
+    const query = keys.length ? `&keys=${encodeURIComponent(keys.slice(0, 200).join(","))}` : "";
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/history?t=${Date.now()}${query}`, { cache: "no-store" });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    if (Array.isArray(payload)) return { entries: payload, delivered: {} };
+    return { entries: payload.entries || [], delivered: payload.delivered || {} };
   } catch {
-    return [];
+    return null;
   }
 }
+
+// localStorage can be empty, blocked, or hold something unreadable (a private
+// window, cleared site data). Anything but a clean read falls back quietly.
+function readStored(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+// Whole days from today to a date, counted on the calendar. Midnight to midnight
+// is 23 or 25 hours around the clock change, and rounding up 49 hours called a
+// delivery two days out "three days" once a year.
+function daysUntil(isoDate) {
+  const due = dateFromIso(isoDate);
+  if (!due) return null;
+  return Math.round((due - startOfDay(new Date())) / 86_400_000);
+}
+
+// Two routes either side of a sector line, with stops close to each other, are
+// one drive: Elst and Huissen, 7 km apart, came out as two trips of 1:24 and
+// 1:31 against one of 1:59. Merged only when the stops lie near each other and
+// the day still fits, so routes that merely share a depot stay apart.
+function mergeNeighbourRoutes(routes) {
+  const dayLimit = CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
+  const close = (a, b) => a.orders.some((x) => b.orders.some((y) => distanceKm(orderPoint(x), orderPoint(y)) <= CONFIG.neighbourPoolKm));
+  const list = [...routes];
+  for (;;) {
+    let best = null;
+    for (let i = 0; i < list.length; i += 1) {
+      for (let j = i + 1; j < list.length; j += 1) {
+        if (!close(list[i], list[j])) continue;
+        const combined = routeSummary(list[i].region, optimizedStopOrder([...list[i].orders, ...list[j].orders]));
+        if (combined.totalMinutes > dayLimit) continue;
+        if (combined.loadKnown && combined.load > CONFIG.vehicleCapacityKg) continue;
+        const saving = list[i].totalMinutes + list[j].totalMinutes - combined.totalMinutes;
+        if (saving > 0 && (!best || saving > best.saving)) best = { i, j, combined, saving };
+      }
+    }
+    if (!best) return list;
+    list.splice(best.j, 1);
+    list[best.i] = best.combined;
+  }
+}
+
+// Kilometres as the crow flies, depot out, every stop in this order, depot back.
+function loopKm(orders) {
+  let km = 0;
+  let from = DEPOT_POINT;
+  for (const order of orders) {
+    const point = orderPoint(order);
+    km += distanceKm(from, point);
+    from = point;
+  }
+  return km + distanceKm(from, DEPOT_POINT);
+}
+
+function hasKnownPoint(order) {
+  return Boolean(order.point || state.geo[orderAddress(order)] || estimatedPoint(order));
+}
+
+// Weighs one group without touching it. Orders that go whatever the distance (a
+// hay house) always go; they are the trip's backbone, and every other order is
+// weighed on what it adds to that trip against its own finite budget. Summing
+// their budgets instead made the pool endless, and a single hay house in
+// Hensbroek turned a rijplaten order in Groningen into a 5-hour route of its own.
+function evaluatePool(candidates) {
+  const v3 = CONFIG.ritregelsV3;
+  const fixed = v3 ? candidates.filter((item) => item.plan.budgetMinutes === Infinity) : [];
+  const fixedOrders = fixed.map((item) => item.order);
+  const basis = fixedOrders.length ? routeDriveMinutes(optimizedStopOrder(fixedOrders)) : 0;
+  // In driving order, as buildRoutes will show it. The order list's own
+  // sequence can zigzag: Maastricht, Nijmegen, Geleen read as 476 minutes
+  // against 292 for the route actually driven.
+  const cost = (items) => (items.length ? routeDriveMinutes(optimizedStopOrder([...fixedOrders, ...items.map((item) => item.order)])) - basis : 0);
+
+  const kept = candidates.filter((item) => !fixed.includes(item));
+  const dropped = [];
+  let verdict = "include";
+  while (kept.length) {
+    const drive = cost(kept);
+    const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
+    if (drive <= budget) {
+      verdict = "include";
+      break;
+    }
+    if (drive <= budget * (1 + CONFIG.budgetTolerance)) {
+      verdict = "review";
+      break;
+    }
+    let worst = null;
+    for (const item of kept) {
+      const causes = drive - cost(kept.filter((entry) => entry !== item));
+      const overspend = causes - item.plan.budgetMinutes;
+      if (!worst || overspend > worst.overspend) worst = { item, overspend };
+    }
+    kept.splice(kept.indexOf(worst.item), 1);
+    dropped.push(worst.item);
+  }
+  const drive = cost(kept);
+  const budget = kept.reduce((sum, item) => sum + item.plan.budgetMinutes, 0);
+  return { fixed, kept, dropped, verdict, drive, budget, basis, size: candidates.length };
+}
+
+function applyPool(region, candidates, result) {
+  const { fixed, kept, dropped, verdict, drive, budget } = result;
+  for (const item of candidates) {
+    item.poolRegion = region;
+    item.droppedFromPool = false;
+    item.poolReview = false;
+  }
+  for (const item of dropped) {
+    item.droppedFromPool = true;
+    item.decision = item.plan.overflow;
+    const samen = result.size > 1 ? `, ook samen met de andere orders richting ${region}` : "";
+    item.reason = item.plan.overflow === "dhl"
+      ? `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt; gaat als pakket via DHL`
+      : `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt${samen}`;
+  }
+  for (const item of fixed) {
+    item.decision = "include";
+    item.reason = `${item.plan.label}: ${routeMinutesFromDepot(item.order)}; gaat altijd zelf, hoe ver ook. ${dueDateReason(item.order)}`;
+  }
+  if (!kept.length) return;
+
+  const samen = kept.length > 1 ? `${kept.length} orders richting ${region} samen ` : "";
+  const gezamenlijk = kept.length > 1 ? "gezamenlijke " : "";
+  let shared;
+  if (budget === Infinity) {
+    shared = `${formatMinutes(drive)} rijden richting ${region}; deze slowfeeders gaan altijd zelf, hoe ver ook`;
+  } else if (fixed.length) {
+    const along = verdict === "review"
+      ? `${formatMinutes(drive - budget)} over de ${gezamenlijk}${formatMinutes(budget)}; net erover, zelf beoordelen`
+      : `binnen de ${gezamenlijk}${formatMinutes(budget)}`;
+    shared = `rijdt mee met ${fixed.length === 1 ? "de altijd-eigen order" : "de altijd-eigen orders"} richting ${region}, ${formatMinutes(drive)} extra rijden, ${along}`;
+  } else if (verdict === "review") {
+    shared = `${samen}${formatMinutes(drive)} rijden, ${formatMinutes(drive - budget)} over de ${gezamenlijk}${formatMinutes(budget)}; net erover, zelf beoordelen`;
+  } else {
+    shared = `${samen}${formatMinutes(drive)} rijden, binnen de ${gezamenlijk}${formatMinutes(budget)}`;
+  }
+  for (const item of kept) {
+    item.decision = verdict;
+    item.poolReview = verdict === "review";
+    item.reason = `${item.plan.label}: ${shared}. ${dueDateReason(item.order)}`;
+  }
+}
+
+// The four compass sectors keep the weighing simple, but their lines run through
+// busy country: between Arnhem and Nijmegen, past Zwolle. An order left over in
+// its own sector gets a second try in a neighbouring sector's pool when it lies
+// close to an order there. It is only moved when nobody already in that pool
+// comes off worse for it.
+function poolAcrossSectorLines() {
+  const pooled = state.decisions.filter((item) => item.poolRegion);
+  for (const item of pooled.filter((entry) => entry.droppedFromPool)) {
+    if (!item.droppedFromPool) continue;
+    const point = orderPoint(item.order);
+    const near = (other) => distanceKm(point, orderPoint(other.order)) <= CONFIG.neighbourPoolKm;
+    const regions = [...new Set(pooled.filter((other) => other !== item && other.poolRegion !== item.poolRegion && near(other)).map((other) => other.poolRegion))];
+    for (const region of regions) {
+      const members = pooled.filter((other) => other.poolRegion === region && !other.droppedFromPool);
+      const looseThere = pooled.filter((other) => other.poolRegion === region && other.droppedFromPool && near(other));
+      const group = [...members, ...looseThere, item];
+      const trial = evaluatePool(group);
+      const everyoneKept = members.every((member) => trial.kept.includes(member) || trial.fixed.includes(member));
+      const noneWorse = members.every((member) => member.decision !== "include" || trial.verdict === "include" || trial.fixed.includes(member));
+      if (trial.kept.includes(item) && everyoneKept && noneWorse) {
+        applyPool(region, group, trial);
+        break;
+      }
+    }
+  }
+}
+
+// The orders of a hand-made or opened route, as they stand now. Only keys are
+// kept, so a stop that was delivered or cancelled meanwhile drops out instead of
+// lingering with a live Bezorgd button.
+function manualRouteOrders() {
+  const route = state.manualRoute;
+  if (!route) return [];
+  const byKey = new Map(state.allOrders.map((order) => [orderKey(order), order]));
+  return route.keys.map((key) => byKey.get(key)).filter((order) => order && !order.cancelled && !order.fulfilled);
+}
+
+// An opened planned route follows its saved record on every refresh: the stops
+// the driver has left, in the order the driver drives them.
+function syncOpenPlan() {
+  if (!state.openPlan) return;
+  const fresh = state.plan.find((planned) => planned.id === state.openPlan.id);
+  if (!fresh) {
+    state.openPlan = null;
+    state.manualRoute = null;
+    return;
+  }
+  state.openPlan = fresh;
+  const status = plannedRouteStatus(fresh);
+  state.manualRoute = { keys: status.open.map(orderKey), keepOrder: true, removed: new Set() };
+}
+
+// Parcels (and XXL bakken, which go either way) are tagged "eigen bezorging" in
+// Shopify when they go into a route, so whoever prints the DHL labels skips them.
+// Rijplaten and the fixed-list slowfeeders always go by van and need no tag.
+function needsOwnDeliveryTag(order) {
+  if (order.ownDeliveryTagged) return false;
+  const plan = transportPlan(order);
+  return !plan || plan === transportRules.xxl;
+}
+
+// Due today or earlier, and still to be driven or decided on.
+function urgentDecisions() {
+  return state.decisions.filter((item) => {
+    if (!["include", "review", "planned"].includes(item.decision)) return false;
+    const days = item.order.dueDate ? daysUntil(item.order.dueDate) : null;
+    return days !== null && days <= 0;
+  });
+}
+
+function capitalize(text) {
+  const value = String(text || "");
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+// One line per stop that is no longer to be driven, the same for planner and
+// driver. "Not yet confirmed" while the delivery records have not loaded, so a
+// stop delivered this morning is never called "not found" over a lost signal.
+function stopStatusLine(stop) {
+  const id = escapeHtml(stop.id);
+  if (stop.status === "bezorgd") return `<li class="plan-stop klaar"><s>${id}</s> bezorgd${stop.at ? ` op ${formatDateTime(stop.at)}` : ""}</li>`;
+  if (stop.status === "geannuleerd") return `<li class="plan-stop fout">${id} is geannuleerd, niet afleveren</li>`;
+  if (stop.status === "terugbetaald") return `<li class="plan-stop fout">${id} is terugbetaald, niet afleveren</li>`;
+  if (stop.status === "onbevestigd") return `<li class="plan-stop">${id}: status nog niet bevestigd, ververs zo even</li>`;
+  return `<li class="plan-stop fout">${id} staat niet meer open. Bel de planner voor je gaat.</li>`;
+}
+
+// Navigation from wherever the van is now, through the stops that are left, in
+// their planned order. No starting point: halfway through a route the depot is
+// the wrong place to start from.
+function driverMapsUrl(orders) {
+  const url = new URL("https://www.google.com/maps/dir/");
+  url.searchParams.set("api", "1");
+  url.searchParams.set("travelmode", "driving");
+  url.searchParams.set("destination", mapsAddress(orders[orders.length - 1]));
+  if (orders.length > 1) url.searchParams.set("waypoints", orders.slice(0, -1).map(mapsAddress).join("|"));
+  return url.toString();
+}
+
+// "+31 (0)6 1234 5678" is how people write it; the (0) has to go, or the phone
+// dials +3106.
+function telHref(number) {
+  const cleaned = String(number).replace(/^\s*\+(\d{1,3})\s*\(0\)\s*/, "+$1").replace(/[^\d+]/g, "");
+  return `tel:${cleaned}`;
+}
+
+function logout() {
+  if (!window.confirm("Uitloggen op dit apparaat? De code wordt hier vergeten; op andere apparaten blijft alles zoals het is.")) return;
+  try {
+    localStorage.removeItem(operatorKeyStorageKey);
+    localStorage.removeItem(roleStorageKey);
+  } catch {
+    // Nothing stored to forget.
+  }
+  window.location.reload();
+}
+
+// Taking a stop out of an opened planned route, saved at once. The stop comes
+// back into the planning; the driver no longer sees it.
+async function removePlannedStop(key) {
+  const planned = state.openPlan;
+  if (!planned) return;
+  const order = state.allOrders.find((item) => orderKey(item) === key);
+  const naam = order?.id || key.split(":").pop();
+  if (!window.confirm(`${naam} uit rit ${planned.number || "?"} halen? De bezorger ziet deze stop dan niet meer en de order komt terug in de planning.`)) return;
+  const over = plannedRouteStatus(planned).open.filter((item) => orderKey(item) !== key);
+  const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/remove-stop`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: planned.id, date: planned.date, orderKey: key, name: over.length ? routeLabel({ orders: over, region: planned.name }) : planned.name }),
+  }).catch(() => null);
+  if (!response?.ok) {
+    window.alert(await errorText(response, "Uit de rit halen is niet gelukt. Probeer het opnieuw."));
+    return;
+  }
+  const payload = await response.json();
+  state.plan = await fetchPlan();
+  if (payload.removed) {
+    closeOpenPlan();
+    return;
+  }
+  applyOpenPlan();
+}
+
+// The error the backend gave, in its own words, or a fallback when there was
+// no answer at all.
+async function errorText(response, fallback) {
+  if (!response) return fallback;
+  try {
+    const payload = await response.json();
+    return payload.error || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+// The routes on screen: the proposals that fit, then the ones just over budget.
+function allRoutes() {
+  return [...state.routes, ...state.reviewRoutes];
+}
+
+// Proposals are lettered, planned routes numbered. A proposal called "Rit 2"
+// next to the planned rit 2 of last week read as the same route.
+function routeTitle(route, index) {
+  if (state.openPlan) return `Rit ${state.openPlan.number || "?"}`;
+  if (state.manualRoute) return "Eigen selectie";
+  return `${route.review ? "Controleren" : "Voorstel"} ${routeLetter(index)}`;
+}
+
+function routeLetter(index) {
+  return index < 26 ? String.fromCharCode(65 + index) : String(index + 1);
+}
+
+// @@APPEND@@
 
 document.querySelector("#refreshButton").addEventListener("click", () => {
   // Verversen is the way back in after cancelling the code prompt.
@@ -2146,6 +2732,7 @@ document.querySelector("#backToAutoButton")?.addEventListener("click", () => {
   activeMapRouteIndex = 0;
   rebuildPlanning();
 });
+document.querySelectorAll(".logout-button").forEach((button) => button.addEventListener("click", logout));
 
 document.querySelector("#refreshMobile")?.addEventListener("click", () => {
   operatorPromptDeclined = false;
@@ -2154,15 +2741,26 @@ document.querySelector("#refreshMobile")?.addEventListener("click", () => {
 });
 
 // The menu on the left switches views; the page always opens on Vandaag.
-document.querySelectorAll(".nav-item").forEach((item) => {
+document.querySelectorAll(".nav-item[data-view]").forEach((item) => {
   item.addEventListener("click", () => showView(item.dataset.view));
 });
 
 renderRules();
+// The role this code had last time, straight away: a driver's phone opens on the
+// driver's screen even before, or without, a connection to ask again.
+try {
+  const knownRole = storedOperatorKey() ? localStorage.getItem(roleStorageKey) : null;
+  if (knownRole === "driver" || knownRole === "planner") applyRole(knownRole);
+} catch {
+  // Asked on the first refresh instead.
+}
 ensureOperatorKey();
 refreshData();
 // A screen out of view (a phone in a pocket, a tab behind another) asks for
-// nothing. Coming back into view catches up at once.
+// nothing. Coming back into view catches up, but not more than once a minute,
+// and the full refresh (three list operations) at most every ten: someone
+// switching between Shopify and this tab all day would otherwise use up the
+// free plan's 1,000 list operations on tab switches alone.
 let refreshTick = 0;
 setInterval(() => {
   if (document.visibilityState !== "visible") return;
@@ -2170,5 +2768,7 @@ setInterval(() => {
   refreshData(refreshTick % 5 === 0);
 }, CONFIG.refreshMs);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") refreshData(true);
+  if (document.visibilityState !== "visible") return;
+  if (Date.now() - (state.lastRefreshAt || 0) < 60_000) return;
+  refreshData(Date.now() - (state.lastFullAt || 0) > 10 * 60_000);
 });

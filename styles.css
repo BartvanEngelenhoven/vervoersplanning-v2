@@ -203,6 +203,7 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
 .route-card-top { gap: .75rem; }
 .route-number { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 10px; background: var(--brand); color: var(--accent); font-weight: 900; }
 .route-card-top b, .route-card-top span { display: block; }
+.route-card-top .route-number { display: grid; place-items: center; flex: none; }
 .route-meta { color: var(--muted); font-size: .8rem; }
 .route-stops { position: relative; margin: 1rem 0; padding-left: 2rem; }
 .route-stops::before { content: ""; position: absolute; left: .72rem; top: .7rem; bottom: .7rem; width: 2px; background: #ccd7d1; }
@@ -212,7 +213,8 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
 .route-stops span { color: var(--muted); font-size: .8rem; }
 .remove-route-stop { position: absolute; left: -2.1rem; top: .28rem; z-index: 2; display: grid; place-items: center; width: 1.35rem; height: 1.35rem; border: 1px solid #d6e0da; border-radius: 999px; background: white; color: #9a3c32; font-size: 1.1rem; font-weight: 950; line-height: 1; }
 .remove-route-stop:hover { border-color: #d48a82; background: #fff1ef; }
-.route-footer { display: flex; align-items: center; justify-content: space-between; gap: .7rem; padding-top: .75rem; border-top: 1px solid var(--line); }
+.route-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .7rem; padding-top: .75rem; border-top: 1px solid var(--line); }
+.route-footer .route-load { flex: 1 1 100%; }
 .route-load { color: var(--muted); font-size: .8rem; }
 .button { min-height: 40px; padding: .55rem .8rem; border: 0; border-radius: 9px; font-weight: 750; }
 .button.secondary { background: white; color: var(--brand); }
@@ -232,8 +234,6 @@ a.button { display: inline-flex; align-items: center; justify-content: center; t
 .history-panel summary:hover { background: #f6f8f5; }
 .history-panel summary:focus-visible { outline: 2px solid var(--brand-2); outline-offset: -2px; }
 .history-count { display: inline-flex; align-items: center; gap: .5rem; color: var(--muted); font-size: .85rem; font-weight: 650; white-space: nowrap; }
-.history-count::after { content: ""; width: .5rem; height: .5rem; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(45deg) translate(-2px, -2px); transition: transform .15s ease; }
-.history-panel details[open] .history-count::after { transform: rotate(225deg) translate(-2px, -2px); }
 .history-panel details[open] summary { border-bottom: 1px solid var(--line); }
 .history-list { display: grid; gap: .65rem; padding: .85rem; }
 .history-item { display: flex; align-items: center; justify-content: space-between; gap: .8rem; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
@@ -246,7 +246,9 @@ a.button { display: inline-flex; align-items: center; justify-content: center; t
 
 @media (max-width: 1050px) {
   .workspace, .rules-panel { grid-template-columns: 1fr; }
-  .route-panel { position: static; }
+  /* Stacked on a phone, the route list is part of the page. As its own
+     scroll box it kept the page from scrolling on to the map below. */
+  .route-panel { position: static; max-height: none; overflow: visible; overscroll-behavior: auto; }
   .map-view, .routes-overview { grid-template-columns: 1fr; }
   .google-map-card, .google-map-card iframe { height: 440px; min-height: 440px; }
   .rules-grid { grid-template-columns: repeat(3, minmax(0,1fr)); }
@@ -334,7 +336,7 @@ details[open] > summary .fold-hint::after { content: " ▴"; }
 .agenda-panel { margin-bottom: 1rem; }
 .agenda-days { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: .7rem; padding: .85rem; }
 .agenda-day { padding: .8rem .9rem; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
-.agenda-day h3 { margin: 0 0 .5rem; font-size: .9rem; text-transform: capitalize; }
+.agenda-day h3 { margin: 0 0 .5rem; font-size: .9rem; }
 .agenda-day.vandaag { border-color: var(--brand-2); box-shadow: inset 3px 0 0 var(--brand-2); }
 .agenda-day.achterstallig { border-color: var(--bad); box-shadow: inset 3px 0 0 var(--bad); }
 .agenda-day.leeg { opacity: .6; }
@@ -394,6 +396,7 @@ details[open] > summary .fold-hint::after { content: " ▴"; }
   stroke-linecap: round; stroke-linejoin: round; }
 .nav-item:hover { background: rgba(255,255,255,.08); color: #fff; }
 .nav-item.active { background: #f4f7f5; color: var(--brand); }
+a.nav-item { text-decoration: none; }
 .nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .nav-quiet { margin-top: .6rem; opacity: .8; }
 .nav-count { margin-left: auto; min-width: 1.4rem; height: 1.4rem; padding: 0 .4rem; display: inline-flex;
@@ -453,6 +456,8 @@ details[open] > summary .fold-hint::after { content: " ▴"; }
     font-size: .68rem; text-align: center; position: relative; }
   .nav-item svg { width: 22px; height: 22px; }
   .nav-quiet { margin-top: 0; }
+  /* Six fit the bar; the manual is one tap away from Regels on a phone. */
+  .nav-item[href] { display: none; }
   .nav-count { position: absolute; top: .15rem; right: 18%; margin: 0; min-width: 1.1rem; height: 1.1rem; font-size: .62rem; }
   .content { padding: 1rem .9rem calc(84px + env(safe-area-inset-bottom)); }
   .mobile-brand { display: flex; }
@@ -477,7 +482,7 @@ details[open] > summary .fold-hint::after { content: " ▴"; }
 
 .driver-view { max-width: 760px; }
 .driver-day { margin-bottom: 1.4rem; }
-.driver-day h2 { margin: 0 0 .6rem; font-size: 1.05rem; text-transform: capitalize; }
+.driver-day h2 { margin: 0 0 .6rem; font-size: 1.05rem; }
 .driver-day.vandaag h2 { color: var(--brand-2); }
 .driver-route { display: grid; gap: .2rem; width: 100%; margin-bottom: .6rem; padding: 1rem 1.1rem; text-align: left;
   border: 1px solid var(--line); border-left: 5px solid var(--brand-2); border-radius: 14px; background: var(--paper);
@@ -538,3 +543,21 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
 .agenda-announce.laat { background: #fdf6e0; color: #6b4d00; }
 .badge-announced { display: inline-block; margin-left: .35rem; padding: .05rem .4rem; border-radius: 6px;
   background: #e3f3ea; color: #0f5a37; font-size: .72rem; font-weight: 800; vertical-align: middle; }
+
+/* --- September 2026 review --------------------------------------------- */
+.badge.planned { color: #0f4f56; background: #d8eef0; }
+.badge.planned::before { content: "▤"; }
+.map-dot.planned { background: #1f6f78; }
+.badge-planned { display: inline-flex; align-items: center; gap: .3rem; font-size: .75rem; font-weight: 700; color: #0f4f56; }
+.badge-planned .rit-nummer { font-size: .72rem; }
+.order-select:disabled + span { opacity: .45; }
+.route-card.review { border-color: #e7c565; background: #fffaf0; }
+.route-card.review .route-number { background: #c7810c; color: #fff; }
+.route-overview-card.review { border-color: #e7c565; background: #fffaf0; }
+.agenda-announce.fout { background: #fbe4e0; color: #8c352c; font-weight: 650; }
+.open-plan-hint { margin: .2rem 0 .6rem; color: var(--muted); font-size: .85rem; }
+.history-note { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+.rules-foot { margin-top: 1.2rem; }
+.driver-foot { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1.6rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.driver-day.eerder h2 { color: var(--bad); }
+.plan-stop:not(.klaar):not(.fout) { color: var(--muted); }

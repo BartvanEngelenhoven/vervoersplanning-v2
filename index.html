@@ -4,9 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="Dagplanning voor eigen bezorging vanuit Shopify." />
+    <!-- The page holds customer data and the access code. Only this site, the
+         backend, the map tiles and the pinned Leaflet copy may run or load
+         anything; inline script (the way injected markup would run) may not. -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' https://unpkg.com; img-src 'self' data: https://*.tile.openstreetmap.org; connect-src 'self' https://vervoersplanning-v2-backend.bart-a5e.workers.dev; frame-src https://maps.google.com https://www.google.com; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <meta name="referrer" content="no-referrer" />
     <title>Vervoersplanning</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3029'/%3E%3Cpath d='M13 37h31l6 7v7H13z' fill='%23f3b43f'/%3E%3Ccircle cx='23' cy='51' r='6' fill='%23f7f3e8'/%3E%3Ccircle cx='45' cy='51' r='6' fill='%23f7f3e8'/%3E%3Cpath d='M18 14h28v21H18z' fill='%23f7f3e8'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -44,13 +49,18 @@
           </button>
           <button class="nav-item nav-quiet" type="button" data-view="uitleg">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg>
-            <span>Uitleg</span>
+            <span>Regels</span>
           </button>
+          <a class="nav-item nav-quiet" href="handleiding.html">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 21.5V5.5M8 7h8M8 11h6"/></svg>
+            <span>Handleiding</span>
+          </a>
         </nav>
 
         <div class="sidebar-foot">
           <span id="syncText" class="sync-text">Gegevens laden…</span>
           <button id="refreshButton" class="button secondary" type="button">Ververs</button>
+          <button class="button subtle-action logout-button" type="button">Uitloggen</button>
         </div>
       </aside>
 
@@ -105,7 +115,7 @@
         <section class="view" data-view="agenda" hidden>
           <div class="view-head">
             <h1>Agenda</h1>
-            <p>Tik op een dag om er een rit op te zetten. Ingeplande ritten krijgen een vast ritnummer.</p>
+            <p>Kies op Vandaag bij een voorstel <b>Inplannen</b> en tik dan hier op een dag. Een ingeplande rit krijgt een vast ritnummer dat nooit terugkomt.</p>
           </div>
           <div id="routeInHand" class="notice-bar" hidden></div>
           <div id="agendaDays" class="agenda-days"></div>
@@ -117,7 +127,7 @@
               <div><h1 class="view-title">Orders</h1></div>
               <div class="filters">
                 <label class="search"><span>Zoeken</span><input id="searchInput" type="search" placeholder="Order, klant of plaats" /></label>
-                <label><span>Status</span><select id="decisionFilter"><option value="all">Alles</option><option value="include">Meenemen</option><option value="review">Controleren</option><option value="dhl">DHL</option><option value="far">Te ver</option><option value="exclude">Niet meenemen</option></select></label>
+                <label><span>Status</span><select id="decisionFilter"><option value="all">Alles</option><option value="urgent">Vandaag of te laat</option><option value="include">Meenemen</option><option value="planned">Ingepland</option><option value="review">Controleren</option><option value="dhl">DHL</option><option value="far">Te ver</option><option value="exclude">Niet meenemen</option></select></label>
               </div>
             </div>
             <div id="selectionBar" class="selection-bar" hidden>
@@ -154,9 +164,10 @@
         <section class="view" data-view="uitleg" hidden>
           <div class="view-head">
             <h1>Hoe de planning kiest</h1>
-            <p>Deze regels worden rechtstreeks uit de planning gelezen, dus ze kloppen altijd met wat er gebeurt.</p>
+            <p>Deze regels worden rechtstreeks uit de planning gelezen, dus ze kloppen met wat er gebeurt. Hoe je de site gebruikt, staat in de <a href="handleiding.html">handleiding</a>.</p>
           </div>
           <div id="rulesBody" class="rules-grid"></div>
+          <p class="rules-foot"><button class="button subtle-action logout-button" type="button">Uitloggen op dit apparaat</button></p>
         </section>
       </main>
     </div>
@@ -169,7 +180,7 @@
       </article>
     </template>
 
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="" defer></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
     <script src="config.js" defer></script>
     <script src="app.js" defer></script>
   </body>
