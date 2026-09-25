@@ -612,6 +612,56 @@ await test("een notitie van de planner overschrijft een afgebroken rit niet", as
   assert.equal(plan.note, "Bel de klant");
 });
 
+await test("concept: opslaan, houdt orders vast, inplannen haalt het concept weg", async () => {
+  const env = makeEnv();
+  const a = await seedOrder(env, DRS, "#DRS700");
+  const b = await seedOrder(env, DRS, "#DRS701");
+  const c = await seedOrder(env, DRS, "#DRS702");
+  const id = "33333333-aaaa-bbbb-cccc-000000000003";
+  assert.equal((await call(env, "POST", "/concepts/save", { key: DRIVER, body: { id, orderKeys: [a.key] } })).status, 403, "alleen de planner");
+  const saved = await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id, name: "Doorn", orderKeys: [a.key, b.key] } });
+  assert.equal(saved.status, 200);
+  const plan = (await call(env, "GET", "/plan", { key: PLANNER })).data;
+  assert.equal(plan.concepts.length, 1);
+  assert.deepEqual(plan.concepts[0].orderKeys, [a.key, b.key]);
+  const driverPlan = (await call(env, "GET", "/plan", { key: DRIVER })).data;
+  assert.ok(!driverPlan.concepts, "de bezorger krijgt geen concepten");
+  assert.deepEqual(driverPlan.heldKeys.sort(), [a.key, b.key].sort());
+
+  const second = await call(env, "POST", "/concepts/save", { key: PLANNER, body: { name: "Anders", orderKeys: [b.key, c.key] } });
+  assert.equal(second.status, 409, "een order in twee concepten");
+  const planWithHeld = await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(1), orderKeys: [a.key] } });
+  assert.equal(planWithHeld.status, 409, "een order uit een concept los inplannen");
+  assert.match(planWithHeld.data.error, /concept Doorn/);
+
+  // Changing the concept keeps its creation date.
+  const changed = await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id, name: "Doorn en meer", orderKeys: [a.key, b.key, c.key] } });
+  assert.equal(changed.data.concept.createdAt, saved.data.concept.createdAt);
+
+  const planned = await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(1), name: "Doorn en meer", orderKeys: [a.key, b.key, c.key], conceptId: id } });
+  assert.equal(planned.status, 200, JSON.stringify(planned.data));
+  const after = (await call(env, "GET", "/plan", { key: PLANNER })).data;
+  assert.equal(after.concepts.length, 0, "het concept is een rit geworden");
+  assert.equal(after.routes.length, 1);
+  const again = await call(env, "POST", "/concepts/save", { key: PLANNER, body: { orderKeys: [a.key] } });
+  assert.equal(again.status, 409, "een ingeplande order kan niet in een concept");
+});
+
+await test("concept: de bezorger kan een concept-order niet meenemen, verwijderen geeft hem vrij", async () => {
+  const env = makeEnv();
+  const a = await seedOrder(env, DRS, "#DRS710");
+  const b = await seedOrder(env, DRS, "#DRS711");
+  await env.PLANNING_ORDERS.put("geo:voorbeeldweg 1, 3941 bx doorn, nl", JSON.stringify({ lat: 52.03, lon: 5.32 }));
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), orderKeys: [a.key] } })).data.route;
+  const id = "44444444-aaaa-bbbb-cccc-000000000004";
+  await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id, name: "Later", orderKeys: [b.key] } });
+  const blocked = await call(env, "POST", "/plan/add-stop", { key: DRIVER, body: { id: route.id, date: route.date, orderKey: b.key } });
+  assert.equal(blocked.status, 409);
+  assert.equal((await call(env, "POST", "/concepts/remove", { key: PLANNER, body: { id } })).status, 200);
+  const free = await call(env, "POST", "/plan/add-stop", { key: DRIVER, body: { id: route.id, date: route.date, orderKey: b.key } });
+  assert.equal(free.status, 200, JSON.stringify(free.data));
+});
+
 // --- The announcement --------------------------------------------------------
 
 function scheduledAt(iso) {

@@ -255,6 +255,26 @@ test("een onafgemaakte rit van gisteren houdt zijn orders vast", () => {
   assert.equal(afgebroken.decision(doorn), "include", "na afbreken is hij weer vrij");
 });
 
+test("een order in een concept wordt niet voorgesteld en niet aangeboden", () => {
+  const doorn = order("Doorn", 52.03, 5.32);
+  const woerden = order("Woerden", 52.09, 4.88);
+  v3.state.concepts = [{ id: "c1", name: "Woerden", orderKeys: [`${DRS}:${woerden.id}`], createdAt: "2026-09-25T10:00:00Z" }];
+  const uitkomst = plan(v3, [doorn, woerden]);
+  v3.state.concepts = [];
+  assert.equal(uitkomst.decision(woerden), "concept");
+  assert.ok(uitkomst.routes.every((route) => route.orders.every((item) => item.id !== woerden.id)));
+  assert.ok(!v3.fn.nearbyAdditions([doorn]).some((kandidaat) => kandidaat.item.order.id === woerden.id));
+});
+
+test("de bezorger krijgt een concept-order niet aangeboden", () => {
+  const doorn = order("Doorn", 52.03, 5.32);
+  const woerden = order("Woerden", 52.09, 4.88);
+  v3.state.heldKeys = new Set([`${DRS}:${woerden.id}`]);
+  const uitkomst = plan(v3, [doorn, woerden]);
+  v3.state.heldKeys = new Set();
+  assert.equal(uitkomst.decision(woerden), "concept");
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);

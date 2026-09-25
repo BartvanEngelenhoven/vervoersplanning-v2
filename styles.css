@@ -453,9 +453,9 @@ a.nav-item { text-decoration: none; }
     flex-direction: row; gap: 0; padding: .3rem .35rem calc(.3rem + env(safe-area-inset-bottom)); overflow: visible;
     box-shadow: 0 -4px 18px rgba(0,0,0,.18); }
   .sidebar-brand, .sidebar-foot { display: none; }
-  .sidebar-nav { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .15rem; width: 100%; }
-  .nav-item { flex-direction: column; justify-content: center; gap: .15rem; min-height: 54px; padding: .3rem .1rem;
-    font-size: .68rem; text-align: center; position: relative; }
+  .sidebar-nav { grid-template-columns: repeat(7, minmax(0, 1fr)); gap: .1rem; width: 100%; }
+  .nav-item { flex-direction: column; justify-content: center; gap: .15rem; min-height: 54px; padding: .3rem 0;
+    font-size: .62rem; letter-spacing: -.01em; text-align: center; position: relative; }
   .nav-item svg { width: 22px; height: 22px; }
   .nav-quiet { margin-top: 0; }
   /* Six fit the bar; the manual is one tap away from Regels on a phone. */
@@ -565,3 +565,28 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
 .plan-stop:not(.klaar):not(.fout) { color: var(--muted); }
 .sidebar-foot .logout-button { background: transparent; color: #dbe6e1; border-color: rgba(255,255,255,.25); }
 .open-plan .open-plan-hint { margin: .2rem 1.25rem .6rem; }
+
+/* --- Concepten ---------------------------------------------------------- */
+.concept-list { display: grid; gap: .9rem; }
+.concept-card { display: grid; gap: .7rem; padding: 1rem 1.1rem; background: var(--paper); border: 1px solid var(--line); border-left: 5px solid #7a5c2e; border-radius: 14px; }
+.concept-card h2 { margin: 0; font-size: 1.1rem; }
+.concept-card .concept-head p { margin: .2rem 0 0; color: var(--muted); font-size: .88rem; }
+.concept-age { display: inline-block; margin-left: .3rem; padding: .05rem .4rem; border-radius: 6px; background: #fdf6e0; color: #6b4d00; font-weight: 700; font-size: .78rem; }
+.concept-stops { margin: 0; padding-left: 1.3rem; display: grid; gap: .3rem; }
+.concept-stops li b, .concept-stops li span { display: block; }
+.concept-stops li span { color: var(--muted); font-size: .85rem; }
+.concept-gone { margin: 0; padding: .45rem .6rem; border-radius: 8px; background: #fbe4e0; color: #8c352c; font-size: .85rem; }
+.concept-actions { display: flex; flex-wrap: wrap; gap: .45rem; }
+.concept-bar { border-left: 5px solid #7a5c2e; }
+.concept-bar-actions { display: flex; gap: .45rem; flex-wrap: wrap; }
+.concept-bar[hidden] { display: none; }
+.badge.concept { color: #5e4520; background: #f1e6d3; }
+.badge.concept::before { content: "✎"; }
+.map-dot.concept { background: #7a5c2e; }
+.nav-item .nav-short { display: none; }
+/* The bottom bar is a seventh of a phone wide: the long word does not fit. */
+@media (max-width: 860px) {
+  .nav-item .nav-long { display: none; }
+  .nav-item .nav-short { display: inline; }
+}
+.route-footer .save-concept { margin-left: auto; }

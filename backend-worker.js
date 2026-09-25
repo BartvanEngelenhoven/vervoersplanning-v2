@@ -168,6 +168,14 @@ async function route(request, env) {
     return json({ report, live: announceLive(env) }, 200, env);
   }
 
+  if (request.method === "POST" && url.pathname === "/concepts/save") {
+    return saveConcept(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/concepts/remove") {
+    return removeConcept(request, env);
+  }
+
   if (request.method === "POST" && url.pathname === "/plan/remove-stop") {
     return removePlanStop(request, env);
   }
@@ -491,6 +499,15 @@ async function createShopifyFulfillment(shopDomain, token, shopifyOrderId, notif
 
 // Planned stops from `from` to `to` (inclusive), as order key -> route. Used to
 // hold the driver to their own routes and to keep one order out of two routes.
+// Orders held by a concept, as order key -> concept.
+async function conceptStops(env) {
+  const names = (await listAll(env, CONCEPT_PREFIX)).map((key) => key.name);
+  const concepts = (await Promise.all(names.map((name) => env.PLANNING_ORDERS.get(name, "json")))).filter(Boolean);
+  const stops = new Map();
+  for (const concept of concepts) for (const key of concept.orderKeys || []) stops.set(key, concept);
+  return stops;
+}
+
 async function plannedStops(env, from, to) {
   const keys = (await listAll(env, PLAN_PREFIX)).map((key) => key.name)
     .filter((name) => {
@@ -1139,6 +1156,12 @@ async function getPlan(request, env) {
   planned.sort((a, b) => `${a.date}${String(a.number || 0).padStart(6, "0")}`.localeCompare(`${b.date}${String(b.number || 0).padStart(6, "0")}`));
 
   const body = { routes: planned, dayNotes: dayNotes.filter(Boolean), announcements: announcements.filter(Boolean), announceLive: announceLive(env) };
+  // Concepts come along in the same listing. The planner gets them whole; the
+  // driver only learns which orders they hold, so "kan er nog bij" leaves those
+  // alone.
+  const concepts = (await Promise.all(names.filter((name) => name.startsWith(CONCEPT_PREFIX)).map((name) => env.PLANNING_ORDERS.get(name, "json")))).filter(Boolean);
+  if (role === "driver") body.heldKeys = [...new Set(concepts.flatMap((concept) => concept.orderKeys || []))];
+  else body.concepts = concepts.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
   if (role === "driver") {
     // Name, address, phone and note of the stops on the driver's own routes: the
     // only customers whose details the phone is given.
@@ -1188,6 +1211,13 @@ async function assignPlanRoute(request, env) {
   }
   const sameRoute = (route) => route.id === id && (route.date === date || route.date === fromDate);
   const conflicts = orderKeys.filter((key) => stops.has(key) && !sameRoute(stops.get(key)));
+  const conceptId = String(payload.conceptId || "");
+  const held = await conceptStops(env);
+  const heldElsewhere = orderKeys.filter((key) => held.has(key) && held.get(key).id !== conceptId);
+  if (heldElsewhere.length) {
+    const first = held.get(heldElsewhere[0]);
+    return json({ error: `${heldElsewhere.map((key) => key.split(":").pop()).join(", ")} ${heldElsewhere.length === 1 ? "staat" : "staan"} in het concept ${first.name}. Haal ${heldElsewhere.length === 1 ? "die" : "ze"} daar eerst uit.`, conflicts: heldElsewhere }, 409, env);
+  }
   if (conflicts.length) {
     const first = stops.get(conflicts[0]);
     return json({
@@ -1226,7 +1256,55 @@ async function assignPlanRoute(request, env) {
   // Moving a route to another day writes the new record and drops the old one,
   // so the same route can never sit on two days at once.
   if (fromDate && fromDate !== date) await env.PLANNING_ORDERS.delete(`${PLAN_PREFIX}${fromDate}:${id}`);
+  // A concept that is planned is a route now; the draft goes.
+  if (conceptId && held.size && [...held.values()].some((concept) => concept.id === conceptId)) {
+    await env.PLANNING_ORDERS.delete(`${CONCEPT_PREFIX}${conceptId}`);
+  }
   return json({ route: record }, 200, env);
+}
+
+// A concept: a route put together and kept for later, not yet on a day and
+// without a number. It holds its orders, so they are not proposed or planned a
+// second time. Only the planner makes, changes or removes one. Kept under the
+// "plan" prefix so the one listing each refresh already does picks it up.
+const CONCEPT_PREFIX = "plan-concept:";
+
+async function saveConcept(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const orderKeys = cleanKeys(payload.orderKeys);
+  const id = /^[A-Za-z0-9-]{8,64}$/.test(String(payload.id || "")) ? String(payload.id) : crypto.randomUUID();
+  if (!orderKeys.length) return json({ error: "Een concept heeft minstens één stop nodig." }, 400, env);
+
+  const stops = await plannedStops(env, shiftDay(amsterdamNow().day, -7), "9999-12-31");
+  const planned = orderKeys.filter((key) => stops.has(key));
+  if (planned.length) {
+    const first = stops.get(planned[0]);
+    return json({ error: `${planned.map((key) => key.split(":").pop()).join(", ")} ${planned.length === 1 ? "staat" : "staan"} al in rit ${first.number || "?"} op ${first.date}.`, conflicts: planned }, 409, env);
+  }
+  const held = await conceptStops(env);
+  const elsewhere = orderKeys.filter((key) => held.has(key) && held.get(key).id !== id);
+  if (elsewhere.length) {
+    const first = held.get(elsewhere[0]);
+    return json({ error: `${elsewhere.map((key) => key.split(":").pop()).join(", ")} ${elsewhere.length === 1 ? "staat" : "staan"} al in het concept ${first.name}.`, conflicts: elsewhere }, 409, env);
+  }
+
+  const existing = await env.PLANNING_ORDERS.get(`${CONCEPT_PREFIX}${id}`, "json");
+  const now = new Date().toISOString();
+  const concept = { id, name: cleanName(payload.name, "Concept"), orderKeys, createdAt: existing?.createdAt || now, updatedAt: now };
+  await env.PLANNING_ORDERS.put(`${CONCEPT_PREFIX}${id}`, JSON.stringify(concept));
+  return json({ concept }, 200, env);
+}
+
+async function removeConcept(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const id = String(payload.id || "");
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) return json({ error: "Concept ontbreekt in het verzoek." }, 400, env);
+  await env.PLANNING_ORDERS.delete(`${CONCEPT_PREFIX}${id}`);
+  return json({ removed: true }, 200, env);
 }
 
 // Route numbers run on for good: rit 1 today, rit 500 in a year or two. The
@@ -1306,6 +1384,8 @@ async function addPlanStop(request, env) {
   const stops = await plannedStops(env, shiftDay(amsterdamNow().day, -7), "9999-12-31");
   const other = stops.get(key);
   if (other && other.id !== record.id) return json({ error: `Deze order staat al in rit ${other.number || "?"} op ${other.date}.` }, 409, env);
+  const concept = (await conceptStops(env)).get(key);
+  if (concept) return json({ error: `Deze order staat in het concept ${concept.name} van de planner.` }, 409, env);
 
   let tagged = [];
   if (payload.tag && !order.ownDeliveryTagged) {

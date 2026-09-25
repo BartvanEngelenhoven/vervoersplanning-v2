@@ -14,7 +14,7 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <!-- ?v= changes with each release, so phones and browsers fetch the new
          files instead of an old copy that no longer fits the backend. -->
-    <link rel="stylesheet" href="styles.css?v=20260925" />
+    <link rel="stylesheet" href="styles.css?v=20260925b" />
   </head>
   <body>
     <div class="portal">
@@ -32,6 +32,10 @@
           <button class="nav-item active" type="button" data-view="vandaag">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>
             <span>Vandaag</span>
+          </button>
+          <button class="nav-item" type="button" data-view="concepten">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4M9 12h7M9 16h5"/></svg>
+            <span class="nav-long">Concepten</span><span class="nav-short">Concept</span><span id="conceptCount" class="nav-count" hidden></span>
           </button>
           <button class="nav-item" type="button" data-view="agenda">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2.5"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>
@@ -87,6 +91,8 @@
             <button id="backToAutoButton" class="button primary" type="button">Toon weer alle ritten</button>
           </section>
 
+          <section id="conceptBar" class="notice-bar concept-bar" hidden aria-live="polite"></section>
+
           <section id="openPlan" class="panel open-plan" hidden aria-live="polite"></section>
 
           <div class="today">
@@ -112,6 +118,14 @@
               </section>
             </div>
           </div>
+        </section>
+
+        <section class="view" data-view="concepten" hidden>
+          <div class="view-head">
+            <h1>Concepten</h1>
+            <p>Ritten die je hebt bewaard maar nog geen dag hebt gegeven. Een concept houdt zijn orders vast: die worden niet nog eens voorgesteld. <b>Openen</b> om stops te veranderen, <b>Inplannen</b> om er een dag en ritnummer aan te geven.</p>
+          </div>
+          <div id="conceptList" class="concept-list"></div>
         </section>
 
         <section class="view" data-view="agenda" hidden>
@@ -183,7 +197,7 @@
     </template>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-    <script src="config.js?v=20260925" defer></script>
-    <script src="app.js?v=20260925" defer></script>
+    <script src="config.js?v=20260925b" defer></script>
+    <script src="app.js?v=20260925b" defer></script>
   </body>
 </html>
