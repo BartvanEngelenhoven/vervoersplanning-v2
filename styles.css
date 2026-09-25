@@ -226,7 +226,8 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
 .button.primary:hover { background: var(--brand-2); }
 .button:disabled { opacity: .6; cursor: default; }
 a.button { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
-.button.subtle-action { background: #f7f9f6; color: var(--muted); border: 1px solid var(--line); }
+/* Quiet, but plainly clickable: in grey text these read as switched off. */
+.button.subtle-action { background: #f7f9f6; color: #27483f; border: 1px solid var(--line); }
 
 .history-panel, .rules-panel { margin-top: .8rem; }
 .history-panel summary { cursor: pointer; list-style: none; user-select: none; }
@@ -345,6 +346,7 @@ details[open] > summary .fold-hint::after { content: " ▴"; }
 .agenda-route:first-of-type { border-top: 0; }
 .agenda-route b { font-size: .95rem; }
 .agenda-route span { color: var(--muted); font-size: .82rem; }
+.agenda-route span.rit-nummer { color: #f7f3e8; font-size: .8rem; }
 .agenda-route em { color: var(--bad); font-size: .8rem; font-style: normal; font-weight: 650; }
 .agenda-route-actions { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .35rem; }
 .agenda-route-actions .button { min-height: 40px; }
@@ -561,3 +563,5 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
 .driver-foot { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: 1.6rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .driver-day.eerder h2 { color: var(--bad); }
 .plan-stop:not(.klaar):not(.fout) { color: var(--muted); }
+.sidebar-foot .logout-button { background: transparent; color: #dbe6e1; border-color: rgba(255,255,255,.25); }
+.open-plan .open-plan-hint { margin: .2rem 1.25rem .6rem; }

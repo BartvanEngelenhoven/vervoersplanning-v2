@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Handleiding voor planners en bezorgers van de vervoersplanning." />
+    <meta name="referrer" content="no-referrer" />
+    <title>Handleiding · Vervoersplanning</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230d3029'/%3E%3Cpath d='M13 37h31l6 7v7H13z' fill='%23f3b43f'/%3E%3Ccircle cx='23' cy='51' r='6' fill='%23f7f3e8'/%3E%3Ccircle cx='45' cy='51' r='6' fill='%23f7f3e8'/%3E%3Cpath d='M18 14h28v21H18z' fill='%23f7f3e8'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="handleiding.css" />
+  </head>
+  <body>
+    <header class="top" id="top">
+      <div class="top-inner">
+        <div class="logos">
+          <span class="logo"><img src="assets/rijplaten-logo.svg" alt="De Rijplaten Specialist" /></span>
+          <span class="logo dark"><img src="assets/slowfeeder-logo.png" alt="De Slowfeeder Specialist" /></span>
+        </div>
+        <a class="back" href="index.html">‹ Naar de planning</a>
+      </div>
+    </header>
+    <main>
+      <section class="intro">
+        <h1>Handleiding vervoersplanning</h1>
+        <p>Stap voor stap: wat je ziet en wat elke knop doet. De cijfers op de foto's horen bij de uitleg ernaast. Alle klanten op de foto's zijn verzonnen.</p>
+        <div class="choose">
+          <a class="choice" href="#bezorger"><b>Ik ben bezorger</b><span>Ritten bekijken, bezorgd melden, onderweg iets meenemen</span></a>
+          <a class="choice" href="#planner"><b>Ik ben planner</b><span>Voorstellen, inplannen, agenda, orders</span></a>
+        </div>
+        <nav class="toc" aria-label="Inhoud"><div><b>Bezorger</b><ol><li><a href="#b-start">De eerste keer</a></li><li><a href="#b-ritten">Jouw ritten</a></li><li><a href="#b-rit">Je rit openen</a></li><li><a href="#b-bezorgd">Afleveren en Bezorgd melden</a></li><li><a href="#b-na">Na Bezorgd</a></li><li><a href="#b-erbij">Kan er nog bij</a></li><li><a href="#b-afbreken">Rit afbreken</a></li></ol></div><div><b>Planner</b><ol><li><a href="#p-start">Inloggen</a></li><li><a href="#p-vandaag">Vandaag: het overzicht</a></li><li><a href="#p-voorstel">Een voorstel aanpassen</a></li><li><a href="#p-inplannen">Een rit inplannen</a></li><li><a href="#p-agenda">De agenda</a></li><li><a href="#p-rit-open">Een ingeplande rit openen</a></li><li><a href="#p-orders">Orders</a></li><li><a href="#p-kaart">Kaart</a></li><li><a href="#p-bezorgd">Bezorgd en terugdraaien</a></li><li><a href="#p-regels">Regels</a></li></ol></div><div><b>Verder</b><ol><li><a href="#problemen">Als er iets misgaat</a></li></ol></div></nav>
+      </section>
+
+      <section class="part" id="bezorger">
+        <h2>Voor de bezorger</h2>
+        <article class="step text" id="b-start">
+    <div class="step-text">
+      <h3><span class="nr">1</span>De eerste keer</h3>
+      <p>Open op je telefoon <a href="https://bartvanengelenhoven.github.io/vervoersplanning-v2/">bartvanengelenhoven.github.io/vervoersplanning-v2/</a>. Je krijgt één keer de vraag om een code: vul de <b>bezorgerscode</b> in die je van Bart krijgt. Je telefoon onthoudt hem.</p>
+      
+      <p class="tip"><b>Tip:</b> zet de pagina op je beginscherm, dan open je hem als een app. iPhone: in Safari op <i>Deel</i> en dan <i>Zet op beginscherm</i>. Android: in Chrome op <i>⋮</i> en dan <i>Toevoegen aan startscherm</i>.</p>
+    </div>
+    
+  </article>
+<article class="step phone" id="b-ritten">
+    <div class="step-text">
+      <h3><span class="nr">2</span>Jouw ritten</h3>
+      <p>Na het openen zie je alleen jouw ritten: vandaag bovenaan, daaronder de komende week.</p>
+      <ol class="callouts"><li><span class="dot">1</span><div><b>De dag.</b> Staat er een rit van een eerdere dag die nog niet af is, dan staat die er in rood bij: <i>Nog open van …</i>. Meld daar alsnog wat je bezorgd hebt.</div></li><li><span class="dot">2</span><div><b>De rit.</b> Met het ritnummer, de plaatsen en hoeveel stops er nog te gaan zijn. Tik erop om de rit te openen.</div></li><li><span class="dot">3</span><div><b>Uitloggen en deze handleiding.</b> Uitloggen alleen als je de telefoon doorgeeft of kwijt bent geweest; je hebt daarna de code weer nodig.</div></li></ol>
+      
+    </div>
+    <figure class="shot phone"><div class="frame"><img src="assets/handleiding/b-ritten.webp" width="390" height="844" alt="Lijst met ritten van de bezorger" loading="lazy" /><span class="mark" style="left:72.14%;top:19.32%">1</span><span class="mark" style="left:3.84%;top:33.89%">2</span><span class="mark" style="left:70.24%;top:72.82%">3</span></div></figure>
+  </article>
+<article class="step phone" id="b-rit">
+    <div class="step-text">
+      <h3><span class="nr">3</span>Je rit openen</h3>
+      <p>Bij het openen haalt de telefoon eerst de nieuwste stand op. De stops staan in de volgorde waarin je rijdt.</p>
+      <ol class="callouts"><li><span class="dot">1</span><div><b>Opmerkingen van de planner.</b> Voor deze rit of voor de hele dag. Lees ze voor je vertrekt.</div></li><li><span class="dot">2</span><div><b>Rit openen in Google Maps.</b> Navigeert vanaf waar je nu bent langs alle stops die nog open staan.</div></li><li><span class="dot">3</span><div><b>De klant.</b> Naam van de klant of het bedrijf.</div></li><li><span class="dot">4</span><div><b>Het adres.</b> Tik erop om alleen deze stop in Google Maps te openen.</div></li><li><span class="dot">5</span><div><b>Bellen.</b> Tik om de klant te bellen, bijvoorbeeld als er niemand opendoet.</div></li><li><span class="dot">6</span><div><b>Wat de klant schreef.</b> Een opmerking uit de bestelling, zoals <i>achterom</i> of <i>bel even aan</i>.</div></li></ol>
+      
+    </div>
+    <figure class="shot phone"><div class="frame"><img src="assets/handleiding/b-rit.webp" width="390" height="844" alt="Een geopende rit met de eerste stop" loading="lazy" /><span class="mark" style="left:92.18%;top:27.51%">1</span><span class="mark" style="left:83.23%;top:46.66%">2</span><span class="mark" style="left:51.85%;top:55.20%">3</span><span class="mark" style="left:80.60%;top:60.13%">4</span><span class="mark" style="left:66.25%;top:66.27%">5</span></div></figure>
+  </article>
+<article class="step phone" id="b-bezorgd">
+    <div class="step-text">
+      <h3><span class="nr">4</span>Afleveren en Bezorgd melden</h3>
+      
+      <ol class="callouts"><li><span class="dot">1</span><div><b>Wat er mee moet.</b> De producten en aantallen van deze stop.</div></li><li><span class="dot">2</span><div><b>Ordernummer en lostijd.</b> Een hooihuisje rekent 90 minuten, een gewone stop 20.</div></li><li><span class="dot">3</span><div><b>Bezorgd.</b> Tik als het is afgeleverd en bevestig. De order staat dan in Shopify op <i>verzonden</i>. De klant krijgt hier <b>geen</b> mail van.</div></li></ol>
+      <p class="tip"><b>Geen bereik?</b> Dan zie je een melding. Probeer het opnieuw zodra je bereik hebt; twee keer tikken kan geen kwaad. <b>Klant niet thuis?</b> Tik niet op Bezorgd, maar bel de planner.</p>
+    </div>
+    <figure class="shot phone"><div class="frame"><img src="assets/handleiding/b-stop.webp" width="385" height="402" alt="Een stop met de knop Bezorgd" loading="lazy" /><span class="mark" style="left:94.37%;top:45.59%">1</span><span class="mark" style="left:92.87%;top:72.67%">2</span><span class="mark" style="left:71.82%;top:86.17%">3</span></div></figure>
+  </article>
+<article class="step phone" id="b-na">
+    <div class="step-text">
+      <h3><span class="nr">5</span>Na Bezorgd</h3>
+      
+      <ol class="callouts"><li><span class="dot">1</span><div><b>Afgevinkt.</b> De bezorgde stop staat onderaan met de tijd erbij. Bovenaan staat de volgende stop.</div></li></ol>
+      
+    </div>
+    <figure class="shot phone"><div class="frame"><img src="assets/handleiding/b-bezorgd.webp" width="390" height="844" alt="De rit na een bezorgde stop" loading="lazy" /><span class="mark" style="left:90.48%;top:66.77%">1</span></div></figure>
+  </article>
+<article class="step phone" id="b-erbij">
+    <div class="step-text">
+      <h3><span class="nr">6</span>Kan er nog bij</h3>
+      <p>Soms ligt er een order vlak bij je rit. Onder je stops staat dan hoeveel langer de rit ermee wordt.</p>
+      <ol class="callouts"><li><span class="dot">1</span><div><b>De order.</b> Nummer, plaats, product, en hoeveel tijd het kost.</div></li><li><span class="dot">2</span><div><b>Meenemen.</b> Voegt de order meteen toe aan je rit, op de handigste plek. Een pakket krijgt in Shopify de tag <i>eigen bezorging</i>, zodat het niet ook met DHL meegaat. <b>Alleen meenemen als het ook echt in de bus ligt.</b></div></li></ol>
+      
+    </div>
+    <figure class="shot phone"><div class="frame"><img src="assets/handleiding/b-erbij.webp" width="385" height="730" alt="Lijst met orders die er nog bij kunnen" loading="lazy" /><span class="mark" style="left:13.39%;top:10.14%">1</span><span class="mark" style="left:66.91%;top:23.64%">2</span></div></figure>
+  </article>
+<article class="step phone" id="b-afbreken">
+    <div class="step-text">
+      <h3><span class="nr">7</span>Rit afbreken</h3>
+      <p>Onderaan de rit staat <i>Rit afbreken</i>, voor als je de rit niet kunt afmaken (bus kapot, ziek, te laat).</p>
+      <ol class="callouts"><li><span class="dot">1</span><div><b>Waarom.</b> Mag leeg blijven, maar helpt de planner.</div></li><li><span class="dot">2</span><div><b>Ja, rit afbreken.</b> Wat al bezorgd is, blijft bezorgd. De rest gaat terug naar de planning, en de planner ziet in de agenda wat er terugkwam en waarom.</div></li><li><span class="dot">3</span><div><b>Toch niet.</b> Sluit het venster; er verandert niets.</div></li></ol>
+      
+    </div>
+    <figure class="shot phone"><div class="frame"><img src="assets/handleiding/b-afbreken.webp" width="385" height="266" alt="Het venster om een rit af te breken" loading="lazy" /><span class="mark" style="left:8.83%;top:55.38%">1</span><span class="mark" style="left:43.03%;top:87.23%">2</span><span class="mark" style="left:70.53%;top:87.23%">3</span></div></figure>
+  </article>
+      </section>
+
+      <section class="part" id="planner">
+        <h2>Voor de planner</h2>
+        <article class="step text" id="p-start">
+    <div class="step-text">
+      <h3><span class="nr">1</span>Inloggen</h3>
+      <p>Open <a href="https://bartvanengelenhoven.github.io/vervoersplanning-v2/">bartvanengelenhoven.github.io/vervoersplanning-v2/</a> en vul de <b>plannerscode</b> in. De browser onthoudt hem. Werk je op een gedeelde computer, tik dan als je klaar bent op <i>Uitloggen</i> (links onderin).</p>
+      
+      
+    </div>
+    
+  </article>
+<article class="step laptop" id="p-vandaag">
+    <div class="step-text">
+      <h3><span class="nr">2</span>Vandaag: het overzicht</h3>
+      <p>De planning maakt zelf voorstellen voor ritten uit de open orders. Voorstellen heten A, B, C; pas als je er één inplant, krijgt hij een vast ritnummer.</p>
+      <ol class="callouts"><li><span class="dot">1</span><div><b>De tellers.</b> <i>Meenemen</i>: orders voor de bus die nog niet ingepland zijn. <i>Controleren</i>: hier beslis jij. <i>Vandaag of te laat</i>: de deadline is vandaag of voorbij. Tik op een teller voor de lijst.</div></li><li><span class="dot">2</span><div><b>Een voorstel.</b> Met de stops in rijvolgorde, de rijtijd en de totale tijd.</div></li><li><span class="dot">3</span><div><b>Inplannen.</b> Zet dit voorstel op een dag in de agenda (zie stap 4).</div></li><li><span class="dot">4</span><div><b>De kaart.</b> De route van het gekozen voorstel. <i>Alle orders</i> toont alle open orders, <i>Naast elkaar</i> alle voorstellen.</div></li><li><span class="dot">5</span><div><b>Het menu.</b> Vandaag, Agenda, Orders, Kaart, Bezorgd, de regels en deze handleiding.</div></li></ol>
+      
+    </div>
+    <figure class="shot laptop"><div class="frame"><img src="assets/handleiding/p-vandaag.webp" width="1440" height="1020" alt="Het scherm Vandaag met voorstellen en kaart" loading="lazy" /><span class="mark" style="left:20.97%;top:9.19%">1</span><span class="mark" style="left:21.99%;top:34.58%">2</span><span class="mark" style="left:58.43%;top:90.05%">3</span><span class="mark" style="left:62.63%;top:24.78%">4</span><span class="mark" style="left:2.64%;top:22.83%">5</span></div></figure>
+  </article>
+<article class="step card" id="p-voorstel">
+    <div class="step-text">
+      <h3><span class="nr">3</span>Een voorstel aanpassen</h3>
+      
+      <ol class="callouts"><li><span class="dot">1</span><div><b>De letter.</b> Voorstel A, B, C… Een ingeplande rit heeft hier zijn nummer.</div></li><li><span class="dot">2</span><div><b>Min-teken.</b> Haal een stop uit het voorstel. Je ziet dan alleen deze rit; met <i>Toon weer alle ritten</i> komt alles terug. Een order toevoegen doe je onder de kaart met <i>Toevoegen aan deze rit</i>.</div></li><li><span class="dot">3</span><div><b>Bezorgd.</b> Meld één stop als bezorgd, zonder mail aan de klant.</div></li><li><span class="dot">4</span><div><b>Open in Maps.</b> De hele rit in Google Maps, vanaf het depot.</div></li><li><span class="dot">5</span><div><b>Inplannen.</b> Zet de rit op een dag.</div></li></ol>
+      
+    </div>
+    <figure class="shot card"><div class="frame"><img src="assets/handleiding/p-voorstel.webp" width="579" height="644" alt="Eén voorstel met stops en knoppen" loading="lazy" /><span class="mark" style="left:13.14%;top:7.86%">1</span><span class="mark" style="left:13.03%;top:17.46%">2</span><span class="mark" style="left:82.16%;top:24.56%">3</span><span class="mark" style="left:29.32%;top:92.27%">4</span><span class="mark" style="left:75.58%;top:92.27%">5</span></div></figure>
+  </article>
+<article class="step laptop" id="p-inplannen">
+    <div class="step-text">
+      <h3><span class="nr">4</span>Een rit inplannen</h3>
+      
+      <ol class="callouts"><li><span class="dot">1</span><div><b>Kies een dag.</b> Bovenaan staat welke rit je aan het inplannen bent. <i>Annuleren</i> zet hem terug.</div></li><li><span class="dot">2</span><div><b>Rit hier inplannen.</b> Tik op de dag. De rit krijgt een vast nummer (Rit 1, Rit 2, …) dat nooit meer terugkomt. Pakketten in de rit krijgen in Shopify de tag <i>eigen bezorging</i>.</div></li></ol>
+      <p class="tip">Een order die al in een ingeplande rit staat, stelt de planning niet nog eens voor. Nieuwe orders komen erbij via <a href="#p-rit-open">Rit openen</a>.</p>
+    </div>
+    <figure class="shot laptop"><div class="frame"><img src="assets/handleiding/p-inplannen.webp" width="1440" height="1020" alt="De agenda met de keuze voor een dag" loading="lazy" /><span class="mark" style="left:20.97%;top:15.10%">1</span><span class="mark" style="left:49.06%;top:31.57%">2</span></div></figure>
+  </article>
+<article class="step card" id="p-agenda">
+    <div class="step-text">
+      <h3><span class="nr">5</span>De agenda</h3>
+      
+      <ol class="callouts"><li><span class="dot">1</span><div><b>Ritnummer en plaatsen.</b> Met hoeveel stops er nog te gaan zijn.</div></li><li><span class="dot">2</span><div><b>Aankondiging.</b> Om 16:00 de dag vóór de rit worden de klanten ingelicht. Zolang er <i>proef</i> staat, gaat er niets naar klanten en schrijft het systeem alleen op wat het zou doen.</div></li><li><span class="dot">3</span><div><b>Opmerking voor de bezorger.</b> Die ziet de bezorger bovenaan de rit.</div></li><li><span class="dot">4</span><div><b>Rit openen.</b> Bekijk de rit en kijk wat er nog bij kan (stap 6).</div></li><li><span class="dot">5</span><div><b>Uit agenda.</b> De rit verdwijnt en de orders komen terug in de planning.</div></li><li><span class="dot">6</span><div><b>Opmerking bij deze dag.</b> Voor de hele dag, bijvoorbeeld <i>bus in onderhoud</i>.</div></li></ol>
+      <p class="tip">Een rit van een eerdere dag die niet (helemaal) gereden is, blijft bovenaan in de agenda staan tot hij is afgehandeld. Breekt de bezorger een rit af, dan zie je hier wat er terugkwam en waarom.</p>
+    </div>
+    <figure class="shot card"><div class="frame"><img src="assets/handleiding/p-agenda.webp" width="241" height="467" alt="Een dag in de agenda met een ingeplande rit" loading="lazy" /><span class="mark" style="left:36.63%;top:22.48%">1</span><span class="mark" style="left:89.15%;top:41.57%">2</span><span class="mark" style="left:2.50%;top:54.98%">3</span><span class="mark" style="left:60.62%;top:64.35%">4</span><span class="mark" style="left:61.33%;top:74.68%">5</span><span class="mark" style="left:83.77%;top:14.65%">6</span></div></figure>
+  </article>
+<article class="step laptop" id="p-rit-open">
+    <div class="step-text">
+      <h3><span class="nr">6</span>Een ingeplande rit openen</h3>
+      
+      <ol class="callouts"><li><span class="dot">1</span><div><b>De rit.</b> Datum, stops en hoe lang hij ongeveer duurt.</div></li><li><span class="dot">2</span><div><b>Meenemen.</b> Orders die er sinds het inplannen makkelijk bij kunnen. Een tik zet ze in de rit, op de handigste plek.</div></li><li><span class="dot">3</span><div><b>Min-teken.</b> Haalt een stop uit de ingeplande rit; de order komt terug in de planning.</div></li><li><span class="dot">4</span><div><b>Sluiten.</b> Terug naar de voorstellen.</div></li></ol>
+      <p class="tip">Wat je hier verandert, wordt meteen opgeslagen. De bezorger ziet het bij de volgende keer verversen.</p>
+    </div>
+    <figure class="shot laptop"><div class="frame"><img src="assets/handleiding/p-rit-open.webp" width="1440" height="1020" alt="Een geopende ingeplande rit met orders die erbij kunnen" loading="lazy" /><span class="mark" style="left:20.97%;top:24.78%">1</span><span class="mark" style="left:87.00%;top:45.01%">2</span><span class="mark" style="left:24.86%;top:97.00%">3</span><span class="mark" style="left:89.95%;top:28.10%">4</span></div></figure>
+  </article>
+<article class="step laptop" id="p-orders">
+    <div class="step-text">
+      <h3><span class="nr">7</span>Orders</h3>
+      
+      <ol class="callouts"><li><span class="dot">1</span><div><b>Zoeken.</b> Op ordernummer, klant, plaats of product.</div></li><li><span class="dot">2</span><div><b>Filter.</b> Toon één groep, of alles wat vandaag of eerder moet.</div></li><li><span class="dot">3</span><div><b>De status.</b> <i>Meenemen</i>, <i>Ingepland</i>, <i>Controleren</i>, <i>DHL</i>, <i>Te ver</i> of <i>Niet meenemen</i>. Eronder staat waarom.</div></li><li><span class="dot">4</span><div><b>Selectie.</b> Vink orders aan en kies <i>Maak rit met selectie</i> om zelf een rit samen te stellen, of <i>Selectie bezorgd</i>.</div></li><li><span class="dot">5</span><div><b>Toch zelf bezorgen.</b> Voor een order die de planning naar DHL of <i>Te ver</i> zette. Een pakket krijgt dan in Shopify de tag <i>eigen bezorging</i>.</div></li></ol>
+      
+    </div>
+    <figure class="shot laptop"><div class="frame"><img src="assets/handleiding/p-orders.webp" width="1440" height="1020" alt="De orderlijst met filters en een selectie" loading="lazy" /><span class="mark" style="left:84.95%;top:8.53%">1</span><span class="mark" style="left:82.61%;top:8.69%">2</span><span class="mark" style="left:46.27%;top:30.95%">3</span><span class="mark" style="left:21.04%;top:14.40%">4</span></div></figure>
+  </article>
+<article class="step laptop" id="p-kaart">
+    <div class="step-text">
+      <h3><span class="nr">8</span>Kaart</h3>
+      
+      <ol class="callouts"><li><span class="dot">1</span><div><b>Alle open orders.</b> Tik op een punt, of wijs het aan, voor de bestelling.</div></li><li><span class="dot">2</span><div><b>De kleuren.</b> Groen gaat mee, blauwgroen is ingepland, oranje controleren, blauw DHL, paars te ver, rood niet meenemen.</div></li></ol>
+      
+    </div>
+    <figure class="shot laptop"><div class="frame"><img src="assets/handleiding/p-kaart.webp" width="1440" height="1020" alt="Kaart met alle open orders" loading="lazy" /><span class="mark" style="left:21.99%;top:13.80%">1</span><span class="mark" style="left:73.86%;top:31.11%">2</span></div></figure>
+  </article>
+<article class="step wide" id="p-bezorgd">
+    <div class="step-text">
+      <h3><span class="nr">9</span>Bezorgd en terugdraaien</h3>
+      
+      <ol class="callouts"><li><span class="dot">1</span><div><b>Wat er bezorgd is.</b> De nieuwste bovenaan, met wie het meldde en wanneer. Na 60 dagen verdwijnt een regel vanzelf.</div></li><li><span class="dot">2</span><div><b>Terugdraaien.</b> Voor een vergissing: de order komt terug in de planning en de verzending in Shopify wordt geannuleerd. Kan alleen bij orders die via de planning zijn gemeld; iets wat in Shopify zelf is verzonden, draai je in Shopify terug.</div></li></ol>
+      
+    </div>
+    <figure class="shot wide"><div class="frame"><img src="assets/handleiding/p-bezorgd.webp" width="1152" height="223" alt="De lijst met bezorgde orders" loading="lazy" /><span class="mark" style="left:4.22%;top:53.07%">1</span><span class="mark" style="left:84.18%;top:66.99%">2</span></div></figure>
+  </article>
+<article class="step laptop" id="p-regels">
+    <div class="step-text">
+      <h3><span class="nr">10</span>Regels</h3>
+      
+      <ol class="callouts"><li><span class="dot">1</span><div><b>Waarom de planning kiest wat hij kiest.</b> Budgetten, wat altijd zelf gaat, wanneer een pakket meelift en hoe lang een dag mag zijn. De tekst komt uit de planning zelf, dus hij klopt met wat er gebeurt.</div></li></ol>
+      
+    </div>
+    <figure class="shot laptop"><div class="frame"><img src="assets/handleiding/p-regels.webp" width="1440" height="1020" alt="De pagina met de regels van de planning" loading="lazy" /><span class="mark" style="left:20.97%;top:15.10%">1</span></div></figure>
+  </article>
+      </section>
+
+      <section class="part" id="problemen">
+        <h2>Als er iets misgaat</h2>
+        <dl class="faq"><div><dt>De code klopt niet</dt><dd>Vraag Bart om de juiste code. Planner en bezorger hebben elk hun eigen code.</dd></div><div><dt>Nieuwe telefoon of gedeelde computer</dt><dd>Open de link en vul de code opnieuw in. Op een apparaat dat niet van jou is: tik op <i>Uitloggen</i> als je klaar bent.</dd></div><div><dt>Geen bereik onderweg</dt><dd>Je ziet de rit zoals hij bij het laatste verversen was. Bezorgd melden lukt dan niet: probeer het opnieuw zodra je bereik hebt.</dd></div><div><dt>Verkeerde stop op Bezorgd gezet</dt><dd>Bel de planner. Die draait het terug onder <i>Bezorgd</i>, en de order staat weer open.</dd></div><div><dt>Een stop staat er als <i>niet meer open</i></dt><dd>De order is intussen geannuleerd of in Shopify al verzonden. Bel de planner voordat je gaat.</dd></div><div><dt>Een order onder Controleren: <i>getagd als eigen bezorging, maar zit in geen rit</i></dt><dd>Hij heeft in Shopify de tag <i>eigen bezorging</i>, dus DHL laat hem liggen. Neem hem mee in een rit, of haal de tag in Shopify weg zodat hij met DHL gaat.</dd></div><div><dt>Er staat <i>proef</i> bij de aankondiging</dt><dd>Dan gaat er om 16:00 nog niets naar klanten. Klanten krijgen alleen bericht als je ze zelf belt of mailt.</dd></div></dl>
+      </section>
+    </main>
+    <footer class="foot"><a href="#top">Naar boven</a> · <a href="index.html">Naar de planning</a></footer>
+  </body>
+</html>

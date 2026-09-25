@@ -475,7 +475,7 @@ function renderRules() {
     ["Net erover", v3
       ? `Zit een groep orders tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan staat hij als rit onder Controleren: met één klik inplannen, of eerst een order eruit halen.`
       : `Zit een rit tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan komen de orders bij Controleren te staan in plaats van dat ze afvallen.`],
-    ["Al ingepland", "Een order die al in een rit in de agenda staat, wordt niet nog eens voorgesteld. Nieuwe orders komen bij een ingeplande rit via Rit openen → Kan er makkelijk bij."],
+    ["Al ingepland", "Een order die al in een rit in de agenda staat, ook een rit van eerder deze week die nog niet af is, wordt niet nog eens voorgesteld. Nieuwe orders komen bij een ingeplande rit via Rit openen → Kan er makkelijk bij, met dezelfde budgetten als hierboven. Een order die alleen te ver is maar in een ingeplande rit past, staat onder Controleren met het ritnummer erbij."],
     ["Rijtijd", `Geschat uit de afstand hemelsbreed tussen de echte adressen (via PDOK, gratis): ${Math.round(TRIP_OVERHEAD_MINUTES)} minuten op- en afrijden per rit, ${STOP_MINUTES} minuten per extra stop en ${String(MINUTES_PER_KM).replace(".", ",")} minuut per kilometer. Lossen: 20 minuten per stop, 90 voor een hooihuisje.`],
     ["Aankondiging", state.announceLive
       ? "Om 16:00 de dag voor een ingeplande rit gaan de betaalde orders in Shopify op verzonden, met de verzendmail aan de klant. Bezorgd melden stuurt daarna geen tweede mail."
@@ -550,9 +550,11 @@ function renderDriverList(holder) {
   const vandaag = isoDay(new Date());
   const perDag = [...new Set(ritten.map((planned) => planned.date))];
 
+  const geladen = state.planLoaded || !usesBackend;
   holder.innerHTML = `
     <div class="view-head"><h1>Jouw ritten</h1>
-      <p>${ritten.length ? "Tik op een rit om de stops te zien." : "Er staat deze week nog geen rit voor je klaar."}</p></div>
+      <p>${!geladen ? "De ritten zijn nog niet geladen." : ritten.length ? "Tik op een rit om de stops te zien." : "Er staat deze week nog geen rit voor je klaar."}</p></div>
+    ${state.lastFetchOk ? "" : '<p class="plan-offline">Geen verbinding. Je ziet de ritten zoals ze bij het laatste verversen waren; ververs als je bereik hebt.</p>'}
     ${perDag.map((dag) => {
       const naam = capitalize(new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag)));
       const dagnotitie = dayNoteFor(dag);
@@ -596,7 +598,10 @@ function renderDriverRoute(holder, planned) {
   // Worked out again from the depot after every stop, it sent the driver back
   // west from Arnhem before going on east.
   const volgorde = status.open;
-  const erbij = state.lastFetchOk && !planned.abortedAt ? nearbyAdditions(status.open) : [];
+  // Taking something along is for the route being driven, not one for later in
+  // the week: that is the planner's to change.
+  const rijdtNu = planned.date <= isoDay(new Date());
+  const erbij = state.lastFetchOk && !planned.abortedAt && rijdtNu ? nearbyAdditions(status.open) : [];
   const dagnotitie = dayNoteFor(planned.date);
 
   holder.innerHTML = `
@@ -761,6 +766,9 @@ function noteEditor({ label, value, onSave }) {
     wrap.querySelector("textarea").focus();
   });
   wrap.querySelector(".note-cancel").addEventListener("click", () => {
+    form.hidden = true;
+    toggle.hidden = false;
+    wrap.querySelector("textarea").value = value;
     delete wrap.dataset.open;
     document.activeElement?.blur?.();
     // Whatever was held back while typing (a route placed, a refresh) shows now.
@@ -774,7 +782,7 @@ function noteEditor({ label, value, onSave }) {
     delete wrap.dataset.open;
     document.activeElement?.blur?.();
     if (!gelukt) window.alert("Opslaan is niet gelukt. Probeer het opnieuw.");
-    state.plan = await fetchPlan();
+    state.plan = (await fetchPlan()) || state.plan;
     renderAgenda();
   });
   return wrap;
@@ -791,11 +799,14 @@ function routeLabel(route) {
   return `${steden[0]}, ${steden[1]} en ${steden.length - 2} meer`;
 }
 
-// The planned route an order sits in, from today on and not broken off.
+// The planned route an order sits in and still waits for: from today on, or an
+// unfinished one of the last week that was not broken off. The driver sees that
+// last one as "nog open", so its orders are not free to plan again until the
+// driver delivers them or breaks the route off.
 function plannedFor(order) {
   const key = orderKey(order);
-  const vandaag = isoDay(new Date());
-  return state.plan.find((planned) => planned.date >= vandaag && !planned.abortedAt && planKeys(planned).includes(key)) || null;
+  const weekTerug = daysFromToday(-7);
+  return state.plan.find((planned) => planned.date >= weekTerug && !planned.abortedAt && planKeys(planned).includes(key)) || null;
 }
 
 function showView(name) {
@@ -873,7 +884,15 @@ async function placeRouteOnDay(date) {
     return;
   }
   state.routeInHand = null;
-  state.plan = await fetchPlan();
+  // A route of the planner's own making is planned now: it leaves Vandaag, and
+  // its orders leave the selection, rather than stay with a live Inplannen.
+  if (state.manualRoute && !state.openPlan) {
+    route.orders.forEach((order) => state.selected.delete(orderKey(order)));
+    state.manualRoute = null;
+    activeMapRouteIndex = 0;
+    renderSelectionBar();
+  }
+  state.plan = (await fetchPlan()) || state.plan;
   renderRouteInHand();
   rebuildPlanning();
 }
@@ -1723,8 +1742,10 @@ function renderHistory() {
     holder.innerHTML = `<p class="empty">${state.historyLoaded ? "Nog geen bezorgde orders in de historie." : "De historie is nog niet geladen."}</p>`;
     return;
   }
+  // A parcel that never went with the van is kept without a name: its place
+  // stands in for it.
   holder.innerHTML = state.history.map((item) => `<article class="history-item">
-    <div><b>${escapeHtml(item.id)}</b><span>${escapeHtml(item.order?.customer || "Onbekende klant")} · ${escapeHtml(item.order?.webshop || item.shopDomain)}</span><small>${historySourceLabel(item)}: ${formatDateTime(item.deliveredAt)}</small></div>
+    <div><b>${escapeHtml(item.id)}</b><span>${escapeHtml(item.order?.customer || item.order?.city || "Onbekend")} · ${escapeHtml(item.order?.webshop || item.shopDomain)}</span><small>${historySourceLabel(item)}: ${formatDateTime(item.deliveredAt)}</small></div>
     ${item.fulfillment?.id
       ? `<button class="button ghost undo-delivered" type="button" data-order-id="${encodeURIComponent(item.id)}" data-shop-domain="${encodeURIComponent(item.shopDomain)}">Terugdraaien</button>`
       : '<small class="history-note">Terugdraaien kan alleen in Shopify</small>'}
@@ -1903,13 +1924,14 @@ function rebuildPlanning() {
   stopOrderCache = new Map();
   syncOpenPlan();
   state.decisions = state.orders.map((order) => {
-    // Already in a route from today on: planned, and out of the weighing, so it
-    // is neither offered as a new route nor lends its budget to one.
+    // Already in a route: planned, and out of the weighing, so it is neither
+    // offered as a new route nor lends its budget to one.
     const planned = plannedFor(order);
-    if (planned) return { order, decision: "planned", planned, reason: `Ingepland in rit ${planned.number || "?"} op ${formatDate(planned.date)}` };
+    if (planned) return { order, decision: "planned", planned, reason: plannedReason(planned) };
     return { order, ...applyManualDecision(order, decide(order)) };
   });
   qualifyCandidates();
+  offerPlannedRoutes();
   state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
   // A group just over its budget is still a route to consider, shown apart so
   // the planner can plan it with one click or take an order out first.
@@ -1954,13 +1976,15 @@ async function markDelivered(order, button) {
     response = null;
   }
   if (!response) {
-    window.alert("Bezorgd melden is niet gelukt: geen verbinding. Probeer het opnieuw als je bereik hebt.");
+    window.alert("Bezorgd melden is niet gelukt: geen verbinding. Probeer het opnieuw als je bereik hebt; twee keer melden kan geen kwaad.");
     reset();
     return;
   }
   if (!response.ok) {
     window.alert(await errorText(response, "Bezorgd melden is niet gelukt. Probeer het opnieuw."));
     reset();
+    // Cancelled, refunded or no longer open: show the stop as it now stands.
+    if ([404, 409].includes(response.status)) await refreshData();
     return;
   }
   await refreshData();
@@ -2073,6 +2097,7 @@ async function refreshData(full = true) {
     if (full) {
       const plan = await fetchPlan();
       if (seq !== refreshSeq) return;
+      if (plan === null) throw new Error("De ritten konden niet worden geladen");
       state.plan = plan;
       const history = await fetchHistory([...new Set(state.plan.flatMap(planKeys))]);
       if (seq !== refreshSeq) return;
@@ -2080,18 +2105,27 @@ async function refreshData(full = true) {
         state.history = history.entries;
         state.deliveredKeys = new Map([
           ...history.entries.map((entry) => [`${entry.shopDomain}:${entry.id}`, entry.deliveredAt]),
-          ...Object.entries(history.delivered),
+          ...Object.entries(history.delivered).filter(([, at]) => at),
+          ...Object.entries(history.delivered).filter(([key, at]) => !at && !history.entries.some((entry) => `${entry.shopDomain}:${entry.id}` === key)),
         ]);
         state.historyLoaded = true;
+        state.historyRound = seq;
       }
       state.lastFullAt = Date.now();
     }
 
     // The driver's phone gets orders without names or addresses, and the full
-    // details of its own stops alongside the routes: the two are put together.
+    // details of its own stops alongside the routes: the two are put together,
+    // the fresh order's flags (cancelled, announced) over the stop's details.
+    // A stop missing from the fresh orders has been delivered or shipped since;
+    // it is not put back from the older copy.
     const byKey = new Map(loaded.map((order) => [orderKey(order), order]));
-    for (const stop of state.planStops) byKey.set(orderKey(stop), stop);
+    for (const stop of state.planStops) {
+      const fresh = byKey.get(orderKey(stop));
+      if (fresh) byKey.set(orderKey(stop), { ...stop, ...fresh, postcode: stop.postcode || fresh.postcode });
+    }
     state.allOrders = [...byKey.values()];
+    state.ordersRound = seq;
     state.lastFetchOk = true;
     state.orders = state.allOrders.filter((order) => !(order.dueDate && order.dueDate < hideOrdersDueBefore));
     // Before rebuildPlanning, because the travel budgets are judged against these.
@@ -2164,15 +2198,18 @@ async function fetchPlan() {
   if (!usesBackend) return [];
   try {
     const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan?from=${daysFromToday(-7)}&t=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) return state.plan;
+    // Never loaded yet and failing now: say so. An empty agenda would read as
+    // "nothing planned", and every planned order would be proposed again.
+    if (!response.ok) return state.planLoaded ? state.plan : null;
     const payload = await response.json();
     state.dayNotes = payload.dayNotes || [];
     state.announcements = payload.announcements || [];
     state.announceLive = Boolean(payload.announceLive);
     state.planStops = payload.stops || [];
+    state.planLoaded = true;
     return payload.routes || [];
   } catch {
-    return state.plan;
+    return state.planLoaded ? state.plan : null;
   }
 }
 
@@ -2217,17 +2254,19 @@ async function removePlannedRoute(planned) {
     state.openPlan = null;
     state.manualRoute = null;
   }
-  state.plan = await fetchPlan();
+  state.plan = (await fetchPlan()) || state.plan;
   rebuildPlanning();
 }
 
 // Each stored stop, matched against everything the backend returned, not just
 // what the planning shows: an order whose date moved back in Shopify is hidden
 // from the planning but very much alive. Delivered is taken from the delivery
-// records asked for by key, so a stop done a week ago still reads as done; until
-// those have loaded a missing stop is "not yet confirmed", never "not found".
+// records asked for by key. A stop that has left the open orders is only called
+// "not found" when the delivery records came in the same refresh; otherwise it
+// may simply have been delivered a minute ago, so it is "not yet confirmed".
 function plannedRouteStatus(planned) {
   const byKey = new Map(state.allOrders.map((order) => [orderKey(order), order]));
+  const zeker = state.historyLoaded && state.historyRound === state.ordersRound;
   const stops = planKeys(planned).map((key) => {
     const order = byKey.get(key);
     if (order && !order.fulfilled) {
@@ -2235,7 +2274,7 @@ function plannedRouteStatus(planned) {
       return { key, id: order.id, order, status };
     }
     if (state.deliveredKeys.has(key)) return { key, id: key.split(":").pop(), status: "bezorgd", at: state.deliveredKeys.get(key) };
-    return { key, id: key.split(":").pop(), status: state.historyLoaded ? "onbekend" : "onbevestigd" };
+    return { key, id: key.split(":").pop(), status: zeker ? "onbekend" : "onbevestigd" };
   });
   return { stops, open: stops.filter((stop) => stop.status === "open").map((stop) => stop.order) };
 }
@@ -2255,40 +2294,13 @@ function additionAllowed(item) {
 // with the new stop slotted in where it costs least. After every acceptance the
 // list is rebuilt against the grown route, so five offers of "+25 min" can never
 // add up to two hours unnoticed.
-//
-// What may join is what the rules would let join: a parcel when the route grows
-// by at most an hour, unloading included; a rijplaten order or XXL bak when the
-// extra driving stays within its own budget, the same as it would in a new
-// route; a hay house always. Before, every order was held to the parcel's hour,
-// and a rijplaten order an hour and a half's drive away was never offered.
 function nearbyAdditions(orders) {
   if (!orders.length) return [];
   const inRoute = new Set(orders.map(orderKey));
-  const basis = routeSummary("Rit", orders);
-  const dayLimit = CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
-
   return state.decisions
     .filter((item) => !inRoute.has(orderKey(item.order)) && additionAllowed(item))
-    .map((item) => {
-      let position = orders.length;
-      let bestKm = Infinity;
-      for (let index = 0; index <= orders.length; index += 1) {
-        const km = loopKm([...orders.slice(0, index), item.order, ...orders.slice(index)]);
-        if (km < bestKm) {
-          bestKm = km;
-          position = index;
-        }
-      }
-      const merged = routeSummary("Rit", [...orders.slice(0, position), item.order, ...orders.slice(position)]);
-      return { item, position, extra: merged.totalMinutes - basis.totalMinutes, extraDrive: merged.driveMinutes - basis.driveMinutes, totaal: merged.totalMinutes, load: merged.load, loadKnown: merged.loadKnown };
-    })
-    .filter((kandidaat) => {
-      if (kandidaat.totaal > dayLimit) return false;
-      if (kandidaat.loadKnown && kandidaat.load > CONFIG.vehicleCapacityKg) return false;
-      const plan = CONFIG.ritregelsV3 ? transportPlan(kandidaat.item.order) : null;
-      if (plan && kandidaat.item.decision !== "dhl") return kandidaat.extraDrive <= plan.budgetMinutes;
-      return kandidaat.extra <= CONFIG.packageDetourMinutes;
-    })
+    .map((item) => ({ item, ...additionFor(orders, item.order) }))
+    .filter((kandidaat) => fitsAsAddition(kandidaat, kandidaat.item.order, kandidaat.item.decision))
     .sort((a, b) => a.extra - b.extra)
     .slice(0, 5);
 }
@@ -2296,8 +2308,7 @@ function nearbyAdditions(orders) {
 
 // One stop onto a planned route, by the driver or the planner: saved, tagged in
 // Shopify when it is a parcel, and put where it costs the least driving, all in
-// one request. The screen only changes once that has gone through: a driver told
-// a stop was added when it was not is worse off than one told it failed.
+// one request. The screen only changes once that has gone through.
 async function acceptAddition(kandidaat, button) {
   const planned = state.openPlan;
   if (!planned || !kandidaat) return;
@@ -2322,10 +2333,15 @@ async function acceptAddition(kandidaat, button) {
   } catch {
     response = null;
   }
-  if (!response?.ok) {
-    window.alert(response
-      ? `${await errorText(response, "Toevoegen is niet gelukt.")} Je rijdt de oorspronkelijke rit.`
-      : "Toevoegen is niet gelukt: geen verbinding. Je rijdt de oorspronkelijke rit; probeer het opnieuw als je bereik hebt.");
+  if (!response) {
+    // The request may have gone through with the answer lost on the way back:
+    // look before saying anything for certain. Asking again is harmless.
+    window.alert("Geen antwoord. Misschien is de stop toch toegevoegd; het scherm wordt nu ververst. Staat hij erbij, dan is het gelukt. Nog eens Meenemen kan geen kwaad.");
+    await refreshData();
+    return;
+  }
+  if (!response.ok) {
+    window.alert(`${await errorText(response, "Toevoegen is niet gelukt.")} Je rijdt de oorspronkelijke rit.`);
     renderOpenPlan();
     renderDriver();
     return;
@@ -2368,7 +2384,9 @@ async function fetchGeo(orders) {
 async function fetchHistory(keys = []) {
   if (!usesBackend) return { entries: [], delivered: {} };
   try {
-    const query = keys.length ? `&keys=${encodeURIComponent(keys.slice(0, 200).join(","))}` : "";
+    // Always with keys=, even empty: that asks for the answer with delivery
+    // times per stop. Without it the Worker answers the way older screens expect.
+    const query = `&keys=${encodeURIComponent(keys.slice(0, 200).join(","))}`;
     const response = await backendFetch(`${CONFIG.apiBaseUrl}/history?t=${Date.now()}${query}`, { cache: "no-store" });
     if (!response.ok) return null;
     const payload = await response.json();
@@ -2498,6 +2516,13 @@ function applyPool(region, candidates, result) {
     item.reason = item.plan.overflow === "dhl"
       ? `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt; gaat als pakket via DHL`
       : `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt${samen}`;
+    // Tagged "eigen bezorging" in Shopify, the DHL pile skips it: back under
+    // DHL here, nobody would deliver it.
+    if (item.plan.overflow === "dhl" && item.order.ownDeliveryTagged) {
+      item.decision = "review";
+      item.taggedParcel = true;
+      item.reason = "In Shopify getagd als eigen bezorging, maar zit in geen rit. Neem hem mee in een rit, of haal de tag in Shopify weg zodat hij met DHL gaat";
+    }
   }
   for (const item of fixed) {
     item.decision = "include";
@@ -2663,7 +2688,7 @@ async function removePlannedStop(key) {
     return;
   }
   const payload = await response.json();
-  state.plan = await fetchPlan();
+  state.plan = (await fetchPlan()) || state.plan;
   if (payload.removed) {
     closeOpenPlan();
     return;
@@ -2700,7 +2725,67 @@ function routeLetter(index) {
   return index < 26 ? String.fromCharCode(65 + index) : String(index + 1);
 }
 
-// @@APPEND@@
+function plannedReason(planned) {
+  const vandaag = isoDay(new Date());
+  return planned.date < vandaag
+    ? `Staat nog open in rit ${planned.number || "?"} van ${formatDate(planned.date)}: rij hem alsnog, of breek die rit af zodat de orders terugkomen`
+    : `Ingepland in rit ${planned.number || "?"} op ${formatDate(planned.date)}`;
+}
+
+// An order too far for a trip of its own can still fit a route that is already
+// planned that way. It is not added by itself (that changes a route the driver
+// may already have seen); it goes to Controleren with the route it fits, so the
+// planner opens that route and takes it along with one tap.
+function offerPlannedRoutes() {
+  const vandaag = isoDay(new Date());
+  const komend = state.plan.filter((planned) => planned.date >= vandaag && !planned.abortedAt);
+  if (!komend.length) return;
+  for (const item of state.decisions) {
+    const tooFar = item.decision === "far" || (item.decision === "dhl" && item.plan);
+    if (!tooFar || !additionAllowed({ ...item, decision: "review" })) continue;
+    let best = null;
+    for (const planned of komend) {
+      const open = plannedRouteStatus(planned).open;
+      if (!open.length) continue;
+      const fit = additionFor(open, item.order);
+      if (!fitsAsAddition(fit, item.order, item.decision)) continue;
+      if (!best || fit.extra < best.fit.extra) best = { planned, fit };
+    }
+    if (!best) continue;
+    item.decision = "review";
+    item.fitsPlanned = best.planned;
+    item.reason = `Past bij rit ${best.planned.number || "?"} op ${formatDate(best.planned.date)} (+${formatMinutes(best.fit.extra)}): open die rit in de Agenda en kies Meenemen`;
+  }
+}
+
+// One order slotted into a route in its saved order, where it costs the least.
+function additionFor(orders, order) {
+  let position = orders.length;
+  let bestKm = Infinity;
+  for (let index = 0; index <= orders.length; index += 1) {
+    const km = loopKm([...orders.slice(0, index), order, ...orders.slice(index)]);
+    if (km < bestKm) {
+      bestKm = km;
+      position = index;
+    }
+  }
+  const basis = routeSummary("Rit", orders);
+  const merged = routeSummary("Rit", [...orders.slice(0, position), order, ...orders.slice(position)]);
+  return { position, extra: merged.totalMinutes - basis.totalMinutes, extraDrive: merged.driveMinutes - basis.driveMinutes, totaal: merged.totalMinutes, load: merged.load, loadKnown: merged.loadKnown };
+}
+
+// What may join is what the rules would let join: a parcel when the route grows
+// by at most an hour, unloading included; a rijplaten order or XXL bak when the
+// extra driving stays within its own budget, as in a new route; a hay house
+// always. Every order used to be held to the parcel's hour, and a rijplaten
+// order an hour and a half's drive away was never offered.
+function fitsAsAddition(fit, order, decision) {
+  if (fit.totaal > CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes) return false;
+  if (fit.loadKnown && fit.load > CONFIG.vehicleCapacityKg) return false;
+  const plan = transportPlan(order);
+  if (plan && decision !== "dhl") return fit.extraDrive <= plan.budgetMinutes;
+  return fit.extra <= CONFIG.packageDetourMinutes;
+}
 
 document.querySelector("#refreshButton").addEventListener("click", () => {
   // Verversen is the way back in after cancelling the code prompt.
@@ -2765,10 +2850,11 @@ let refreshTick = 0;
 setInterval(() => {
   if (document.visibilityState !== "visible") return;
   refreshTick += 1;
-  refreshData(refreshTick % 5 === 0);
+  // Until the routes have loaded once, every tick asks for them again.
+  refreshData(refreshTick % 5 === 0 || !state.planLoaded);
 }, CONFIG.refreshMs);
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
   if (Date.now() - (state.lastRefreshAt || 0) < 60_000) return;
-  refreshData(Date.now() - (state.lastFullAt || 0) > 10 * 60_000);
+  refreshData(!state.planLoaded || Date.now() - (state.lastFullAt || 0) > 10 * 60_000);
 });

@@ -224,6 +224,37 @@ test("kleine dingen: negatieve minuten, telefoonnummers, wintertijd", () => {
   assert.equal(v3.fn.routeLetter(0), "A");
 });
 
+function isoOffset(days) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+test("een order die alleen te ver is maar in een ingeplande rit past, staat onder Controleren met die rit", () => {
+  const doorn = order("Doorn", 52.03, 5.32);
+  const haarlem = order("Haarlem", 52.38, 4.64);
+  const uitkomst = plan(v2, [doorn, haarlem], { planned: [{ id: "r3", number: 3, date: isoOffset(2), name: "Doorn", orderKeys: [`${DRS}:${doorn.id}`] }] });
+  assert.equal(uitkomst.decision(haarlem), "review");
+  assert.match(uitkomst.reason(haarlem), /Past bij rit 3/);
+  assert.ok(v2.fn.nearbyAdditions([doorn]).some((kandidaat) => kandidaat.item.order.id === haarlem.id), "en wordt daar aangeboden, ook met de oude regels");
+});
+
+test("een getagde XXL bak buiten zijn budget valt niet stil terug op DHL", () => {
+  const xxl = order("Groningen", 53.22, 6.57, { shop: DSP, products: ["1x Slowfeeder XXL Pony Edition"], ownDeliveryTagged: true });
+  const uitkomst = plan(v3, [xxl]);
+  assert.equal(uitkomst.decision(xxl), "review");
+  assert.match(uitkomst.reason(xxl), /getagd als eigen bezorging/);
+});
+
+test("een onafgemaakte rit van gisteren houdt zijn orders vast", () => {
+  const doorn = order("Doorn", 52.03, 5.32);
+  const uitkomst = plan(v3, [doorn], { planned: [{ id: "r4", number: 4, date: isoOffset(-1), name: "Doorn", orderKeys: [`${DRS}:${doorn.id}`] }] });
+  assert.equal(uitkomst.decision(doorn), "planned");
+  assert.match(uitkomst.reason(doorn), /nog open in rit 4/);
+  const afgebroken = plan(v3, [doorn], { planned: [{ id: "r5", number: 5, date: isoOffset(-1), name: "Doorn", abortedAt: "x", orderKeys: [] , droppedKeys: [`${DRS}:${doorn.id}`] }] });
+  assert.equal(afgebroken.decision(doorn), "include", "na afbreken is hij weer vrij");
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);

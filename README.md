@@ -1,88 +1,108 @@
-# Vervoersplanning V2 — experiment
+# Vervoersplanning V2
 
-Deze map bevat een losstaande proefversie. De bestaande GPT en V1-site worden niet gewijzigd.
+De planning voor eigen bezorging van De Rijplaten Specialist en De Slowfeeder Specialist.
 
-Live proefversie: https://bartvanengelenhoven.github.io/vervoersplanning-v2/
+- Site: https://bartvanengelenhoven.github.io/vervoersplanning-v2/
+- Handleiding voor planners en bezorgers: https://bartvanengelenhoven.github.io/vervoersplanning-v2/handleiding.html
 
-## Wat deze eerste versie doet
+## Wat de site doet
 
-- laadt automatisch ordergegevens uit een JSON-bron;
-- beoordeelt orders met vaste, uitlegbare regels;
-- toont `Meenemen`, `Controleren` of `Niet meenemen`;
-- groepeert geschikte orders tot eenvoudige ritvoorstellen;
-- ververst automatisch iedere minuut;
-- schrijft niets terug.
+- Leest de open orders van beide winkels, die Shopify via webhooks doorgeeft.
+- Deelt elke order in: **Meenemen**, **Ingepland**, **Controleren**, **DHL**, **Te ver** of **Niet meenemen**. De regels staan in de site onder *Regels* en worden rechtstreeks uit de code opgebouwd.
+- Maakt ritvoorstellen (A, B, C…). Een voorstel dat je inplant, krijgt een vast ritnummer dat nooit terugkomt.
+- Laat de bezorger op de telefoon zijn ritten zien, met per stop naam, adres, telefoon, producten en opmerking, en een knop *Bezorgd*.
+- Ververst elke 2 minuten zolang het scherm zichtbaar is; ritten en historie elke 10 minuten en na elke actie.
 
-De meegeleverde gegevens zijn fictief. Plaats nooit Shopify-sleutels of echte klantgegevens in deze openbare map.
+Wat de site in Shopify verandert:
 
-## Gratis publiceren via GitHub Pages
+- **Bezorgd**: zet de order op verzonden (fulfilled), **zonder** mail aan de klant, en schrijft een regel in de ordernotitie.
+- **Terugdraaien**: annuleert die verzending weer. Alleen voor verzendingen die de planning zelf maakte.
+- Een **pakket in een ingeplande rit** en **Toch zelf bezorgen** krijgen de tag `eigen bezorging`, zodat wie de DHL-labels print ze overslaat.
+- De **aankondiging om 16:00** staat op proef: zie hieronder.
 
-1. Maak een gratis GitHub-account en een lege repository aan.
-2. Zet de inhoud van deze map in de repository.
-3. Kies in GitHub onder **Settings → Pages → Source** voor **GitHub Actions**.
-4. Een push naar `main` publiceert de site automatisch.
+## Codes en rollen
 
-## Eerste automatische koppeling
+Er zijn twee codes, allebei Worker-secrets:
 
-Deze repo bevat nu ook een backend-template in `backend-worker.js`. Die is bedoeld voor Cloudflare Workers of een vergelijkbare veilige backend. De openbare GitHub Pages-site mag alleen opgeschoonde ordergegevens lezen. Shopify secrets blijven in de backend.
+- `OPERATOR_KEY`: de planner. Opent alles.
+- `DRIVER_KEY`: de bezorger. Ziet alleen de ritten van de week ervoor tot de week erna, mag daarvan bezorgd melden en een rit afbreken, en mag onderweg een order meenemen in de rit die hij nu rijdt, maar alleen een order die de planning zelf zou aanbieden (betaald, adres compleet, geen afspraak, de dag blijft binnen 5:45). Van andere orders krijgt de telefoon alleen plaats, postcodecijfers, product en een punt op ongeveer een kilometer nauwkeurig; geen naam, straat of telefoon.
 
-Stroom:
+Er zit geen rem op verkeerde pogingen. Kies daarom lange codes, minstens twaalf tekens. De browser onthoudt de code; *Uitloggen* (in het menu, en onderaan het bezorgersscherm) vergeet hem op dat apparaat. Een code wijzigen doe je met `npx wrangler secret put OPERATOR_KEY` (of `DRIVER_KEY`); iedereen moet daarna de nieuwe code invullen.
 
-1. Shopify stuurt een order-webhook naar `/webhooks/shopify/orders`.
-2. De backend controleert de Shopify HMAC-handtekening.
-3. De backend vertaalt de Shopify order naar het simpele planningformaat dat `app.js` al gebruikt.
-4. De backend bewaart alleen de planningvelden.
-5. De V2-site leest `/orders` en ververst automatisch.
+## Privacy (AVG)
 
-Voor live gebruik:
+Wat de Worker bewaart (Cloudflare KV) en hoe lang:
 
-1. Maak een KV namespace `PLANNING_ORDERS`.
-2. Kopieer `wrangler.example.toml` naar `wrangler.toml` en vul de KV namespace-id in.
-3. Deploy `backend-worker.js` als Worker.
-4. Zet `SHOPIFY_WEBHOOK_SECRET` als secret in de Worker.
-5. Zet optioneel `CORS_ORIGIN=https://bartvanengelenhoven.github.io`.
-6. Vul in `config.js` de Worker `/orders` URL in.
-7. Voeg in Shopify webhooks toe voor order create/update/cancel/fulfilled naar `/webhooks/shopify/orders`.
+| Wat | Inhoud | Bewaard |
+| --- | --- | --- |
+| `order:` | open order: naam, adres, telefoon, klantopmerking, producten | zolang de order open is; geannuleerd nog 14 dagen |
+| `delivered:` | bezorgde order, **zonder** telefoon en klantopmerking; van een pakket dat niet met de bus ging alleen ordernummer, plaats en product | 60 dagen (voor records van vóór 25 september 2026 pas na het eenmalige opruimscript, zie hieronder) |
+| `plan:` | ingeplande rit: ordernummers, notities | tot 60 dagen na de ritdatum |
+| `plan-announce:` | verslag van de aankondiging | 60 dagen |
+| `geo:` | adres met coördinaat | 90 dagen (een adres dat niet gevonden werd: 7 dagen) |
 
-`config.js` bevat geen geheimen. Publiceer nooit Shopify API keys, webhook secrets of ruwe klantgegevens in deze repo.
+Wie gegevens te zien krijgt:
 
-## Operatorcode beschermt ook het lezen
+- **Cloudflare** draait de Worker en de opslag.
+- **GitHub Pages** host alleen de site zelf, zonder klantgegevens.
+- **PDOK** (de overheid) krijgt de adressen van Nederlandse orders, om ze op de kaart te zetten. Buitenlandse adressen gaan nergens heen.
+- **Google Maps**: de kaart op *Vandaag* laadt de adressen van de gekozen rit. De Maps-links gaan pas open als je erop tikt.
+- **OpenStreetMap** levert de kaarttegels voor *Kaart*; **unpkg** levert de kaartbibliotheek Leaflet, vastgezet op één versie met een controle-hash.
 
-`/orders` en `/history` geven klantnamen en adressen terug. Beide eisen daarom de
-`OPERATOR_KEY` in de header `x-operator-key`, net als de schrijfacties. De site
-vraagt de code eenmalig en onthoudt hem in de browser.
+**Eenmalig opruimen.** De bezorgd-records van vóór 25 september 2026 hebben nog geen bewaartermijn en bevatten soms een telefoonnummer. Draai daarom één keer, direct ná het deployen van de Worker, vanuit deze map:
 
-Twee dingen die hierbij horen:
+```bash
+node scripts/historie-bewaartermijn.mjs
+```
 
-- **Preview URLs staan uit.** Cloudflare zet standaard elke uitgerolde versie op
-  een eigen adres, bijvoorbeeld `https://<versie>-vervoersplanning-v2-backend...`.
-  Oudere versies van vóór deze beveiliging gaven daar de klantgegevens zonder code
-  vrij. `preview_urls = false` staat daarom in `wrangler.toml`, en de instelling is
-  ook op de Worker zelf uitgezet.
-- **Er zit geen rem op verkeerde pogingen.** Kies daarom een lange code, minstens
-  twaalf tekens. Een korte code is binnen een minuut te raden.
+Het script laat zien wat het gaat doen en vraagt eerst om "ja".
 
-## Volgende fase
+**Een klant laten wissen.** Vraagt een klant om verwijdering, wis dan in Shopify de klant en daarna de kopieën hier (vervang winkel en ordernummer):
 
-De Shopify-koppeling heeft een beveiligde backend nodig. GitHub Pages blijft het dashboard hosten; de backend bewaart de Shopify-sleutel, verifieert webhooks en geeft alleen de benodigde planninggegevens door.
+```bash
+npx wrangler kv key delete --binding PLANNING_ORDERS --remote "order:<winkel>.myshopify.com:#<ordernummer>"
+npx wrangler kv key delete --binding PLANNING_ORDERS --remote "delivered:<winkel>.myshopify.com:#<ordernummer>"
+```
 
-De regelset moet samen met de planner worden vastgesteld voordat V2 echte beslissingen mag nemen.
+Het adres als kaartpunt (`geo:<adres in kleine letters>`) verloopt vanzelf binnen 90 dagen, maar kan op dezelfde manier weg.
 
+Oude versies van de Worker zijn niet bereikbaar: `preview_urls = false` staat bovenaan `wrangler.toml`. Die regel moet boven de eerste `[sectie]` staan; eronder is het een gewone variabele en doet hij niets.
+
+## Rijtijden
+
+Gratis, zonder Google: PDOK zoekt de coördinaten van elk adres op, en de rijtijd wordt geschat als 20,2 minuten op- en afrijden per rit, 5 minuten per extra stop en 0,975 minuut per kilometer hemelsbreed (gemeten op 25 echte adressen, gemiddeld 3,7 minuten mis per enkele reis). Lossen: 20 minuten per stop, 90 voor een hooihuisje.
+
+Zet **geen** `GOOGLE_MAPS_API_KEY`: Google rekent daarvoor.
+
+## Ritregels van september 2026
+
+De controle van september 2026 vond een paar plekken waar de planning afweek van de afgesproken regels: een hooihuisje gaf alle orders in dezelfde richting een onbeperkt budget, een adres in het buitenland kwam op het depot terecht, buren aan weerszijden van een windrichting telden niet samen, en een groep net boven budget kreeg geen ritvoorstel. De verbeteringen staan achter `ritregelsV3` in `CONFIG` bovenaan `app.js`. `test-planning.mjs` laat per regel zien wat er verandert.
+
+## De aankondiging om 16:00
+
+Om 16:00 de dag vóór een ingeplande rit zet de Worker de betaalde orders van die rit in Shopify op verzonden, **met** de verzendmail aan de klant. Om 16:10 volgt een tweede ronde voor wat de eerste niet kon afmaken. Zolang `AUTO_FULFILL` niet `aan` is, is dit een proef: er gaat niets naar Shopify of klanten, en de agenda toont wat er zou gebeuren.
+
+Voordat je hem aanzet:
+
+1. Test in beide winkels welke verzendmail Shopify stuurt zonder vervoerder, en pas de template aan ("wij bezorgen morgen met onze eigen bus").
+2. Kijk of er apps of Flows reageren op *fulfilled* (een reviewverzoek, een factuur): die gaan dan een dag vóór de bezorging af.
+3. Loop de agenda van de komende dagen na en haal proefritten weg.
+4. Zet hem aan ná 16:00, zodat de eerste echte ronde pas de volgende dag is: `npx wrangler secret put AUTO_FULFILL` met de waarde `aan`. Een secret blijft staan bij een deploy; een variabele in het dashboard niet.
 
 ## Lokale checks
-
-Controleer de frontend en Shopify mapping lokaal met:
 
 ```bash
 npm install
 npm run check
 ```
 
-## Backend live zetten met Cloudflare Workers
+Dat controleert de syntax, de vertaling van Shopify-orders, alle Worker-stromen tegen een nagebootste Shopify (`test-backend-flows.mjs`) en de ritregels op verzonnen orders (`test-planning.mjs`).
 
-De V2-site is een statische GitHub Pages-site. Shopify webhooks kunnen daar niet rechtstreeks heen, omdat Shopify een veilige server nodig heeft die secrets bewaart en webhook-handtekeningen controleert. Gebruik daarom de Worker uit `backend-worker.js`.
+## De Worker live zetten
 
-Eenmalige setup:
+De site is statisch (GitHub Pages). De Worker in `backend-worker.js` (Cloudflare Workers, gratis plan) ontvangt de Shopify-webhooks, bewaart de orders en praat met Shopify.
+
+Eenmalig:
 
 ```bash
 npm install
@@ -90,83 +110,35 @@ npx wrangler login
 npx wrangler kv namespace create PLANNING_ORDERS
 ```
 
-Kopieer daarna `wrangler.example.toml` naar `wrangler.toml` en vul de KV namespace-id in. `wrangler.toml` staat bewust in `.gitignore`, omdat dit lokale deploy-config is.
+Kopieer `wrangler.example.toml` naar `wrangler.toml` en vul de KV namespace-id in. `wrangler.toml` staat bewust in `.gitignore`.
 
-Zet daarna de Shopify webhook secret als Worker secret:
+Secrets:
 
 ```bash
+npx wrangler secret put OPERATOR_KEY
+npx wrangler secret put DRIVER_KEY
 npx wrangler secret put SHOPIFY_WEBHOOK_SECRET
+npx wrangler secret put SHOPIFY_CLIENT_ID
+npx wrangler secret put SHOPIFY_CLIENT_SECRET
 ```
 
-Deploy de Worker:
+Deploy:
 
 ```bash
 npm run worker:deploy
 ```
 
-Vul daarna in `config.js` de publieke Worker URL in, bijvoorbeeld:
+`config.js` bevat alleen de publieke Worker-URL, nooit een sleutel of code.
 
-```js
-window.VERVOERSPLANNING_CONFIG = {
-  dataUrl: "https://vervoersplanning-v2-backend.<cloudflare-subdomain>.workers.dev/orders",
-};
-```
+## Shopify-koppeling
 
-Shopify webhooks:
-
-- maak in Shopify een webhook secret aan;
-- voeg order create/update/cancel/fulfilled webhooks toe;
-- gebruik als webhook URL: `https://<worker-url>/webhooks/shopify/orders`;
-- zet formaat op JSON.
-
-Na een nieuwe order schrijft Shopify naar de Worker. De Worker bewaart alleen het planningformaat. De V2-site leest elke minuut `/orders`.
-
-## Shopify app toegang voor "Bezorgd"
-
-De V2-site kan een order pas als bezorgd markeren als de Worker Shopify Admin API toegang heeft. In de nieuwe Shopify Dev Dashboard-flow wordt die token niet meer los getoond. De Worker heeft daarom een OAuth-installatiestap.
-
-Benodigd per omgeving:
-
-- `OPERATOR_KEY`: korte interne code die de planner invult wanneer op **Bezorgd** wordt geklikt.
-- `SHOPIFY_CLIENT_ID`: Client ID uit Shopify Dev Dashboard.
-- `SHOPIFY_CLIENT_SECRET`: Secret uit Shopify Dev Dashboard.
-- `SHOPIFY_ADMIN_SCOPES`: optioneel, komma-gescheiden scopes. Zonder deze variabele gebruikt de Worker de standaard order/fulfillment scopes.
-
-Standaard gebruikt de Worker deze scopes:
+De Worker krijgt toegang tot Shopify via een eigen app (Shopify Dev Dashboard) en een installatie per winkel. Installeren kan alleen voor de twee eigen winkels:
 
 ```text
-read_orders,write_orders,read_fulfillments,write_fulfillments,read_assigned_fulfillment_orders,write_assigned_fulfillment_orders,read_merchant_managed_fulfillment_orders,write_merchant_managed_fulfillment_orders
-```
-
-Zet in Shopify Dev Dashboard bij de app:
-
-- App URL: `https://<worker-url>/auth/shopify?shop=<shop>.myshopify.com`
-- Allowed redirection URL: `https://<worker-url>/auth/shopify/callback`
-
-Installeer daarna per shop via:
-
-```text
-https://<worker-url>/auth/shopify?shop=slowfeeder-specialist.myshopify.com
 https://<worker-url>/auth/shopify?shop=de-rijplaten-specialist.myshopify.com
+https://<worker-url>/auth/shopify?shop=slowfeeder-specialist.myshopify.com
 ```
 
-De Worker bewaart de verkregen Admin API token veilig in `PLANNING_ORDERS`.
+Zet bij de app als App URL `https://<worker-url>/auth/shopify?shop=<winkel>.myshopify.com` en als redirect `https://<worker-url>/auth/shopify/callback`. De Worker registreert zelf de webhooks voor order aangemaakt, gewijzigd en verzonden.
 
-Flow:
-
-1. Planner klikt op **Bezorgd** bij een order in V2.
-2. V2 vraagt om de operatorcode.
-3. Worker controleert `OPERATOR_KEY`.
-4. Worker gebruikt de opgeslagen Shopify Admin token voor de shop.
-5. Worker maakt de fulfillment aan in Shopify.
-6. Worker verwijdert de order uit `PLANNING_ORDERS`.
-
-## Google Maps routes
-
-V2 maakt nu per rit alvast een klikbare Google Maps route met start en einde `Goorsteeg 46, Ede`. Exacte rijtijd, afstand en optimale stopvolgorde vragen een Google Maps API key in Cloudflare:
-
-```text
-GOOGLE_MAPS_API_KEY
-```
-
-De API key hoort in Cloudflare als secret/env var, niet in `config.js`. De huidige ritduur is daarom nog een ruwe schatting: 35 minuten rijtijd per stop, minimaal 60 minuten, plus 20 minuten afleveringstijd of 90 minuten voor houten hooihuisjes.
+De Shopify API-versie staat op één plek bovenaan `backend-worker.js` (`SHOPIFY_API_VERSION`). Shopify ondersteunt een versie een jaar; zet hem jaarlijks een stap verder en draai `npm run check`.
