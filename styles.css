@@ -590,3 +590,4 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
   .nav-item .nav-short { display: inline; }
 }
 .route-footer .save-concept { margin-left: auto; }
+.concept-stops li .concept-also { color: #8c352c; font-weight: 650; }

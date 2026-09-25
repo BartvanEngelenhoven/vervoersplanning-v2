@@ -892,14 +892,18 @@ async function placeRouteOnDay(date) {
   }
   state.routeInHand = null;
   state.routeInHandConcept = null;
-  // A concept that is planned is a route now; an opened one closes.
+  // A concept that is planned is a route now; an opened one closes. Orders
+  // added to it meanwhile on another screen stay behind in the concept.
   if (conceptId && state.openConcept?.id === conceptId) {
     state.openConcept = null;
     state.manualRoute = null;
   }
+  if (conceptId && result.conceptLeft?.length) {
+    window.alert(`Ingepland. ${result.conceptLeft.map((key) => key.split(":").pop()).join(", ")} ${result.conceptLeft.length === 1 ? "kwam" : "kwamen"} er intussen bij en ${result.conceptLeft.length === 1 ? "staat" : "staan"} nog in het concept.`);
+  }
   // A route of the planner's own making is planned now: it leaves Vandaag, and
   // its orders leave the selection, rather than stay with a live Inplannen.
-  if (state.manualRoute && !state.openPlan) {
+  if (!conceptId && state.manualRoute && !state.openPlan) {
     route.orders.forEach((order) => state.selected.delete(orderKey(order)));
     state.manualRoute = null;
     activeMapRouteIndex = 0;
@@ -1040,6 +1044,7 @@ function renderAgenda() {
 async function openPlannedRoute(planned) {
   if (!planned) return;
   state.openPlan = planned;
+  state.openConcept = null;
   state.manualRoute = null;
   await refreshData();
   applyOpenPlan();
@@ -1162,7 +1167,7 @@ function renderPlanningMap() {
   // there the panel above, which saves, is the way to add.
   const routeKeys = new Set(route.orders.map(orderKey));
   const addableOrders = state.openPlan ? [] : state.decisions
-    .filter((item) => !routeKeys.has(orderKey(item.order)) && !["exclude", "planned"].includes(item.decision))
+    .filter((item) => !routeKeys.has(orderKey(item.order)) && !["exclude", "planned", "concept"].includes(item.decision))
     .filter((item) => !CONFIG.ritregelsV3 || hasKnownPoint(item.order))
     .map((item) => item.order)
     .map((order) => {
@@ -1694,7 +1699,8 @@ async function addOrderToRoute(order, routeIndex) {
   const key = orderKey(order);
   const keys = [...route.orders.map(orderKey).filter((entry) => entry !== key), key];
   if (state.openConcept) {
-    if (await saveOpenConcept(keys)) rebuildPlanning();
+    await saveOpenConcept((saved) => [...saved.filter((entry) => entry !== key), key]);
+    rebuildPlanning();
     return;
   }
   const removed = new Set(state.manualRoute?.removed || []);
@@ -1717,16 +1723,15 @@ async function removeOrderFromRoute(key, routeIndex) {
   if (!stop) return;
   const keys = route.orders.map(orderKey).filter((entry) => entry !== key);
   if (state.openConcept) {
-    if (!keys.length) {
+    if (state.conceptSaving) return;
+    if (!state.openConcept.orderKeys.some((entry) => entry !== key)) {
       if (window.confirm(`${stop.id} is de laatste stop. Het concept verwijderen? De order komt terug in de planning.`)) await removeConcept(state.openConcept, { ask: false });
       return;
     }
     const removed = new Set(state.manualRoute?.removed || []);
     removed.add(key);
-    if (await saveOpenConcept(keys)) {
-      state.manualRoute = { keys, removed, concept: true };
-      rebuildPlanning();
-    }
+    if (await saveOpenConcept((saved) => saved.filter((entry) => entry !== key))) state.manualRoute = { ...(state.manualRoute || {}), removed, concept: true };
+    rebuildPlanning();
     return;
   }
   if (!state.manualRoute && !window.confirm(`${stop.id} uit deze rit halen? Je ziet dan alleen deze rit; met "Toon weer alle ritten" komen de andere voorstellen terug.`)) return;
@@ -2288,7 +2293,8 @@ async function savePlan({ id, date, fromDate, name, keys, tagKeys = [], conceptI
     return { error: "Inplannen is niet gelukt: geen verbinding. Probeer het opnieuw." };
   }
   if (!response.ok) return { error: await errorText(response, "Inplannen is niet gelukt. Probeer het opnieuw.") };
-  return { route: (await response.json()).route || null };
+  const payload = await response.json();
+  return { route: payload.route || null, conceptLeft: payload.conceptLeft || [] };
 }
 
 async function removePlannedRoute(planned) {
@@ -2639,7 +2645,7 @@ function manualRouteOrders() {
   const route = state.manualRoute;
   if (!route) return [];
   const byKey = new Map(state.allOrders.map((order) => [orderKey(order), order]));
-  return route.keys.map((key) => byKey.get(key)).filter((order) => order && !order.cancelled && !order.fulfilled);
+  return route.keys.map((key) => byKey.get(key)).filter((order) => order && !order.cancelled && !order.fulfilled && !order.refunded);
 }
 
 // An opened planned route follows its saved record on every refresh: the stops
@@ -2670,6 +2676,7 @@ function needsOwnDeliveryTag(order) {
 function urgentDecisions() {
   return state.decisions.filter((item) => {
     if (!["include", "review", "planned", "concept"].includes(item.decision)) return false;
+    if (item.order.cancelled || item.order.refunded || item.order.fulfilled) return false;
     const days = item.order.dueDate ? daysUntil(item.order.dueDate) : null;
     return days !== null && days <= 0;
   });
@@ -2858,6 +2865,10 @@ function newId(prefix) {
 // An opened concept follows its saved record: its stops that are still open.
 function syncOpenConcept() {
   if (!state.openConcept) return;
+  if (state.openPlan) {
+    state.openConcept = null;
+    return;
+  }
   const fresh = state.concepts.find((concept) => concept.id === state.openConcept.id);
   if (!fresh) {
     state.openConcept = null;
@@ -2910,19 +2921,49 @@ async function saveRouteAsConcept(route, button) {
   showView("concepten");
 }
 
-// Every change to an opened concept is saved at once, like a planned route.
-async function saveOpenConcept(keys) {
+// Every change to an opened concept is saved at once, like a planned route. One
+// at a time: a second tap while the first is still on its way would start from
+// the old stops and quietly undo the first. `change` gets the stops as last
+// saved and returns the new list.
+async function saveOpenConcept(change) {
   const concept = state.openConcept;
-  if (!concept) return false;
-  const byKey = new Map(state.allOrders.map((order) => [orderKey(order), order]));
-  const orders = keys.map((key) => byKey.get(key)).filter(Boolean);
-  const result = await postConcept("/concepts/save", { id: concept.id, name: routeLabel({ orders, region: concept.name }), orderKeys: keys });
-  if (result.error) {
-    window.alert(result.error);
-    return false;
+  if (!concept || state.conceptSaving) return false;
+  state.conceptSaving = true;
+  document.querySelectorAll("#routes .remove-route-stop, #mapView .remove-from-active-route, #mapView .add-to-active-route, #suggestions .add-suggestion").forEach((button) => { button.disabled = true; });
+  try {
+    const keys = change([...concept.orderKeys]);
+    const byKey = new Map(state.allOrders.map((order) => [orderKey(order), order]));
+    const orders = keys.map((key) => byKey.get(key)).filter(Boolean);
+    let response = null;
+    try {
+      response = await backendFetch(`${CONFIG.apiBaseUrl}/concepts/save`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: concept.id, name: routeLabel({ orders, region: concept.name }), orderKeys: keys, update: true }),
+      });
+    } catch {
+      response = null;
+    }
+    if (!response?.ok) {
+      window.alert(response ? await errorText(response, "Opslaan is niet gelukt. Probeer het opnieuw.") : "Geen verbinding. Probeer het opnieuw.");
+      // Removed or planned elsewhere: there is nothing left to edit here.
+      if (response?.status === 404) {
+        state.openConcept = null;
+        state.manualRoute = null;
+        state.plan = (await fetchPlan()) || state.plan;
+      }
+      return false;
+    }
+    const saved = (await response.json()).concept;
+    if (saved) {
+      state.openConcept = saved;
+      state.concepts = state.concepts.map((entry) => (entry.id === saved.id ? saved : entry));
+    }
+    state.plan = (await fetchPlan()) || state.plan;
+    return true;
+  } finally {
+    state.conceptSaving = false;
   }
-  state.plan = (await fetchPlan()) || state.plan;
-  return true;
 }
 
 async function removeConcept(concept, { ask = true } = {}) {
@@ -2984,7 +3025,12 @@ function renderConcepts() {
     const gemaakt = new Date(concept.createdAt);
     const dagen = Math.round((vandaag - startOfDay(gemaakt)) / 86_400_000);
     const leeftijd = dagen >= 7 ? `<span class="concept-age">al ${dagen} dagen oud</span>` : "";
-    const stops = route ? route.orders.map((order) => `<li><b>${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}</b><span>${productSummary(order)}</span></li>`).join("") : "";
+    // Two screens at once can put an order in a concept and a route: say so,
+    // so it can be taken out of one of them.
+    const stops = route ? route.orders.map((order) => {
+      const ook = plannedFor(order);
+      return `<li><b>${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}</b><span>${productSummary(order)}</span>${ook ? `<span class="concept-also">Staat ook in rit ${escapeHtml(ook.number || "?")} op ${formatDate(ook.date)}: haal hem uit een van de twee.</span>` : ""}</li>`;
+    }).join("") : "";
     return `<article class="concept-card">
       <div class="concept-head">
         <div><h2>${escapeHtml(concept.name)}</h2>
@@ -3019,15 +3065,20 @@ function renderConceptBar() {
     bar.innerHTML = "";
     return;
   }
-  bar.innerHTML = `<p><strong>Concept: ${escapeHtml(concept.name)}</strong> Wat je hier verandert, wordt meteen in het concept opgeslagen.</p>
+  const route = allRoutes()[0];
+  bar.innerHTML = route
+    ? `<p><strong>Concept: ${escapeHtml(concept.name)}</strong> Wat je hier verandert, wordt meteen in het concept opgeslagen.</p>
     <div class="concept-bar-actions">
       <button id="conceptBarPlan" class="button primary" type="button">Inplannen</button>
       <button id="conceptBarClose" class="button subtle-action" type="button">Sluiten</button>
+    </div>`
+    : `<p><strong>Concept: ${escapeHtml(concept.name)}</strong> Geen van de orders staat nog open: ze zijn bezorgd, geannuleerd of verzonden.</p>
+    <div class="concept-bar-actions">
+      <button id="conceptBarRemove" class="button primary" type="button">Concept verwijderen</button>
+      <button id="conceptBarClose" class="button subtle-action" type="button">Sluiten</button>
     </div>`;
-  bar.querySelector("#conceptBarPlan").addEventListener("click", () => {
-    const route = allRoutes()[0];
-    if (route) putRouteInHand(route, concept.id);
-  });
+  bar.querySelector("#conceptBarPlan")?.addEventListener("click", () => putRouteInHand(route, concept.id));
+  bar.querySelector("#conceptBarRemove")?.addEventListener("click", () => removeConcept(concept));
   bar.querySelector("#conceptBarClose").addEventListener("click", closeConcept);
 }
 

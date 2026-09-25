@@ -662,6 +662,41 @@ await test("concept: de bezorger kan een concept-order niet meenemen, verwijdere
   assert.equal(free.status, 200, JSON.stringify(free.data));
 });
 
+await test("concept: wat er intussen bij kwam blijft staan, en een nieuwe poging ruimt het concept alsnog op", async () => {
+  const env = makeEnv();
+  const a = await seedOrder(env, DRS, "#DRS720");
+  const b = await seedOrder(env, DRS, "#DRS721");
+  const id = "55555555-aaaa-bbbb-cccc-000000000005";
+  await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id, name: "Doorn", orderKeys: [a.key, b.key] } });
+  const planned = await call(env, "POST", "/plan/assign", { key: PLANNER, body: { id: "66666666-aaaa-bbbb-cccc-000000000006", date: amsterdamDay(1), orderKeys: [a.key], conceptId: id } });
+  assert.equal(planned.status, 200, JSON.stringify(planned.data));
+  assert.deepEqual(planned.data.conceptLeft, [b.key]);
+  const left = (await call(env, "GET", "/plan", { key: PLANNER })).data.concepts;
+  assert.deepEqual(left.map((concept) => concept.orderKeys), [[b.key]]);
+
+  // A concept that is not about these orders is left alone.
+  const other = "77777777-aaaa-bbbb-cccc-000000000007";
+  const c = await seedOrder(env, DRS, "#DRS722");
+  const d = await seedOrder(env, DRS, "#DRS723");
+  await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id: other, name: "Anders", orderKeys: [d.key] } });
+  await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(2), orderKeys: [c.key], conceptId: other } });
+  assert.ok((await call(env, "GET", "/plan", { key: PLANNER })).data.concepts.some((concept) => concept.id === other));
+
+  // Half finished: the route saved, the concept not cleared. The retry clears it.
+  const third = "88888888-aaaa-bbbb-cccc-000000000008";
+  const routeId = "99999999-aaaa-bbbb-cccc-000000000009";
+  await env.PLANNING_ORDERS.delete(`plan-concept:${id}`);
+  await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id: third, name: "Doorn", orderKeys: [b.key] } });
+  await env.PLANNING_ORDERS.put(`plan:${amsterdamDay(3)}:${routeId}`, JSON.stringify({ id: routeId, number: 9, date: amsterdamDay(3), name: "Doorn", orderKeys: [b.key] }), { expirationTtl: 86400 * 30 });
+  const retry = await call(env, "POST", "/plan/assign", { key: PLANNER, body: { id: routeId, date: amsterdamDay(3), orderKeys: [b.key], conceptId: third } });
+  assert.equal(retry.data.already, true);
+  assert.ok(!(await call(env, "GET", "/plan", { key: PLANNER })).data.concepts.some((concept) => concept.id === third));
+
+  // A change to a concept removed elsewhere does not bring it back.
+  const gone = await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id: third, orderKeys: [b.key], update: true } });
+  assert.equal(gone.status, 404);
+});
+
 // --- The announcement --------------------------------------------------------
 
 function scheduledAt(iso) {

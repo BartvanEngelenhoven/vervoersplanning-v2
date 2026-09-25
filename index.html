@@ -14,7 +14,7 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <!-- ?v= changes with each release, so phones and browsers fetch the new
          files instead of an old copy that no longer fits the backend. -->
-    <link rel="stylesheet" href="styles.css?v=20260925b" />
+    <link rel="stylesheet" href="styles.css?v=20260925c" />
   </head>
   <body>
     <div class="portal">
@@ -143,7 +143,7 @@
               <div><h1 class="view-title">Orders</h1></div>
               <div class="filters">
                 <label class="search"><span>Zoeken</span><input id="searchInput" type="search" placeholder="Order, klant of plaats" /></label>
-                <label><span>Status</span><select id="decisionFilter"><option value="all">Alles</option><option value="urgent">Vandaag of te laat</option><option value="include">Meenemen</option><option value="planned">Ingepland</option><option value="review">Controleren</option><option value="dhl">DHL</option><option value="far">Te ver</option><option value="exclude">Niet meenemen</option></select></label>
+                <label><span>Status</span><select id="decisionFilter"><option value="all">Alles</option><option value="urgent">Vandaag of te laat</option><option value="include">Meenemen</option><option value="planned">Ingepland</option><option value="concept">In concept</option><option value="review">Controleren</option><option value="dhl">DHL</option><option value="far">Te ver</option><option value="exclude">Niet meenemen</option></select></label>
               </div>
             </div>
             <div id="selectionBar" class="selection-bar" hidden>
@@ -197,7 +197,7 @@
     </template>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
-    <script src="config.js?v=20260925b" defer></script>
-    <script src="app.js?v=20260925b" defer></script>
+    <script src="config.js?v=20260925c" defer></script>
+    <script src="app.js?v=20260925c" defer></script>
   </body>
 </html>

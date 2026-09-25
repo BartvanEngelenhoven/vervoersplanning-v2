@@ -1191,6 +1191,9 @@ async function assignPlanRoute(request, env) {
   // Sent twice for the same day (a double click, a retry after a lost answer):
   // the route that was made stands, and no second number is used up.
   if (bestaand && !fromDate && bestaand.orderKeys?.join("|") === orderKeys.join("|")) {
+    // The first try may have saved the route and failed before clearing its
+    // concept; a retry finishes that.
+    if (payload.conceptId) await settleConcept(env, String(payload.conceptId), orderKeys);
     return json({ route: bestaand, already: true }, 200, env);
   }
 
@@ -1256,11 +1259,29 @@ async function assignPlanRoute(request, env) {
   // Moving a route to another day writes the new record and drops the old one,
   // so the same route can never sit on two days at once.
   if (fromDate && fromDate !== date) await env.PLANNING_ORDERS.delete(`${PLAN_PREFIX}${fromDate}:${id}`);
-  // A concept that is planned is a route now; the draft goes.
-  if (conceptId && held.size && [...held.values()].some((concept) => concept.id === conceptId)) {
+  // A concept that is planned is a route now; the draft goes. Orders added to
+  // it meanwhile (on another screen) are not dropped: they stay in the concept.
+  const conceptLeft = conceptId ? await settleConcept(env, conceptId, orderKeys) : [];
+  return json({ route: record, conceptLeft }, 200, env);
+}
+
+// After a concept is planned: remove it when the route took all its open orders,
+// otherwise keep it with what is left. Only a concept that held at least one of
+// the planned orders is touched. Returns the keys it kept.
+async function settleConcept(env, conceptId, plannedKeys) {
+  const concept = await env.PLANNING_ORDERS.get(`${CONCEPT_PREFIX}${conceptId}`, "json");
+  if (!concept || !(concept.orderKeys || []).some((key) => plannedKeys.includes(key))) return [];
+  const rest = (concept.orderKeys || []).filter((key) => !plannedKeys.includes(key));
+  const open = (await Promise.all(rest.map(async (key) => {
+    const order = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
+    return order && !order.cancelled && !order.fulfilled && !order.refunded ? key : null;
+  }))).filter(Boolean);
+  if (!open.length) {
     await env.PLANNING_ORDERS.delete(`${CONCEPT_PREFIX}${conceptId}`);
+    return [];
   }
-  return json({ route: record }, 200, env);
+  await env.PLANNING_ORDERS.put(`${CONCEPT_PREFIX}${conceptId}`, JSON.stringify({ ...concept, orderKeys: open, updatedAt: new Date().toISOString() }));
+  return open;
 }
 
 // A concept: a route put together and kept for later, not yet on a day and
@@ -1276,6 +1297,8 @@ async function saveConcept(request, env) {
   const orderKeys = cleanKeys(payload.orderKeys);
   const id = /^[A-Za-z0-9-]{8,64}$/.test(String(payload.id || "")) ? String(payload.id) : crypto.randomUUID();
   if (!orderKeys.length) return json({ error: "Een concept heeft minstens één stop nodig." }, 400, env);
+  const existing = await env.PLANNING_ORDERS.get(`${CONCEPT_PREFIX}${id}`, "json");
+  if (payload.update && !existing) return json({ error: "Dit concept bestaat niet meer: het is intussen ingepland of verwijderd." }, 404, env);
 
   const stops = await plannedStops(env, shiftDay(amsterdamNow().day, -7), "9999-12-31");
   const planned = orderKeys.filter((key) => stops.has(key));
@@ -1290,7 +1313,6 @@ async function saveConcept(request, env) {
     return json({ error: `${elsewhere.map((key) => key.split(":").pop()).join(", ")} ${elsewhere.length === 1 ? "staat" : "staan"} al in het concept ${first.name}.`, conflicts: elsewhere }, 409, env);
   }
 
-  const existing = await env.PLANNING_ORDERS.get(`${CONCEPT_PREFIX}${id}`, "json");
   const now = new Date().toISOString();
   const concept = { id, name: cleanName(payload.name, "Concept"), orderKeys, createdAt: existing?.createdAt || now, updatedAt: now };
   await env.PLANNING_ORDERS.put(`${CONCEPT_PREFIX}${id}`, JSON.stringify(concept));
