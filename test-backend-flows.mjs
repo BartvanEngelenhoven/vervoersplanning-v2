@@ -111,6 +111,7 @@ function fakeShopify(body) {
     if (!order) return { data: { order: null } };
     return { data: { order: {
       displayFulfillmentStatus: order.fulfilled ? "FULFILLED" : "UNFULFILLED",
+      fulfillments: order.fulfillments.map((id) => ({ id, createdAt: new Date().toISOString(), status: "SUCCESS" })),
       fulfillmentOrders: { nodes: [{ id: `${variables.id}/fo`, status: order.fulfilled ? "CLOSED" : "OPEN", lineItems: { nodes: [{ id: `${variables.id}/li`, remainingQuantity: order.fulfilled ? 0 : order.remaining }] } }] },
     } } };
   }
@@ -866,6 +867,53 @@ await test("de 5:45 van de bezorger telt wat vandaag al bezorgd is; zonder locat
   const unknown = await call(env, "POST", "/plan/add-stop", { key: DRIVER, body: { id: route.id, date: route.date, orderKey: nergens.key } });
   assert.equal(unknown.status, 403);
   assert.equal(unknown.data.error, "Van #DRS846 is geen locatie bekend, dus de rit is niet na te rekenen. Bel de planner.");
+});
+
+await test("de 5:45 zet een stop erbij alleen na wat al bezorgd is, en telt een terugbetaalde stop niet", async () => {
+  const env = makeEnv();
+  const kv = env.PLANNING_ORDERS;
+  const amsterdam = await seedPlaced(env, DRS, "#DRS860", { city: "Amsterdam", zip: "1011 AA", lat: 52.37, lon: 4.90 });
+  const apeldoorn = await seedPlaced(env, DRS, "#DRS861", { city: "Apeldoorn", zip: "7311 AA", lat: 52.21, lon: 5.97 });
+  const arnhem = await seedPlaced(env, DRS, "#DRS862", { city: "Arnhem", zip: "6811 AA", lat: 51.98, lon: 5.91 });
+  const haarlem = await seedPlaced(env, DRS, "#DRS863", { city: "Haarlem", zip: "2011 AA", lat: 52.38, lon: 4.64 });
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), name: "Rondje", orderKeys: [amsterdam.key, apeldoorn.key, arnhem.key] } })).data.route;
+  for (const stop of [amsterdam, apeldoorn]) {
+    assert.equal((await call(env, "POST", "/actions/mark-delivered", { key: DRIVER, body: { id: stop.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date } })).status, 200);
+  }
+  // Before Amsterdam it would cost an hour; the van is past Apeldoorn, though.
+  const terug = await call(env, "POST", "/plan/add-stop", { key: DRIVER, body: { id: route.id, date: route.date, orderKey: haarlem.key } });
+  assert.equal(terug.status, 403, JSON.stringify(terug.data));
+  assert.match(terug.data.error, /5:45/);
+
+  const kampen = await seedPlaced(env, DRS, "#DRS864", { city: "Kampen", zip: "8261 AA", lat: 52.55, lon: 5.91 });
+  const zwolle = await seedPlaced(env, DRS, "#DRS865", { city: "Zwolle", zip: "8011 AA", lat: 52.51, lon: 6.09 });
+  const meppel = await seedPlaced(env, DRS, "#DRS866", { city: "Meppel", zip: "7941 AA", lat: 52.70, lon: 6.19 });
+  const hoogeveen = await seedPlaced(env, DRS, "#DRS867", { city: "Hoogeveen", zip: "7901 AA", lat: 52.72, lon: 6.48 });
+  const assen = await seedPlaced(env, DRS, "#DRS868", { city: "Assen", zip: "9401 AA", lat: 52.99, lon: 6.56 });
+  const noord = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), name: "Noord", orderKeys: [kampen.key, zwolle.key, meppel.key, hoogeveen.key] } })).data.route;
+  const addAssen = () => call(env, "POST", "/plan/add-stop", { key: DRIVER, body: { id: noord.id, date: noord.date, orderKey: assen.key } });
+  assert.equal((await addAssen()).status, 403);
+  // Refunded after planning: not driven, so not counted.
+  for (const stop of [meppel, hoogeveen]) await kv.put(`order:${stop.key}`, JSON.stringify({ ...(await kv.get(`order:${stop.key}`, "json")), refunded: true }));
+  assert.equal((await addAssen()).status, 200);
+});
+
+await test("opnieuw Bezorgd na 'Geen antwoord' voor de webhook er is: Terugdraaien kent de verzending toch", async () => {
+  const env = makeEnv();
+  const kv = env.PLANNING_ORDERS;
+  const a = await seedOrder(env, DRS, "#DRS895");
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), orderKeys: [a.key] } })).data.route;
+  shop.failNext = { mode: "network-during", gid: a.order.shopifyOrderId };
+  const body = { id: a.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date };
+  assert.equal((await call(env, "POST", "/actions/mark-delivered", { key: DRIVER, body })).status, 502);
+  const retry = await call(env, "POST", "/actions/mark-delivered", { key: DRIVER, body });
+  assert.equal(retry.status, 200, JSON.stringify(retry.data));
+  const made = shop.orders.get(a.order.shopifyOrderId).fulfillments.at(-1);
+  await webhook(env, DRS, { ...a.raw, fulfillment_status: "fulfilled", updated_at: new Date(Date.now() + 1000).toISOString(), fulfillments: [{ admin_graphql_api_id: made, created_at: new Date().toISOString(), status: "success" }] });
+  const record = await kv.get(`delivered:${a.key}`, "json");
+  assert.equal(record.fulfillment?.id, made);
+  const undo = await call(env, "POST", "/actions/undo-delivered", { key: PLANNER, body: { id: a.order.id, shopDomain: DRS } });
+  assert.equal(undo.status, 200, JSON.stringify(undo.data));
 });
 
 await test("bezorger: zijn stops met punt, orders in ritten na zijn twee weken bezet, en wat vandaag al bezorgd is", async () => {

@@ -1006,10 +1006,15 @@ function announceLine(planned) {
     const later = (routeLog.results || []).every((result) => result.key)
       ? status.open.filter((order) => !gemeld.has(orderKey(order)) && !order.announced)
       : [];
+    // Until 16:10 the second run is still to come, and it takes them along.
+    const klok = amsterdamClock();
+    const rondeVolgt = !log.retriedAt && previousDay(planned.date) === klok.day && klok.hour === 16 && klok.minute < 10;
     const laterTekst = later.length
-      ? `<p class="agenda-announce laat">${later.map((order) => escapeHtml(order.id)).join(", ")} ${log.mode === "echt"
-        ? `na de aankondiging toegevoegd, niet aangekondigd: bel de ${later.length === 1 ? "klant" : "klanten"}`
-        : "na de proef toegevoegd, staat niet in dit verslag"}.</p>`
+      ? `<p class="agenda-announce laat">${later.map((order) => escapeHtml(order.id)).join(", ")} ${rondeVolgt
+        ? "na 16:00 toegevoegd; gaat mee met de ronde van 16:10"
+        : log.mode === "echt"
+          ? `na de aankondiging toegevoegd, niet aangekondigd: bel de ${later.length === 1 ? "klant" : "klanten"}`
+          : "na de proef toegevoegd, staat niet in dit verslag"}.</p>`
       : "";
     return `<p class="agenda-announce ${probleem ? "fout" : log.mode === "echt" ? "echt" : "proef"}">${soort} ${formatDateTime(log.retriedAt || log.ranAt)}: ${escapeHtml(tekst)}${probleem ? ". Kijk in Shopify bij deze orders." : ""}</p>${laterTekst}`;
   }
@@ -1021,8 +1026,9 @@ function announceLine(planned) {
   if (dagErvoor === vandaag && nu.hour >= 16) {
     const toen = planned.assignedAt ? new Date(planned.assignedAt) : null;
     const ingepland = toen && !Number.isNaN(toen.getTime()) ? amsterdamClock(toen) : null;
-    const wasErOp = ingepland && (ingepland.day < dagErvoor || (ingepland.day === dagErvoor && ingepland.hour < 16));
-    if (!wasErOp) return `<p class="agenda-announce laat">Na 16:00 ingepland, dus niet aangekondigd.</p>${eerderTekst}`;
+    // The run at 16:10 walks the routes again, so a route in before then is taken.
+    const wasErOp = ingepland && (ingepland.day < dagErvoor || (ingepland.day === dagErvoor && (ingepland.hour < 16 || (ingepland.hour === 16 && ingepland.minute < 10))));
+    if (!wasErOp) return `<p class="agenda-announce laat">Na 16:10 ingepland, dus niet aangekondigd.</p>${eerderTekst}`;
     if (nu.hour === 16 && nu.minute < 30) return `<p class="agenda-announce gepland">Aankondiging van 16:00 loopt; het verslag verschijnt hier zo.</p>${eerderTekst}`;
     return `<p class="agenda-announce fout">Geen verslag van de aankondiging van 16:00 gevonden. Kijk in Shopify of de klanten bericht kregen.</p>${eerderTekst}`;
   }
@@ -1809,8 +1815,19 @@ async function removeOrderFromRoute(key, routeIndex) {
   if (state.openConcept) {
     if (state.conceptSaving) return;
     if (!state.openConcept.orderKeys.some((entry) => entry !== key)) {
-      if (window.confirm(`${stop.id} is de laatste stop. Het concept verwijderen? De order komt terug in de planning.`)) await removeConcept(state.openConcept, { ask: false });
-      return;
+      // This screen can be ten minutes behind, and another may have added a stop
+      // meanwhile: look again before offering to delete the whole concept.
+      const routes = await fetchPlan();
+      if (routes) state.plan = routes;
+      syncOpenConcept();
+      if (!state.openConcept) {
+        rebuildPlanning();
+        return;
+      }
+      if (!state.openConcept.orderKeys.some((entry) => entry !== key)) {
+        if (window.confirm(`${stop.id} is de laatste stop. Het concept verwijderen? De order komt terug in de planning.`)) await removeConcept(state.openConcept, { ask: false });
+        return;
+      }
     }
     const removed = new Set(state.manualRoute?.removed || []);
     removed.add(key);
@@ -1840,6 +1857,7 @@ async function markSelectedDelivered() {
   if (button) button.disabled = true;
 
   const failed = [];
+  const booked = [];
   let done = 0;
   for (const order of orders) {
     let response = null;
@@ -1854,6 +1872,7 @@ async function markSelectedDelivered() {
     }
     if (response?.ok) {
       done += 1;
+      booked.push(order);
       state.selected.delete(orderKey(order));
     } else {
       failed.push(`${order.id}: ${response ? await errorText(response, "niet gelukt") : "geen verbinding"}`);
@@ -1862,6 +1881,7 @@ async function markSelectedDelivered() {
   if (button) button.disabled = false;
   if (failed.length) window.alert(`${done} gemeld als bezorgd. Niet gelukt:\n${failed.join("\n")}\n\nDie staan nog geselecteerd.`);
   if (!state.selected.size) state.manualRoute = null;
+  bookedHere(booked);
   await refreshData();
 }
 
@@ -1891,7 +1911,7 @@ function renderHistory() {
     return;
   }
   const uitleg = vol
-    ? `<p class="history-cap">Van alles wat in Shopify verzonden is, zie je de nieuwste ${nieuwste}. Wat via de planning als bezorgd is gemeld, staat er 60 dagen bij, ook als het ouder is${eigen > 0 ? ` (${eigen} eigen bezorgingen hieronder)` : ""}.</p>`
+    ? `<p class="history-cap">Van alles wat in Shopify verzonden is, zie je de nieuwste ${nieuwste}. Wat sinds 28 september via de planning als bezorgd is gemeld, staat er 60 dagen bij, ook als het ouder is${eigen > 0 ? ` (${eigen} eigen bezorgingen hieronder)` : ""}.</p>`
     : "";
   // A parcel that never went with the van is kept without a name: its place
   // stands in for it.
@@ -2131,11 +2151,17 @@ function rebuildPlanning() {
   });
   qualifyCandidates();
   offerPlannedRoutes();
-  state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include"));
   // A group just over its budget is still a route to consider, shown apart so
-  // the planner can plan it with one click or take an order out first.
-  state.reviewRoutes = CONFIG.ritregelsV3 && !state.manualRoute && !state.openPlan
-    ? buildRoutes(state.decisions.filter((item) => item.decision === "review" && item.poolReview)).map((route) => ({ ...route, review: true }))
+  // the planner can plan it with one click or take an order out first. It is
+  // shown whole: split by decision, a rider weighed with an always-own order
+  // came out as a route of its own at twice its budget, and planning it drove
+  // it alone.
+  const showReview = CONFIG.ritregelsV3 && !state.manualRoute && !state.openPlan;
+  const reviewTrips = new Set(showReview ? state.decisions.filter((item) => item.decision === "review" && item.poolReview && item.tripKey).map((item) => item.tripKey) : []);
+  const inReviewTrip = (item) => Boolean(item.tripKey) && reviewTrips.has(item.tripKey);
+  state.routes = buildRoutes(state.decisions.filter((item) => item.decision === "include" && !inReviewTrip(item)));
+  state.reviewRoutes = showReview
+    ? buildRoutes(state.decisions.filter((item) => (item.decision === "review" && item.poolReview) || (item.decision === "include" && inReviewTrip(item)))).map((route) => ({ ...route, review: true }))
     : [];
   addNearbyPackages();
   renderSummary();
@@ -2199,7 +2225,21 @@ async function markDelivered(order, button, planned = null) {
   // Delivered: an abort form or note left open must not keep the screen on
   // "Bezig…" with the stop still listed.
   closeEditors();
+  bookedHere([order]);
   await refreshData();
+}
+
+// What the Worker just confirmed, shown at once. The refresh after it can fail,
+// on a lost signal or a spent day's budget, and the stop then stayed listed with
+// a live Bezorgd button until the next refresh that worked.
+function bookedHere(orders) {
+  if (!orders.length) return;
+  const keys = new Set(orders.map(orderKey));
+  const now = new Date().toISOString();
+  for (const key of keys) state.deliveredKeys.set(key, now);
+  state.allOrders = state.allOrders.filter((order) => !keys.has(orderKey(order)));
+  state.orders = state.orders.filter((order) => !keys.has(orderKey(order)));
+  rebuildPlanning();
 }
 
 async function undoDelivered(id, shopDomain, button) {
@@ -2317,7 +2357,7 @@ async function refreshData(full = true) {
       if (seq !== refreshSeq) return;
       if (history) {
         const shown = new Set(history.entries.map((entry) => `${entry.shopDomain}:${entry.id}`));
-        const own = history.own.filter((entry) => !shown.has(`${entry.shopDomain}:${entry.id}`));
+        const own = (history.own || []).filter((entry) => !shown.has(`${entry.shopDomain}:${entry.id}`));
         state.history = [...history.entries, ...own].sort((a, b) => String(b.deliveredAt || "").localeCompare(String(a.deliveredAt || "")));
         state.historyNewest = history.entries.length;
         state.deliveredKeys = new Map([
@@ -2577,22 +2617,41 @@ function doneStop(entry) {
   return { shopDomain: key.slice(0, split), id: key.slice(split + 1), point: entry.point || null, products: entry.products || [], done: true };
 }
 
-// The route's day as the Worker weighs it: the stops still open and the ones
-// delivered today, in their saved order. The van drove to those as well, and a
-// day counted from the open stops alone grew past 5:45 with every delivery.
-// An older Worker sends no deliveries of today: then the open stops only.
+// The route's day as the Worker weighs it: the stops delivered today first, in
+// the order they were delivered, then the stops still open in their saved
+// order. The van drove to the first as well, and a day counted from the open
+// stops alone grew past 5:45 with every delivery. An older Worker sends no
+// deliveries of today: then the open stops only.
 function routeDayStops(planned, status = plannedRouteStatus(planned)) {
   if (!state.doneToday) return status.open;
   const vandaag = isoDay(new Date());
   const done = new Map(state.doneToday.map((entry) => [entry.key, entry]));
-  return status.stops.map((stop) => {
-    if (stop.status === "open") return stop.order;
-    if (done.has(stop.key)) return doneStop(done.get(stop.key));
+  const behind = [];
+  const ahead = [];
+  for (const stop of status.stops) {
+    if (stop.status === "open") {
+      ahead.push(stop.order);
+      continue;
+    }
+    let entry = null;
+    if (done.has(stop.key)) entry = doneStop(done.get(stop.key));
     // Delivered today on a route of another day: the Worker counts it, but
     // where it was is not known here.
-    if (stop.status === "bezorgd" && !Number.isNaN(Date.parse(stop.at || "")) && isoDay(new Date(stop.at)) === vandaag) return doneStop({ key: stop.key });
-    return null;
-  }).filter(Boolean);
+    else if (stop.status === "bezorgd" && !Number.isNaN(Date.parse(stop.at || "")) && isoDay(new Date(stop.at)) === vandaag) entry = doneStop({ key: stop.key });
+    if (entry) behind.push({ entry, at: String(stop.at || "") });
+  }
+  behind.sort((a, b) => a.at.localeCompare(b.at));
+  return [...behind.map((done) => done.entry), ...ahead];
+}
+
+// The day as it can still be driven: the delivered stops lie behind the van,
+// so a new stop only goes in after the last of them. Slotted in between two of
+// them, a parcel far behind the van was offered at +0:59 when fetching it
+// meant three hours.
+function weighableDay(day) {
+  const route = day.filter((order) => !order.done || order.point);
+  const from = route.findIndex((order) => !order.done);
+  return { route, from: from === -1 ? route.length : from };
 }
 
 // Measured against the route as it is driven now, stops in their saved order,
@@ -2605,11 +2664,14 @@ function nearbyAdditions(orders, day = orders) {
   // The Worker refuses every addition to a route with a stop it cannot place,
   // and would name the order offered as the one without a location.
   if (state.role === "driver" && day.some((order) => !workerPoint(order))) return [];
-  const route = day.filter((order) => !order.done || order.point);
+  // A stop the planning cannot place sits on the depot on paper: every detour
+  // priced against it would be made up.
+  if (day.some((order) => !order.done && !hasKnownPoint(order))) return [];
+  const { route, from } = weighableDay(day);
   const inRoute = new Set(orders.map(orderKey));
   return state.decisions
     .filter((item) => !inRoute.has(orderKey(item.order)) && additionAllowed(item))
-    .map((item) => ({ item, ...additionFor(route, item.order) }))
+    .map((item) => ({ item, ...additionFor(route, item.order, from) }))
     .filter((kandidaat) => fitsAsAddition(kandidaat, kandidaat.item.order, kandidaat.item.decision))
     // The stop it goes before, by key: the position counts the delivered
     // stops too, and the saved route is keyed.
@@ -2696,7 +2758,7 @@ async function fetchGeo(orders) {
 // routes in view whether and when it was delivered. null on failure: what was
 // known stays, rather than every delivered stop turning into "not found".
 async function fetchHistory(keys = []) {
-  if (!usesBackend) return { entries: [], delivered: {} };
+  if (!usesBackend) return { entries: [], delivered: {}, own: [] };
   try {
     // Always with keys=, even empty: that asks for the answer with delivery
     // times per stop. Without it the Worker answers the way older screens expect.
@@ -2888,12 +2950,13 @@ function poolAcrossSectorLines() {
       const group = [...members, ...looseThere, item];
       const trial = evaluateRegion(group);
       const everyoneKept = members.every((member) => !trial.dropped.includes(member));
-      const noneWorse = members.every((member) => {
+      // Only asked when nobody was dropped: a dropped member is in no trip.
+      const noneWorse = () => members.every((member) => {
         if (member.decision !== "include") return true;
         const trip = tripHolding(trial, member);
-        return trip.result.verdict === "include" || trip.result.fixed.includes(member);
+        return Boolean(trip) && (trip.result.verdict === "include" || trip.result.fixed.includes(member));
       });
-      if (!trial.dropped.includes(item) && everyoneKept && noneWorse) {
+      if (!trial.dropped.includes(item) && everyoneKept && noneWorse()) {
         applyRegion(region, group, trial);
         break;
       }
@@ -3070,9 +3133,10 @@ function offerPlannedRoutes() {
     let best = null;
     for (const planned of komend) {
       const status = plannedRouteStatus(planned);
-      if (!status.open.length) continue;
+      if (!status.open.length || status.open.some((order) => !hasKnownPoint(order))) continue;
       // Today's route is weighed with what it already delivered, as when opened.
-      const fit = additionFor(routeDayStops(planned, status).filter((order) => !order.done || order.point), item.order);
+      const { route, from } = weighableDay(routeDayStops(planned, status));
+      const fit = additionFor(route, item.order, from);
       if (!fitsAsAddition(fit, item.order, item.decision)) continue;
       if (!best || fit.extra < best.fit.extra) best = { planned, fit };
     }
@@ -3083,11 +3147,12 @@ function offerPlannedRoutes() {
   }
 }
 
-// One order slotted into a route in its saved order, where it costs the least.
-function additionFor(orders, order) {
+// One order slotted into a route in its saved order, where it costs the least,
+// but not before position `from`: the stops before it are already delivered.
+function additionFor(orders, order, from = 0) {
   let position = orders.length;
   let bestKm = Infinity;
-  for (let index = 0; index <= orders.length; index += 1) {
+  for (let index = Math.min(from, orders.length); index <= orders.length; index += 1) {
     const km = loopKm([...orders.slice(0, index), order, ...orders.slice(index)]);
     if (km < bestKm) {
       bestKm = km;

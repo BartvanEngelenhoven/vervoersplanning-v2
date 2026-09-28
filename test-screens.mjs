@@ -215,17 +215,44 @@ await test("een datum is die van Ede, ook op een computer in New York of Sydney"
   assert.equal(fn.daysFromToday(1), "2026-09-29");
 });
 
-await test("na 16:00 in Ede ingepland is niet aangekondigd, ook op een laptop in Londen", () => {
+await test("na 16:10 in Ede ingepland is niet aangekondigd, ook op een laptop in Londen", () => {
   const stop = order("Doorn", 52.03, 5.32);
   const rit = { id: "rit-doorn-9", number: 9, date: "2026-09-29", name: "Doorn", orderKeys: [key(stop)], assignedAt: "2026-09-28T14:29:00Z" };
   clockAt("2026-09-28T14:30:00Z", "Europe/London");
   scene({ orders: [stop], plan: [rit] });
   state.announcements = [];
-  assert.match(fn.announceLine(rit), /Na 16:00 ingepland, dus niet aangekondigd/);
+  assert.match(fn.announceLine(rit), /Na 16:10 ingepland, dus niet aangekondigd/);
+  // Between 16:00 and 16:10 the second run still takes it.
+  assert.doesNotMatch(fn.announceLine({ ...rit, assignedAt: "2026-09-28T14:05:00Z" }), /niet aangekondigd/);
   clockAt("2026-09-28T14:20:00Z", "Europe/London");
   assert.match(fn.announceLine({ ...rit, assignedAt: "2026-09-28T13:59:00Z" }), /Aankondiging van 16:00 loopt/);
   clockAt("2026-09-28T13:50:00Z", "Europe/London");
   assert.match(fn.announceLine(rit), /Aankondiging 28-09-2026 om 16:00/);
+});
+
+await test("na Bezorgd staat de stop meteen als bezorgd, ook als verversen daarna mislukt", () => {
+  realClock();
+  const a = order("Doorn", 52.03, 5.32);
+  const b = order("Zeist", 52.09, 5.23);
+  const rit = { id: "rit-bezorgd", number: 3, date: fn.daysFromToday(0), name: "Doorn en Zeist", orderKeys: [key(a), key(b)] };
+  scene({ orders: [a, b], plan: [rit] });
+  fn.bookedHere([a]);
+  const status = fn.plannedRouteStatus(rit);
+  assert.equal(status.stops.find((stop) => stop.key === key(a)).status, "bezorgd");
+  assert.equal(status.open.length, 1);
+});
+
+await test("een stop die tussen 16:00 en 16:10 bij de rit kwam, gaat mee met de ronde van 16:10", () => {
+  const eerste = order("Doorn", 52.03, 5.32, { announced: true });
+  const later = order("Zeist", 52.09, 5.23);
+  const rit = { id: "rit-doorn-8", number: 8, date: "2026-09-29", name: "Doorn en Zeist", orderKeys: [key(eerste), key(later)] };
+  clockAt("2026-09-28T14:05:00Z", "Europe/Amsterdam");
+  scene({ orders: [eerste, later], plan: [rit] });
+  state.announcements = [{ date: rit.date, mode: "echt", ranAt: "2026-09-28T14:00:20Z", routes: [{ id: rit.id, results: [{ key: key(eerste), id: eerste.id, status: "aangekondigd" }] }] }];
+  assert.match(fn.announceLine(rit), /gaat mee met de ronde van 16:10/);
+  clockAt("2026-09-28T14:12:00Z", "Europe/Amsterdam");
+  state.announcements[0].retriedAt = "2026-09-28T14:10:05Z";
+  assert.match(fn.announceLine(rit), /bel de klant/);
 });
 
 await test("een stop die na de aankondiging bij de rit kwam, wordt genoemd: bel de klant", () => {

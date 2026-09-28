@@ -393,6 +393,48 @@ test("een adres zonder plek wordt nooit bij een andere rit gevoegd", () => {
   assert.match(fn.routeWarning(fn.routeSummary("x", [kleve])), /Rijtijd onbekend/);
 });
 
+test("nieuwe regels: een buur over de windrichting die een ander eruit zou duwen, laat de planning niet vallen", () => {
+  const dalfsen = order("Dalfsen", 52.524, 6.279);
+  const hardenberg = order("Hardenberg", 52.569, 6.598);
+  const hoogeveen = order("Hoogeveen", 52.72, 6.45, { shop: DSP, products: hooihuisje });
+  const uitkomst = plan(v3, [dalfsen, hardenberg, hoogeveen]);
+  assert.equal(uitkomst.decision(dalfsen), "include", "Dalfsen blijft staan");
+  assert.equal(uitkomst.decision(hoogeveen), "include");
+});
+
+test("nieuwe regels: een rit net over budget staat heel onder Controleren, met de ruif waarmee hij gewogen is", () => {
+  const zwolle = order("Zwolle", 52.51, 6.09, { shop: DSP, products: ruif });
+  const drachten = order("Drachten", 53.11, 6.10);
+  const uitkomst = plan(v3, [zwolle, drachten]);
+  assert.equal(uitkomst.decision(drachten), "review");
+  const controle = uitkomst.reviewRoutes.find((route) => route.orders.includes(drachten));
+  assert.ok(controle, "Drachten staat in een rit onder Controleren");
+  assert.ok(controle.orders.includes(zwolle), "met de ruif erbij");
+  assert.ok(!uitkomst.routes.some((route) => route.orders.includes(zwolle)), "de ruif staat niet ook nog als los voorstel");
+});
+
+test("Kan er nog bij zet een nieuwe stop nooit tussen stops die vandaag al bezorgd zijn", () => {
+  const { state, fn } = v2;
+  const amsterdam = order("Amsterdam", 52.37, 4.90);
+  const apeldoorn = order("Apeldoorn", 52.21, 5.97);
+  const arnhem = order("Arnhem", 51.98, 5.91);
+  const haarlem = order("Haarlem", 52.38, 4.64, { shop: DSP, products: ["1x Slowfeeder hooinet"] });
+  const vandaag = isoOffset(0);
+  const rit = { id: "r9", number: 9, date: vandaag, name: "Amsterdam", orderKeys: [amsterdam, apeldoorn, arnhem].map((item) => `${DRS}:${item.id}`) };
+  state.doneToday = [
+    { key: `${DRS}:${amsterdam.id}`, point: { lat: 52.37, lon: 4.90 }, products: amsterdam.products },
+    { key: `${DRS}:${apeldoorn.id}`, point: { lat: 52.21, lon: 5.97 }, products: apeldoorn.products },
+  ];
+  plan(v2, [arnhem, haarlem], { planned: [rit] });
+  state.deliveredKeys = new Map([[`${DRS}:${amsterdam.id}`, `${vandaag}T08:00:00Z`], [`${DRS}:${apeldoorn.id}`, `${vandaag}T09:30:00Z`]]);
+  const dag = fn.routeDayStops(rit);
+  const aangeboden = fn.nearbyAdditions(fn.plannedRouteStatus(rit).open, dag);
+  state.doneToday = null;
+  state.deliveredKeys = new Map();
+  assert.deepEqual(Array.from(dag, (item) => item.id), [amsterdam.id, apeldoorn.id, arnhem.id], "bezorgd eerst, op volgorde");
+  assert.ok(!aangeboden.some((kandidaat) => kandidaat.item.order.id === haarlem.id), "Haarlem ligt ver achter de bus");
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);

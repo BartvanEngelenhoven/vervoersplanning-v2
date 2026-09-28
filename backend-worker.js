@@ -495,7 +495,16 @@ async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
     // it made, which undo needs, and the real time of delivery. The webhook that
     // follows the report only refreshes the order details.
     if (history && history.source !== "shopify") {
-      await putDelivered(env, key, { ...history, order: { ...(history.order || {}), ...planningOrder }, shopifyUpdatedAt: incoming || history.shopifyUpdatedAt });
+      // Reported again after "Geen antwoord van Shopify", the retry found the
+      // order already fulfilled and filed it without the fulfillment. The note
+      // of the first try still says whether that fulfillment was the report's.
+      let fulfillment = history.fulfillment || null;
+      if (!fulfillment?.id) {
+        const unsure = await env.PLANNING_ORDERS.get(`${REPORT_UNSURE_PREFIX}${key}`, "json");
+        const ours = unsure ? madeWhileReporting(newestFulfillment(shopifyOrder), unsure) : null;
+        if (ours) fulfillment = { id: ours.id, status: "SUCCESS" };
+      }
+      await putDelivered(env, key, { ...history, fulfillment, order: { ...(history.order || {}), ...planningOrder }, shopifyUpdatedAt: incoming || history.shopifyUpdatedAt });
       if (storedOrder) await env.PLANNING_ORDERS.delete(storageKey);
       return planningOrder;
     }
@@ -563,6 +572,7 @@ async function createShopifyFulfillment(shopDomain, token, shopifyOrderId, notif
     query FulfillmentOrders($id: ID!) {
       order(id: $id) {
         displayFulfillmentStatus
+        fulfillments(first: 10) { id createdAt status }
         fulfillmentOrders(first: 10) {
           nodes {
             id
@@ -591,7 +601,16 @@ async function createShopifyFulfillment(shopDomain, token, shopifyOrderId, notif
   if (!lineItemsByFulfillmentOrder.length) {
     // Nothing left to fulfill because it already is: someone did it in Shopify,
     // or the announcement did. That is the outcome asked for, not an error.
-    if (order?.displayFulfillmentStatus === "FULFILLED") return { fulfillment: null, alreadyFulfilled: true };
+    if (order?.displayFulfillmentStatus === "FULFILLED") {
+      // The newest one, so a report that got no answer the first time can tell
+      // whether this fulfillment was its own.
+      const newest = (order.fulfillments || [])
+        .filter((item) => item?.id && item.status !== "CANCELLED" && item.createdAt)
+        .map((item) => ({ id: item.id, at: item.createdAt }))
+        .sort((a, b) => a.at.localeCompare(b.at))
+        .at(-1) || null;
+      return { fulfillment: null, alreadyFulfilled: true, newest };
+    }
     return { error: SHOPIFY_FULFILLMENT_ERRORS["no-lines"], status: 409 };
   }
 
@@ -705,6 +724,14 @@ async function markDelivered(request, env) {
   await env.PLANNING_ORDERS.put(reportingKey, askedAt, { expirationTtl: 60 });
   const created = await createShopifyFulfillment(shopDomain, token, shopifyOrderId, false);
   let fulfillment = created.fulfillment || (announced?.fulfillmentId ? { id: announced.fulfillmentId, status: "SUCCESS" } : null);
+  // Reported again after "Geen antwoord van Shopify": the first try did make
+  // the fulfillment. Its note says when it waited, so it is filed as the
+  // planning's, and Terugdraaien can still undo it.
+  if (!fulfillment && created.alreadyFulfilled) {
+    const unsure = await env.PLANNING_ORDERS.get(`${REPORT_UNSURE_PREFIX}${key}`, "json");
+    const ours = unsure ? madeWhileReporting(created.newest, unsure) : null;
+    if (ours) fulfillment = { id: ours.id, status: "SUCCESS" };
+  }
   if (created.error && !created.ambiguous) {
     await deleteWithRetry(env, reportingKey);
     return json({ error: created.error, userErrors: created.userErrors }, created.status, env);
@@ -1737,11 +1764,20 @@ async function routeMinutesWith(env, record, extra) {
   const today = amsterdamNow().day;
   const stops = await Promise.all((record.orderKeys || []).map(async (key) => {
     const order = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
-    if (order) return order.fulfilled || order.cancelled ? null : order;
+    // A refunded stop is not driven, and the phone leaves it out too.
+    if (order) return order.fulfilled || order.cancelled || order.refunded ? null : { order };
     const delivered = await env.PLANNING_ORDERS.get(`delivered:${key}`, "json");
-    return delivered?.order && deliveredOn(delivered, today) ? { ...delivered.order, id: delivered.order.id || delivered.id } : null;
+    return delivered?.order && deliveredOn(delivered, today)
+      ? { order: { ...delivered.order, id: delivered.order.id || delivered.id }, doneAt: String(delivered.deliveredAt || "") }
+      : null;
   }));
-  const orders = [...stops.filter(Boolean), extra];
+  // What was delivered today is behind the van, in the order it was delivered;
+  // the new stop can only go somewhere among the stops still ahead. Slotted in
+  // between two delivered stops, a parcel far behind the van priced as +59
+  // minutes when driving back for it cost three hours.
+  const done = stops.filter((stop) => stop?.doneAt).sort((a, b) => a.doneAt.localeCompare(b.doneAt));
+  const ahead = stops.filter((stop) => stop && !stop.doneAt);
+  const orders = [...done, ...ahead].map((stop) => stop.order).concat(extra);
   const points = await Promise.all(orders.map((order) => cachedPoint(env, order)));
   const unplaced = orders.find((_, index) => !points[index]);
   if (unplaced) return { missing: unplaced.id || "deze order" };
@@ -1749,7 +1785,7 @@ async function routeMinutesWith(env, record, extra) {
   const loop = (list) => list.reduce((sum, point, index) => sum + km(index ? list[index - 1] : DEPOT_POINT, point), 0) + km(list[list.length - 1], DEPOT_POINT);
   const route = points.slice(0, -1);
   let best = Infinity;
-  for (let index = 0; index <= route.length; index += 1) best = Math.min(best, loop([...route.slice(0, index), points[points.length - 1], ...route.slice(index)]));
+  for (let index = done.length; index <= route.length; index += 1) best = Math.min(best, loop([...route.slice(0, index), points[points.length - 1], ...route.slice(index)]));
   const unloading = orders.reduce((sum, order) => sum + (/hooihuisje|hoihuisje/.test((order.products || []).join(" ").toLowerCase()) ? 90 : 20), 0);
   return { minutes: Math.round(20.2 + 5 * (orders.length - 1) + 0.975 * best) + unloading };
 }
