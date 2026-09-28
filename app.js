@@ -2554,7 +2554,8 @@ function additionAllowed(item) {
   // refuses it, so it is not offered.
   if (state.heldKeys.has(orderKey(order))) return false;
   if (order.refunded || order.cancelled) return false;
-  if (CONFIG.ritregelsV3 && !hasKnownPoint(order)) return false;
+  // Abroad the planning has no place for it, so no honest detour either.
+  if (!hasKnownPoint(order)) return false;
   // The Worker weighs the driver's additions on the points it has on record
   // and refuses an order it cannot place. The phone's guess from a postcode is
   // no stand-in for that.

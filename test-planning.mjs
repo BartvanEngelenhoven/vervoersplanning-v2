@@ -226,10 +226,12 @@ test("kleine dingen: negatieve minuten, telefoonnummers, wintertijd", () => {
   assert.equal(v3.fn.routeLetter(0), "A");
 });
 
+// Days as the planning counts them: in Amsterdam, whatever the machine's clock.
 function isoOffset(days) {
-  const date = new Date();
-  date.setDate(date.getDate() + days);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Amsterdam" }).format(new Date());
+  const date = new Date(`${today}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 test("een order die alleen te ver is maar in een ingeplande rit past, staat onder Controleren met die rit", () => {

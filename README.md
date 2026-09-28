@@ -76,7 +76,9 @@ Zet **geen** `GOOGLE_MAPS_API_KEY`: Google rekent daarvoor.
 
 ## Ritregels van september 2026
 
-De controle van september 2026 vond een paar plekken waar de planning afweek van de afgesproken regels: een hooihuisje gaf alle orders in dezelfde richting een onbeperkt budget, een adres in het buitenland kwam op het depot terecht, buren aan weerszijden van een windrichting telden niet samen, en een groep net boven budget kreeg geen ritvoorstel. De verbeteringen staan achter `ritregelsV3` in `CONFIG` bovenaan `app.js`. `test-planning.mjs` laat per regel zien wat er verandert.
+Sinds 28 september 2026 knipt de planning de orders van één windrichting in ritten van hooguit 5:45: eerst gaan de twee orders samen die het meeste omrijden besparen, dan de volgende, zolang de rit binnen de dag en de bus past. Elke rit moet passen binnen de budgetten van zijn eigen orders (niet meer die van de hele richting). Daardoor komen er zoveel voorstellen als er werk is, in plaats van één per windrichting. Een adres buiten Nederland en België wordt nooit meer op een Nederlandse postcode geschat: het staat onder Controleren, en als je het toch meeneemt, wordt het een eigen rit met *Rijtijd onbekend*. Dit geldt met beide instellingen hieronder.
+
+De controle van september 2026 vond daarnaast een paar plekken waar de planning afweek van de afgesproken regels: een hooihuisje gaf alle orders in dezelfde rit een onbeperkt budget, buren aan weerszijden van een windrichting telden niet samen, en een groep net boven budget kreeg geen ritvoorstel. Die verbeteringen staan achter `ritregelsV3` in `CONFIG` bovenaan `app.js`. `test-planning.mjs` laat per regel zien wat er verandert.
 
 ## De aankondiging om 16:00
 
