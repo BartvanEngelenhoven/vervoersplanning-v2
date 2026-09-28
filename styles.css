@@ -89,6 +89,15 @@ h2 { margin-bottom: 0; font-size: 1.35rem; letter-spacing: -.025em; }
 .order-map-point:hover, .order-map-point:focus-visible { z-index: 8; transform: translate(-50%, -50%) scale(1.25); outline: none; }
 .map-side { display: grid; align-content: start; gap: .75rem; }
 .map-route-picker { display: grid; gap: .45rem; }
+.route-picker { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: .9rem; }
+.route-pick { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .55rem; flex: 1 1 15rem; min-height: 48px; padding: .5rem .75rem; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); color: var(--ink); text-align: left; }
+.route-pick-letter { display: grid; place-items: center; width: 1.9rem; height: 1.9rem; border-radius: 8px; background: #e9efe9; font-weight: 900; }
+.route-pick-name { overflow: hidden; font-weight: 700; line-height: 1.25; text-overflow: ellipsis; }
+.route-pick-time { color: var(--muted); font-size: .9rem; font-weight: 700; white-space: nowrap; }
+.route-pick.review .route-pick-letter { background: #fbeccc; color: var(--warn); }
+.route-pick.active { border-color: var(--brand); background: var(--brand); color: white; }
+.route-pick.active .route-pick-letter { background: var(--accent); color: var(--brand); }
+.route-pick.active .route-pick-time { color: rgba(255,255,255,.8); }
 .map-route-picker button { min-height: 38px; padding: .5rem .65rem; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfa; color: var(--ink); text-align: left; font-weight: 800; }
 .map-route-picker button.active { border-color: var(--brand); background: var(--brand); color: white; }
 .map-route-summary { display: grid; gap: .45rem; padding: .8rem; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }

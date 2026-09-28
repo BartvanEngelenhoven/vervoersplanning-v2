@@ -1197,6 +1197,12 @@ function renderManualRouteBar() {
   renderConceptBar();
 }
 
+function selectRoute(index) {
+  activeMapRouteIndex = index;
+  renderRoutes();
+  renderPlanningOverview();
+}
+
 function renderPlanningOverview() {
   renderPlanningMap();
   renderRoutesOverview();
@@ -1278,10 +1284,7 @@ function renderPlanningMap() {
     ${addableList}
     <ol class="map-order-list">${stops}</ol>`;
   holder.querySelectorAll(".map-route-picker button").forEach((button) => {
-    button.addEventListener("click", () => {
-      activeMapRouteIndex = Number(button.dataset.routeIndex);
-      renderPlanningOverview();
-    });
+    button.addEventListener("click", () => selectRoute(Number(button.dataset.routeIndex)));
   });
   holder.querySelectorAll(".add-to-active-route").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1419,9 +1422,8 @@ function renderRoutesOverview() {
   </article>`).join("");
   holder.querySelectorAll(".show-route-map").forEach((button) => {
     button.addEventListener("click", () => {
-      activeMapRouteIndex = Number(button.dataset.routeIndex);
       planningView = "map";
-      renderPlanningOverview();
+      selectRoute(Number(button.dataset.routeIndex));
     });
   });
 }
@@ -1539,7 +1541,27 @@ function renderRoutes() {
       : '<p class="empty">Geen nieuwe orders voor een rit. Wat al ingepland is, staat in de Agenda.</p>';
     return;
   }
+  // With more than one proposal, one is shown at a time and chosen at the top;
+  // the map beside it follows. A long column of every proposal hid which one
+  // the map was showing.
+  const picking = !state.openPlan && !state.manualRoute && !state.openConcept && routes.length > 1;
+  if (picking) {
+    activeMapRouteIndex = Math.min(activeMapRouteIndex, routes.length - 1);
+    const picker = document.createElement("nav");
+    picker.className = "route-picker";
+    picker.setAttribute("aria-label", "Kies een voorstel");
+    picker.innerHTML = routes.map((route, index) => `<button class="route-pick${index === activeMapRouteIndex ? " active" : ""}${route.review ? " review" : ""}" type="button" data-route-index="${index}" aria-pressed="${index === activeMapRouteIndex}">
+      <span class="route-pick-letter">${escapeHtml(routeLetter(index))}</span>
+      <span class="route-pick-name">${escapeHtml(routeLabel(route))}${route.review ? " · controleren" : ""}</span>
+      <span class="route-pick-time">${formatMinutes(route.totalMinutes)}</span>
+    </button>`).join("");
+    picker.querySelectorAll(".route-pick").forEach((button) => {
+      button.addEventListener("click", () => selectRoute(Number(button.dataset.routeIndex)));
+    });
+    holder.appendChild(picker);
+  }
   routes.forEach((route, index) => {
+    if (picking && index !== activeMapRouteIndex) return;
     const fragment = template.content.cloneNode(true);
     const card = fragment.querySelector(".route-card");
     if (route.review) card.classList.add("review");
@@ -1571,7 +1593,9 @@ function renderRoutes() {
     }
     // Buttons carry shop and number together: the number alone is only unique
     // for as long as the two shops keep different prefixes.
-    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${escapeHtml(order.id)} uit deze rit halen">−</button><b>${escapeHtml(order.city)} · ${escapeHtml(order.id)}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-key="${orderKey(order)}">Bezorgd</button></span>${orderNote(order)}</li>`).join("");
+    const proposal = !state.openPlan && !state.manualRoute && !state.openConcept;
+    const canRemove = !proposal || route.orders.length > 1;
+    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li>${canRemove ? `<button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${escapeHtml(order.id)} uit deze rit halen">−</button>` : ""}<b>${escapeHtml(order.city)} · ${escapeHtml(order.id)}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-key="${orderKey(order)}">Bezorgd</button></span>${orderNote(order)}</li>`).join("");
     fragment.querySelectorAll(".remove-route-stop").forEach((button) => {
       button.addEventListener("click", () => removeOrderFromRoute(button.dataset.orderKey, index));
     });
@@ -1797,12 +1821,37 @@ async function addOrderToRoute(order, routeIndex) {
     rebuildPlanning();
     return;
   }
+  if (!state.manualRoute) {
+    await keepProposal(route, keys);
+    return;
+  }
   const removed = new Set(state.manualRoute?.removed || []);
   removed.delete(key);
   state.manualRoute = { keys, removed };
   activeMapRouteIndex = 0;
   planningView = "map";
   rebuildPlanning();
+}
+
+// A change to a proposal is kept. Proposals are worked out afresh on every
+// refresh, so a stop taken out came straight back, and on another screen it
+// had never gone. The proposal becomes a concept with the change in it, saved
+// at once, and stays open: every further change is saved as well.
+async function keepProposal(route, keys) {
+  if (state.conceptSaving || !keys.length) return;
+  const byKey = new Map(state.allOrders.map((order) => [orderKey(order), order]));
+  const orders = keys.map((key) => byKey.get(key)).filter(Boolean);
+  state.conceptSaving = true;
+  document.querySelectorAll("#routes button, #mapView .remove-from-active-route, #mapView .add-to-active-route, #suggestions .add-suggestion").forEach((button) => { button.disabled = true; });
+  const result = await postConcept("/concepts/save", { id: newId("concept"), name: routeLabel({ ...route, orders }), orderKeys: keys });
+  state.conceptSaving = false;
+  if (result.error) {
+    window.alert(result.error);
+    rebuildPlanning();
+    return;
+  }
+  state.plan = (await fetchPlan()) || state.plan;
+  openConcept(state.concepts.find((concept) => concept.id === result.concept?.id) || result.concept);
 }
 
 async function removeOrderFromRoute(key, routeIndex) {
@@ -1839,7 +1888,10 @@ async function removeOrderFromRoute(key, routeIndex) {
     rebuildPlanning();
     return;
   }
-  if (!state.manualRoute && !window.confirm(`${stop.id} uit deze rit halen? Je ziet dan alleen deze rit; met "Toon weer alle ritten" komen de andere voorstellen terug.`)) return;
+  if (!state.manualRoute) {
+    await keepProposal(route, keys);
+    return;
+  }
   // Remembered, so a parcel taken out is not slipped straight back in.
   const removed = new Set(state.manualRoute?.removed || []);
   removed.add(key);

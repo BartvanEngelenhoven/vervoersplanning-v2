@@ -239,6 +239,33 @@ await test("de opmerking uit Shopify (Notities) staat bij de order, veilig ge-es
   assert.ok(kort.length < 200 && kort.includes("…"));
 });
 
+await test("een stop uit een voorstel halen bewaart het voorstel als concept, zonder die stop", async () => {
+  realClock();
+  const doorn = order("Doorn", 52.03, 5.32);
+  const zeist = order("Zeist", 52.09, 5.23);
+  const leersum = order("Leersum", 52.01, 5.43);
+  scene({ orders: [doorn, zeist, leersum] });
+  assert.equal(fn.allRoutes().length, 1);
+  let stored = null;
+  const calls = worker({
+    "/concepts/save": async (body) => {
+      stored = { id: body.id, name: body.name, orderKeys: body.orderKeys, createdAt: new RealDate().toISOString() };
+      return [200, { ok: true, concept: stored }];
+    },
+    "/plan": () => [200, { routes: [], dayNotes: [], announcements: [], concepts: stored ? [stored] : [] }],
+  });
+  await fn.removeOrderFromRoute(key(zeist), 0);
+  const save = calls.find((call) => call.path === "/concepts/save").body;
+  assert.deepEqual([...save.orderKeys].sort(), [key(doorn), key(leersum)].sort());
+  assert.equal(state.openConcept?.id, save.id, "het concept staat open");
+  const decision = (item) => state.decisions.find((entry) => entry.order === item).decision;
+  assert.equal(decision(zeist), "include", "Zeist is terug in de planning");
+  assert.equal(decision(doorn), "concept");
+  state.openConcept = null;
+  state.manualRoute = null;
+  state.concepts = [];
+});
+
 await test("na Bezorgd staat de stop meteen als bezorgd, ook als verversen daarna mislukt", () => {
   realClock();
   const a = order("Doorn", 52.03, 5.32);
