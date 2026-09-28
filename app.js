@@ -1328,8 +1328,10 @@ function hideCarriers() {
 
 function renderAllOrdersMap(holder) {
   const zonder = hideCarriers();
+  // Cancelled, refunded, collected or already shipped: nothing to drive, so no
+  // dot. They stay findable under Orders.
   const openOrders = state.decisions
-    .filter((item) => !item.order.cancelled && !item.order.fulfilled)
+    .filter((item) => item.decision !== "exclude" && !item.order.cancelled && !item.order.fulfilled)
     .filter((item) => hasKnownPoint(item.order))
     .filter((item) => !zonder || !["dhl", "fvr"].includes(statusOf(item)));
   if (!openOrders.length) {
@@ -1355,7 +1357,6 @@ function renderAllOrdersMap(holder) {
       <span><i class="map-dot review"></i> Controleren</span>
       <span><i class="map-dot dhl"></i> DHL</span>
       <span><i class="map-dot fvr"></i> FVR</span>
-      <span><i class="map-dot exclude"></i> Niet meenemen</span>
     </div>`;
   holder.querySelector("#mapHideCarriers")?.addEventListener("change", (event) => {
     try {
