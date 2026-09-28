@@ -31,7 +31,7 @@ Er zit geen rem op verkeerde pogingen. Kies daarom lange codes, minstens twaalf 
 
 ## Privacy (AVG)
 
-Wat de Worker bewaart (Cloudflare KV) en hoe lang:
+Wat de Worker bewaart (sinds 28 september 2026 in één Durable Object met een eigen SQLite-database bij Cloudflare, zie *Opslag*) en hoe lang:
 
 | Wat | Inhoud | Bewaard |
 | --- | --- | --- |
@@ -49,22 +49,21 @@ Wie gegevens te zien krijgt:
 - **Google Maps**: de kaart op *Vandaag* laadt de adressen van de gekozen rit. De Maps-links gaan pas open als je erop tikt.
 - **OpenStreetMap** levert de kaarttegels voor *Kaart*; **unpkg** levert de kaartbibliotheek Leaflet, vastgezet op één versie met een controle-hash.
 
-**Eenmalig opruimen.** De bezorgd-records van vóór 25 september 2026 hebben nog geen bewaartermijn en bevatten soms een telefoonnummer. Draai daarom één keer, direct ná het deployen van de Worker, vanuit deze map:
+**Eenmalig opruimen.** De bezorgd-records van vóór 25 september 2026 hebben nog geen bewaartermijn en bevatten soms een telefoonnummer. Draai daarom één keer vanuit deze map:
 
 ```bash
 node scripts/historie-bewaartermijn.mjs
 ```
 
-Het script laat zien wat het gaat doen en vraagt eerst om "ja".
+Het script vraagt de plannerscode, laat zien wat het gaat doen en vraagt eerst om "ja". Het werk gebeurt in de Worker; het script werkt dus ook na de verhuizing van de opslag.
 
-**Een klant laten wissen.** Vraagt een klant om verwijdering, wis dan in Shopify de klant en daarna de kopieën hier (vervang winkel en ordernummer):
+**Een klant laten wissen.** Vraagt een klant om verwijdering, wis dan in Shopify de klant, en daarna hier elke kopie van de order, met het kaartpunt van het adres:
 
 ```bash
-npx wrangler kv key delete --binding PLANNING_ORDERS --remote "order:<winkel>.myshopify.com:#<ordernummer>"
-npx wrangler kv key delete --binding PLANNING_ORDERS --remote "delivered:<winkel>.myshopify.com:#<ordernummer>"
+node scripts/klant-wissen.mjs
 ```
 
-Het adres als kaartpunt (`geo:<adres in kleine letters>`) verloopt vanzelf binnen 90 dagen, maar kan op dezelfde manier weg.
+Het script vraagt de plannerscode, de winkel en het ordernummer, en eerst om "ja". Ritten bewaren alleen ordernummers.
 
 Oude versies van de Worker zijn niet bereikbaar: `preview_urls = false` staat bovenaan `wrangler.toml`. Die regel moet boven de eerste `[sectie]` staan; eronder is het een gewone variabele en doet hij niets.
 
@@ -109,10 +108,9 @@ Eenmalig:
 ```bash
 npm install
 npx wrangler login
-npx wrangler kv namespace create PLANNING_ORDERS
 ```
 
-Kopieer `wrangler.example.toml` naar `wrangler.toml` en vul de KV namespace-id in. `wrangler.toml` staat bewust in `.gitignore`.
+Kopieer `wrangler.example.toml` naar `wrangler.toml`. `wrangler.toml` staat bewust in `.gitignore`. De opslag (het Durable Object) maakt Cloudflare bij de eerste deploy zelf aan. Het blok `[[kv_namespaces]]` was alleen nodig voor de verhuizing uit KV van september 2026; bij een nieuwe installatie kan het weg.
 
 Secrets:
 
@@ -132,7 +130,17 @@ npm run worker:deploy
 
 `config.js` bevat alleen de publieke Worker-URL, nooit een sleutel of code.
 
-**Gratis dagtegoed.** Het gratis plan van Cloudflare telt per dag hoe vaak de Worker de opslag gebruikt (onder meer 1.000 keer een lijst opvragen, 1.000 keer schrijven). Is dat op, dan meldt de site: *Het gratis dagtegoed van Cloudflare is op. Vanaf 02:00 werkt alles weer; bel tot die tijd de planner.* Bezorgd vraagt geen lijst meer op zolang de telefoon de rit meestuurt, dus dat blijft werken als alleen de lijsten op zijn.
+## Opslag
+
+Alles staat in één Durable Object met een eigen SQLite-database (`PlanningStore` in `backend-worker.js`, de opslag zelf in `planning-store.js`). Elk verzoek aan de Worker gaat daar naartoe, dus elke lezing ziet elke schrijfactie ervoor meteen.
+
+Tot 28 september 2026 stond alles in Cloudflare KV. Het gratis plan van KV staat maar 1.000 keer per dag een lijst opvragen toe, en twee schermen die de hele dag openstonden, gebruikten dat op. Het gratis plan van deze opslag staat per dag 5 miljoen gelezen rijen en 100.000 geschreven rijen toe, en 100.000 verzoeken. Dat is ruim honderd keer wat de planning gebruikt.
+
+- **De verhuizing.** Bij de eerste start kopieert het object alles uit KV, met vervaldatum en metadata, en daarna nooit meer. KV zelf blijft staan zoals het die dag was, als reservekopie.
+- **De reservekopie weggooien.** Werkt de nieuwe opslag een week goed, gooi de KV-kopie dan weg: er staan klantgegevens in die anders nooit verlopen. `npx wrangler kv namespace delete --binding PLANNING_ORDERS`, en haal daarna het blok `[[kv_namespaces]]` uit `wrangler.toml`.
+- **Nakijken.** `GET /store/status` (met de plannerscode) geeft per soort het aantal sleutels en wanneer de kopie uit KV is gemaakt. Geen klantgegevens.
+- **Verlopen gegevens** zijn meteen onzichtbaar en worden elke dag na de run van 16:00 echt verwijderd.
+- **Als het dagtegoed toch op is**, meldt de site: *Het gratis dagtegoed van Cloudflare is op. Vanaf 02:00 werkt alles weer; bel tot die tijd de planner.*
 
 ## Shopify-koppeling
 

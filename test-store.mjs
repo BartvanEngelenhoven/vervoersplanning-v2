@@ -1,0 +1,196 @@
+// The move from KV to the Durable Object's SQLite store: that KV's contents come
+// over once, with expiry and metadata; that the Worker hands every request to
+// the store and keeps its internal address to itself; that the 16:00 run goes
+// through it too; and the one-off tidy of old delivery records.
+import assert from "node:assert/strict";
+import worker, { PlanningStore } from "./backend-worker.js";
+import { SqlKV, sqliteStorage } from "./test-store-shim.mjs";
+
+const PLANNER = "planner-code-lang-genoeg";
+const DRS = "de-rijplaten-specialist.myshopify.com";
+const DAY = 86_400;
+
+function oldKv(entries) {
+  const map = new Map(entries.map(([key, value, options = {}]) => [key, { value: typeof value === "string" ? value : JSON.stringify(value), ...options }]));
+  return {
+    map,
+    async list({ cursor } = {}) {
+      const names = [...map.keys()].sort();
+      const start = Number(cursor || 0);
+      const page = names.slice(start, start + 2);
+      const complete = start + 2 >= names.length;
+      return { keys: page.map((name) => ({ name, ...(map.get(name).expiration ? { expiration: map.get(name).expiration } : {}), ...(map.get(name).metadata ? { metadata: map.get(name).metadata } : {}) })), list_complete: complete, ...(complete ? {} : { cursor: String(start + 2) }) };
+    },
+    async get(key) {
+      return map.get(key)?.value ?? null;
+    },
+  };
+}
+
+function objectFor(env, sql = sqliteStorage()) {
+  const ctx = { storage: { sql }, waiting: null, blockConcurrencyWhile(fn) { this.waiting = fn(); return this.waiting; } };
+  const object = new PlanningStore(ctx, env);
+  return { object, ctx, sql };
+}
+
+// A namespace with one object, as Cloudflare gives it to the Worker.
+function namespaceFor(object) {
+  return { idFromName: (name) => ({ name }), get: () => ({ fetch: (input, init) => object.fetch(input instanceof Request ? input : new Request(input, init)) }) };
+}
+
+const results = [];
+async function test(name, fn) {
+  try {
+    await fn();
+    results.push(["ok", name]);
+  } catch (error) {
+    results.push(["FOUT", name, error]);
+  }
+}
+
+const now = Math.floor(Date.now() / 1000);
+const order = (id, city) => ({ id, shopDomain: DRS, shopifyOrderId: `gid://shopify/Order/${id.slice(4)}`, customer: "Voorbeeldklant", city, postcode: "3941 BX", fullAddress: `Voorbeeldweg 1, 3941 BX ${city}, Netherlands`, paid: true, fulfilled: false, cancelled: false, deliveryMethod: "delivery", addressComplete: true, products: ["1x Kunststof rijplaat"] });
+
+await test("bij de verhuizing komt alles uit KV mee, met vervaldatum en metadata, en verlopen blijft weg", async () => {
+  const kv = oldKv([
+    [`order:${DRS}:#DRS1`, order("#DRS1", "Doorn")],
+    [`order:${DRS}:#DRS2`, order("#DRS2", "Zeist")],
+    [`delivered:${DRS}:#DRS3`, { id: "#DRS3", deliveredAt: "2026-09-27T10:00:00.000Z" }, { expiration: now + 30 * DAY, metadata: { deliveredAt: "2026-09-27T10:00:00.000Z", own: true } }],
+    ["geo:oud", { lat: 1, lon: 2 }, { expiration: now - 10 }],
+    ["plan-counter", { next: 7 }],
+  ]);
+  const env = { PLANNING_ORDERS: kv, OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" };
+  const { object, ctx } = objectFor(env);
+  await ctx.waiting;
+  assert.deepEqual({ listed: object.copied.listed, copied: object.copied.copied }, { listed: 5, copied: 4 });
+  const status = await (await object.fetch(new Request("https://worker.test/store/status", { headers: { "x-operator-key": PLANNER } }))).json();
+  assert.equal(status.store, "durable-object");
+  assert.deepEqual(status.keys, { order: 2, delivered: 1, "plan-counter": 1 });
+  const listed = await object.store.list({ prefix: "delivered:" });
+  assert.deepEqual(listed.keys[0], { name: `delivered:${DRS}:#DRS3`, expiration: now + 30 * DAY, metadata: { deliveredAt: "2026-09-27T10:00:00.000Z", own: true } });
+  // A second wake-up copies nothing again, even when KV has changed since.
+  kv.map.set(`order:${DRS}:#DRS1`, { value: JSON.stringify({ ...order("#DRS1", "Doorn"), city: "Oud" }) });
+  const again = objectFor(env, ctx.storage.sql);
+  await again.ctx.waiting;
+  assert.equal(again.object.copied.at, object.copied.at);
+  assert.equal((await again.object.store.get(`order:${DRS}:#DRS1`, "json")).city, "Doorn");
+});
+
+await test("lukt de kopie uit KV niet, dan draait de site door op KV en komt de kopie later, met wat er intussen veranderde", async () => {
+  const kv = new SqlKV();
+  await kv.put(`order:${DRS}:#DRS30`, JSON.stringify(order("#DRS30", "Doorn")));
+  await kv.put(`order:${DRS}:#DRS31`, JSON.stringify(order("#DRS31", "Zeist")));
+  let broken = true;
+  const flaky = {
+    list: (options) => (broken ? Promise.reject(new Error("KV list() limit exceeded for the day.")) : kv.list(options)),
+    get: (key, type) => kv.get(key, type),
+    put: (...args) => kv.put(...args),
+    delete: (key) => kv.delete(key),
+  };
+  const env = { PLANNING_ORDERS: flaky, OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" };
+  const { object, ctx } = objectFor(env);
+  await ctx.waiting;
+  assert.equal(object.copied, null);
+  const status = () => object.fetch(new Request("https://worker.test/store/status", { headers: { "x-operator-key": PLANNER } })).then((response) => response.json());
+  assert.match((await status()).store, /^kv/);
+  // Meanwhile the site works on KV: an order goes, another comes.
+  await kv.delete(`order:${DRS}:#DRS31`);
+  await kv.put(`order:${DRS}:#DRS32`, JSON.stringify(order("#DRS32", "Leersum")));
+  broken = false;
+  object.copyTriedAt = 0;
+  const orders = await (await object.fetch(new Request("https://worker.test/orders", { headers: { "x-operator-key": PLANNER } }))).json();
+  assert.deepEqual(orders.map((item) => item.id).sort(), ["#DRS30", "#DRS32"]);
+  assert.equal((await status()).store, "durable-object");
+  assert.equal(await object.store.get(`order:${DRS}:#DRS31`), null, "wat in KV weg was, komt niet terug");
+});
+
+await test("de Worker geeft elk verzoek aan de opslag, en zijn interne adres is van buiten dicht", async () => {
+  const { object, ctx } = objectFor({ PLANNING_ORDERS: oldKv([[`order:${DRS}:#DRS1`, order("#DRS1", "Doorn")]]), OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" });
+  await ctx.waiting;
+  const env = { PLANNING_STORE: namespaceFor(object), OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" };
+  const orders = await worker.fetch(new Request("https://worker.test/orders", { headers: { "x-operator-key": PLANNER } }), env);
+  assert.equal(orders.status, 200);
+  assert.deepEqual((await orders.json()).map((item) => item.id), ["#DRS1"]);
+  assert.equal((await worker.fetch(new Request("https://worker.test/orders"), env)).status, 401, "zonder code niets");
+  assert.equal((await worker.fetch(new Request("https://planning-store.internal/scheduled", { method: "POST", body: "{}" }), env)).status, 404);
+  assert.equal((await worker.fetch(new Request("https://worker.test/store/status"), env)).status, 401);
+});
+
+await test("de aankondiging van 16:00 loopt via de opslag en ruimt verlopen rijen op", async () => {
+  const { object, ctx, sql } = objectFor({ PLANNING_ORDERS: oldKv([]), OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" });
+  await ctx.waiting;
+  sql.exec("INSERT INTO kv (key, value, expiration) VALUES ('geo:verlopen', '{}', ?)", now - 5);
+  const env = { PLANNING_STORE: namespaceFor(object) };
+  // 14:00 UTC on a summer day is 16:00 in Amsterdam.
+  const at = Date.parse("2026-09-28T14:00:05Z");
+  const realNow = Date.now;
+  Date.now = () => at + 5_000;
+  try {
+    await worker.scheduled({ scheduledTime: at, cron: "0 14,15 * * *" }, env);
+  } finally {
+    Date.now = realNow;
+  }
+  const report = await object.store.get("plan-announce:2026-09-29", "json");
+  assert.equal(report.mode, "proef");
+  assert.deepEqual(sql.exec("SELECT key FROM kv WHERE key = 'geo:verlopen'").toArray(), [], "verlopen rij is opgeruimd");
+});
+
+await test("opruimen van oude bezorgd-records: eerst tellen, pas met apply veranderen", async () => {
+  const kv = new SqlKV();
+  const env = { PLANNING_ORDERS: kv, OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" };
+  const recent = new Date(Date.now() - 5 * DAY * 1000).toISOString();
+  const ancient = new Date(Date.now() - 90 * DAY * 1000).toISOString();
+  await kv.put(`delivered:${DRS}:#DRS10`, JSON.stringify({ id: "#DRS10", shopDomain: DRS, deliveredAt: recent, source: "planner", fulfillment: { id: "gid://shopify/Fulfillment/1" }, order: { ...order("#DRS10", "Doorn"), phone: "0612345678", customerNote: "achterom" } }));
+  await kv.put(`delivered:slowfeeder-specialist.myshopify.com:#DSP11`, JSON.stringify({ id: "#DSP11", shopDomain: "slowfeeder-specialist.myshopify.com", deliveredAt: recent, source: "shopify", order: { id: "#DSP11", customer: "Voorbeeldklant", fullAddress: "Voorbeeldweg 2, 3941 BX Doorn", city: "Doorn", products: ["1x Hooinet"], phone: "0611111111" } }));
+  await kv.put(`delivered:${DRS}:#DRS12`, JSON.stringify({ id: "#DRS12", shopDomain: DRS, deliveredAt: ancient, source: "shopify", order: order("#DRS12", "Zeist") }));
+  await kv.put(`delivered:${DRS}:#DRS13`, JSON.stringify({ id: "#DRS13", shopDomain: DRS, deliveredAt: recent, source: "bezorger", order: order("#DRS13", "Leersum") }), { metadata: { deliveredAt: recent } });
+  const ask = (apply) => worker.fetch(new Request("https://worker.test/store/tidy-history", { method: "POST", headers: { "x-operator-key": PLANNER, "content-type": "application/json" }, body: JSON.stringify({ apply }) }), env).then((response) => response.json());
+
+  const dry = await ask(false);
+  assert.deepEqual(dry, { records: 4, cleaned: 2, removed: 1, marked: 2, applied: false });
+  assert.match(await kv.get(`delivered:${DRS}:#DRS10`), /0612345678/, "tellen verandert niets");
+
+  const done = await ask(true);
+  assert.equal(done.applied, true);
+  const own = await kv.get(`delivered:${DRS}:#DRS10`, "json");
+  assert.equal(own.order.phone, undefined);
+  assert.equal(own.order.customerNote, undefined);
+  assert.deepEqual(kv.entry(`delivered:${DRS}:#DRS10`).metadata, { deliveredAt: own.deliveredAt, own: true });
+  const parcel = await kv.get(`delivered:slowfeeder-specialist.myshopify.com:#DSP11`, "json");
+  for (const field of ["customer", "fullAddress", "phone"]) assert.equal(parcel.order[field], undefined, `een pakket houdt geen ${field}`);
+  assert.equal(parcel.order.city, "Doorn");
+  assert.equal(await kv.get(`delivered:${DRS}:#DRS12`), null, "ouder dan 60 dagen: weg");
+  assert.equal(kv.entry(`delivered:${DRS}:#DRS13`).metadata.own, true, "eigen bezorging gemarkeerd");
+  assert.ok(Math.abs(kv.entry(`delivered:${DRS}:#DRS13`).expiration - (Date.parse(recent) / 1000 + 60 * DAY)) < 2, "60 dagen vanaf de bezorging");
+  assert.deepEqual(await ask(false), { records: 3, cleaned: 0, removed: 0, marked: 0, applied: false }, "een tweede keer is er niets meer te doen");
+  assert.equal((await worker.fetch(new Request("https://worker.test/store/tidy-history", { method: "POST", body: "{}" }), env)).status, 401);
+});
+
+await test("een klant wissen haalt elke kopie van de order weg, met het kaartpunt, en alleen die", async () => {
+  const kv = new SqlKV();
+  const env = { PLANNING_ORDERS: kv, OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" };
+  const doorn = order("#DRS20", "Doorn");
+  await kv.put(`order:${DRS}:#DRS20`, JSON.stringify(doorn));
+  await kv.put(`announced:${DRS}:#DRS20`, "{}");
+  await kv.put(`geo:${doorn.fullAddress.toLowerCase()}`, JSON.stringify({ lat: 52, lon: 5.3 }));
+  await kv.put(`order:${DRS}:#DRS21`, JSON.stringify(order("#DRS21", "Zeist")));
+  const forget = (body, key = PLANNER) => worker.fetch(new Request("https://worker.test/store/forget", { method: "POST", headers: { "x-operator-key": key, "content-type": "application/json" }, body: JSON.stringify(body) }), env);
+  const result = await (await forget({ shopDomain: DRS, id: "DRS20" })).json();
+  assert.deepEqual([...result.removed].sort(), ["announced", "geo", "order"]);
+  assert.equal(await kv.get(`order:${DRS}:#DRS20`), null);
+  assert.equal(await kv.get(`geo:${doorn.fullAddress.toLowerCase()}`), null);
+  assert.ok(await kv.get(`order:${DRS}:#DRS21`), "een andere order blijft");
+  assert.equal((await forget({ shopDomain: DRS, id: "#DRS21" }, "fout")).status, 401);
+  assert.equal((await forget({ shopDomain: DRS, id: "../plan" })).status, 400);
+});
+
+let failed = 0;
+for (const [status, name, error] of results) {
+  console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);
+  if (error) {
+    failed += 1;
+    console.log(`   ${String(error.stack || error).split("\n").slice(0, 4).join("\n   ")}`);
+  }
+}
+console.log(`${results.length - failed}/${results.length} opslag goed`);
+if (failed) process.exit(1);

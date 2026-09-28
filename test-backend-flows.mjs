@@ -2,6 +2,7 @@
 // Shopify. Nothing here reaches a real shop or a real customer: fetch is
 // replaced before the Worker is loaded, and every order and name is made up.
 import assert from "node:assert/strict";
+import { SqlKV } from "./test-store-shim.mjs";
 
 const realFetch = globalThis.fetch;
 
@@ -203,8 +204,9 @@ const DSP = "slowfeeder-specialist.myshopify.com";
 const PLANNER = "planner-code-voor-tests";
 const DRIVER = "bezorger-code-voor-tests";
 
+// STORE=sql runs every flow against the Durable Object's SQLite store instead.
 function makeEnv(extra = {}) {
-  return { PLANNING_ORDERS: new MemoryKV(), OPERATOR_KEY: PLANNER, DRIVER_KEY: DRIVER, SHOPIFY_ADMIN_TOKEN: "test-token", SHOPIFY_WEBHOOK_SECRET: "webhook-secret", SHOPIFY_CLIENT_ID: "client", SHOPIFY_CLIENT_SECRET: "client-secret", CORS_ORIGIN: "https://example.test", ...extra };
+  return { PLANNING_ORDERS: process.env.STORE === "sql" ? new SqlKV() : new MemoryKV(), OPERATOR_KEY: PLANNER, DRIVER_KEY: DRIVER, SHOPIFY_ADMIN_TOKEN: "test-token", SHOPIFY_WEBHOOK_SECRET: "webhook-secret", SHOPIFY_CLIENT_ID: "client", SHOPIFY_CLIENT_SECRET: "client-secret", CORS_ORIGIN: "https://example.test", ...extra };
 }
 
 async function call(env, method, path, { key, body, headers = {} } = {}) {

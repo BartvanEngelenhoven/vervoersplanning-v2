@@ -10,7 +10,9 @@
  * Required Worker bindings / secrets:
  * - SHOPIFY_WEBHOOK_SECRET: fallback Shopify webhook signing secret
  * - SHOPIFY_WEBHOOK_SECRET_<SHOP_DOMAIN>: optional per-shop secret, for example SHOPIFY_WEBHOOK_SECRET_SLOWFEEDER_SPECIALIST_MYSHOPIFY_COM
- * - PLANNING_ORDERS: Cloudflare KV namespace
+ * - PLANNING_STORE: the Durable Object (SQLite) that holds everything; see planning-store.js
+ * - PLANNING_ORDERS: the Cloudflare KV namespace that held everything before the move,
+ *   copied over once and kept as it was; without PLANNING_STORE it is still the store
  * - CORS_ORIGIN: optional, for example https://bartvanengelenhoven.github.io
  * - OPERATOR_KEY: the planner's code; opens everything
  * - DRIVER_KEY: optional driver's code; opens the day's routes, reporting deliveries,
@@ -36,6 +38,8 @@
  * - plan:<date>:<id>       until 60 days after the route's date.
  * - geo:<address>          90 days (a point), 7 days (a miss).
  */
+
+import { copyFromKv, sqlStore } from "./planning-store.js";
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -75,47 +79,117 @@ const KV_LIMIT_MESSAGE = "Het gratis dagtegoed van Cloudflare is op. Vanaf 02:00
 const DEPOT_POINT = { lat: 52.07309, lon: 5.63884 };
 const DAY_LIMIT_MINUTES = 345;
 
+// Every request goes through to the one Durable Object that owns the storage,
+// and is answered there. Only the Worker can reach it; a request for its
+// internal address from outside is refused here.
 export default {
-  // The announcement at 16:00 the day before a route. Cron runs in UTC, so it
-  // fires at 14:00 and 15:00 UTC and only the one that is 16:00 in Amsterdam
-  // goes ahead: 14:00 in summer time, 15:00 in winter time. A second trigger ten
-  // minutes later picks up whatever the first could not finish or got refused.
-  //
-  // That second run is a second chance for the first, not a second announcement,
-  // so it goes the way the 16:00 run went. AUTO_FULFILL switched on at 16:03
-  // would otherwise mail every customer of tomorrow's routes that same day, under
-  // a report still headed "proef". It is never live while AUTO_FULFILL is off.
   async scheduled(event, env) {
-    const now = amsterdamNow(new Date(event.scheduledTime));
-    if (now.hour !== ANNOUNCE_HOUR) return;
-    const date = nextDay(now.day);
-    const logKey = `${ANNOUNCE_LOG_PREFIX}${date}`;
-    const earlier = now.minute >= 10 ? await env.PLANNING_ORDERS.get(logKey, "json").catch(() => null) : null;
-    const live = announceLive(env) && earlier?.mode !== "proef";
-    const report = { date, ranAt: new Date().toISOString(), mode: live ? "echt" : "proef", routes: [] };
-    try {
-      await runAnnouncement(env, date, { preview: !live, report });
-    } catch (error) {
-      report.error = String(error?.message || error).slice(0, 200);
-    } finally {
-      // Written whatever happened, so the agenda never shows a silent gap.
-      await env.PLANNING_ORDERS.put(logKey, JSON.stringify(mergeAnnounceReports(earlier, report)), { expirationTtl: 60 * DAY_SECONDS });
-    }
+    if (!env.PLANNING_STORE) return runScheduled(event, env);
+    await storeStub(env).fetch(`https://${STORE_HOST}/scheduled`, {
+      method: "POST",
+      body: JSON.stringify({ scheduledTime: event.scheduledTime, cron: event.cron }),
+    });
   },
 
   async fetch(request, env) {
-    try {
-      return await route(request, env);
-    } catch (error) {
-      // Without this a thrown error comes back as a bare 500 with no CORS
-      // headers, and the browser reports only "Failed to fetch" instead of
-      // anything the planner could act on.
-      console.error(error);
-      if (kvLimitSpent(error)) return json({ error: KV_LIMIT_MESSAGE }, 503, env);
-      return json({ error: "Er ging iets mis op de server. Probeer het zo opnieuw." }, 500, env);
-    }
+    if (!env.PLANNING_STORE) return handleRequest(request, env);
+    if (new URL(request.url).hostname === STORE_HOST) return new Response("Not found", { status: 404 });
+    return storeStub(env).fetch(request);
   },
 };
+
+const STORE_HOST = "planning-store.internal";
+
+function storeStub(env) {
+  return env.PLANNING_STORE.get(env.PLANNING_STORE.idFromName("planning"));
+}
+
+// The planning's storage and everything that works on it, in one place: one
+// object, so every read sees every write before it. See planning-store.js.
+export class PlanningStore {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.env = env;
+    this.store = sqlStore(ctx.storage.sql);
+    this.copied = null;
+    this.copyTriedAt = 0;
+    // The first time, KV's contents come over before anything is answered.
+    ctx.blockConcurrencyWhile(() => this.copyKv());
+  }
+
+  // When KV cannot be read (its day's budget spent, say), the site keeps running
+  // on KV as before, and the copy is tried again five minutes later. Nothing
+  // else is answered meanwhile, so no write slips past it.
+  async copyKv() {
+    try {
+      this.copied = await copyFromKv(this.env.PLANNING_ORDERS, this.ctx.storage.sql);
+      this.copyError = null;
+    } catch (error) {
+      this.copied = null;
+      this.copyError = String(error?.message || error).slice(0, 200);
+      console.error("copy from KV", error);
+    }
+    this.copyTriedAt = Date.now();
+  }
+
+  async fetch(request) {
+    const kv = this.env.PLANNING_ORDERS;
+    if (!this.copied && kv && Date.now() - this.copyTriedAt > 5 * 60_000) await this.ctx.blockConcurrencyWhile(() => this.copyKv());
+    const onStore = Boolean(this.copied) || !kv;
+    const env = {
+      ...this.env,
+      PLANNING_ORDERS: onStore ? this.store : kv,
+      STORE_STATUS: () => ({ store: onStore ? "durable-object" : "kv, kopie nog niet gelukt", copiedFromKv: this.copied, copyError: this.copyError || undefined, keys: this.store.counts() }),
+    };
+    const url = new URL(request.url);
+    if (url.hostname === STORE_HOST && url.pathname === "/scheduled") {
+      await runScheduled(await request.json(), env);
+      if (onStore) this.store.purge();
+      return new Response("ok");
+    }
+    return handleRequest(request, env);
+  }
+}
+
+// The announcement at 16:00 the day before a route. Cron runs in UTC, so it
+// fires at 14:00 and 15:00 UTC and only the one that is 16:00 in Amsterdam
+// goes ahead: 14:00 in summer time, 15:00 in winter time. A second trigger ten
+// minutes later picks up whatever the first could not finish or got refused.
+//
+// That second run is a second chance for the first, not a second announcement,
+// so it goes the way the 16:00 run went. AUTO_FULFILL switched on at 16:03
+// would otherwise mail every customer of tomorrow's routes that same day, under
+// a report still headed "proef". It is never live while AUTO_FULFILL is off.
+async function runScheduled(event, env) {
+  const now = amsterdamNow(new Date(event.scheduledTime));
+  if (now.hour !== ANNOUNCE_HOUR) return;
+  const date = nextDay(now.day);
+  const logKey = `${ANNOUNCE_LOG_PREFIX}${date}`;
+  const earlier = now.minute >= 10 ? await env.PLANNING_ORDERS.get(logKey, "json").catch(() => null) : null;
+  const live = announceLive(env) && earlier?.mode !== "proef";
+  const report = { date, ranAt: new Date().toISOString(), mode: live ? "echt" : "proef", routes: [] };
+  try {
+    await runAnnouncement(env, date, { preview: !live, report });
+  } catch (error) {
+    report.error = String(error?.message || error).slice(0, 200);
+  } finally {
+    // Written whatever happened, so the agenda never shows a silent gap.
+    await env.PLANNING_ORDERS.put(logKey, JSON.stringify(mergeAnnounceReports(earlier, report)), { expirationTtl: 60 * DAY_SECONDS });
+  }
+}
+
+async function handleRequest(request, env) {
+  try {
+    return await route(request, env);
+  } catch (error) {
+    // Without this a thrown error comes back as a bare 500 with no CORS
+    // headers, and the browser reports only "Failed to fetch" instead of
+    // anything the planner could act on.
+    console.error(error);
+    if (kvLimitSpent(error)) return json({ error: KV_LIMIT_MESSAGE }, 503, env);
+    return json({ error: "Er ging iets mis op de server. Probeer het zo opnieuw." }, 500, env);
+  }
+}
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -202,6 +276,20 @@ async function route(request, env) {
     return removePlanStop(request, env);
   }
 
+  if (request.method === "GET" && url.pathname === "/store/status") {
+    const denied = plannerOnly(request, env);
+    if (denied) return denied;
+    return json(env.STORE_STATUS ? env.STORE_STATUS() : { store: "kv" }, 200, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/store/tidy-history") {
+    return tidyHistory(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/store/forget") {
+    return forgetCustomerOrder(request, env);
+  }
+
   if (request.method === "GET" && url.pathname === "/whoami") {
     const role = roleFor(request, env);
     return role ? json({ role }, 200, env) : json({ error: "Unauthorized" }, 401, env);
@@ -243,9 +331,11 @@ async function listAll(env, prefix) {
 
 // KV's own words when the day's budget is spent: "KV put() limit exceeded for
 // the day."
+// KV said "KV put() limit exceeded for the day"; the SQLite store speaks of
+// exceeding the free tier's rows read or written.
 function kvLimitSpent(error) {
   const message = String(error?.message || error || "");
-  return /limit/i.test(message) && /exceeded|day/i.test(message);
+  return (/limit/i.test(message) && /exceeded|day/i.test(message)) || (/exceeded/i.test(message) && /free tier|rows (read|written)/i.test(message));
 }
 
 function sleep(ms) {
@@ -420,6 +510,62 @@ async function putDelivered(env, key, record) {
   // Shopify's webhook for the same order can land in the same second.
   await putWithRetry(env, `delivered:${key}`, value, { expiration, metadata: own ? { deliveredAt, own: true } : { deliveredAt } });
   return true;
+}
+
+// Once, for delivery records written before the terms above (September 2026):
+// phone and customer note out, no name or address for a parcel that never went
+// with the van, gone 60 days after delivery (older ones at once), and marked as
+// the planning's own where it was, so the history screen keeps showing them.
+// It deletes data, so it runs only when the owner starts it (scripts/historie-bewaartermijn.mjs):
+// asked without "apply" it only counts.
+async function tidyHistory(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const keys = await listAll(env, "delivered:");
+  const counts = { records: keys.length, cleaned: 0, removed: 0, marked: 0 };
+  for (const key of keys) {
+    const needsTerms = !key.metadata?.deliveredAt;
+    if (!needsTerms && key.metadata?.own) continue;
+    const record = await env.PLANNING_ORDERS.get(key.name, "json");
+    if (!record) continue;
+    const own = Boolean(record.fulfillment?.id) || OWN_SOURCES.includes(record.source);
+    if (!needsTerms && !own) continue;
+    const vanDelivery = String(record.shopDomain || "").includes("rijplaten") || record.order?.ownDeliveryTagged || record.order?.announced || record.source !== "shopify";
+    const order = record.order && !vanDelivery ? shippedElsewhere(record.order) : record.order;
+    const delivered = Date.parse(shopifyTime(record.deliveredAt) || "");
+    const expired = !Number.isNaN(delivered) && delivered / 1000 + DELIVERED_TTL < Date.now() / 1000 + 90;
+    if (needsTerms) counts[expired ? "removed" : "cleaned"] += 1;
+    if (own && !expired) counts.marked += 1;
+    if (!payload.apply) continue;
+    // A record without a readable time keeps its 60 days from today.
+    await putDelivered(env, key.name.slice("delivered:".length), { ...record, order, deliveredAt: Number.isNaN(delivered) ? new Date().toISOString() : record.deliveredAt });
+  }
+  return json({ ...counts, applied: Boolean(payload.apply) }, 200, env);
+}
+
+// A customer who asks to be erased (AVG): every copy of their order here goes,
+// with the point of their address. Routes hold only order numbers. In Shopify
+// the customer is erased there, by hand.
+async function forgetCustomerOrder(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const shopDomain = normalizeShopDomain(payload.shopDomain);
+  const id = String(payload.id || "").trim();
+  if (!shopDomain || !/^#?[\w-]+$/.test(id)) return json({ error: "Winkel en ordernummer zijn nodig." }, 400, env);
+  const key = `${shopDomain}:${id.startsWith("#") ? id : `#${id}`}`;
+  const order = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
+  const delivered = await env.PLANNING_ORDERS.get(`delivered:${key}`, "json");
+  const keys = [`order:${key}`, `delivered:${key}`, `${ANNOUNCED_PREFIX}${key}`, `${REPORTING_PREFIX}${key}`, `${REPORT_SEEN_PREFIX}${key}`, `${REPORT_UNSURE_PREFIX}${key}`];
+  for (const record of [order, delivered?.order]) if (record?.fullAddress || record?.city) keys.push(geoKeyForOrder(record));
+  const removed = [];
+  for (const name of [...new Set(keys)]) {
+    if ((await env.PLANNING_ORDERS.get(name)) === null) continue;
+    await env.PLANNING_ORDERS.delete(name);
+    removed.push(name.slice(0, name.indexOf(":")));
+  }
+  return json({ ok: true, removed }, 200, env);
 }
 
 // Until fourteen days after it was cancelled, counted the same way: a refund or a
