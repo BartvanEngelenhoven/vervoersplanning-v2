@@ -1337,9 +1337,13 @@ function renderLeafletOrderMap(items) {
   }
   if (!allOrdersLeafletMap) {
     allOrdersLeafletMap = L.map(mapElement, { scrollWheelZoom: false });
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    // OpenStreetMap refuses tiles asked for without a Referer ("Access blocked"),
+    // and the page sends none (see index.html). The tiles alone get the site's
+    // address, never the page's path.
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 18,
       attribution: "&copy; OpenStreetMap",
+      referrerPolicy: "strict-origin",
     }).addTo(allOrdersLeafletMap);
     allOrdersMarkers = L.layerGroup().addTo(allOrdersLeafletMap);
     allOrdersFitted = false;
