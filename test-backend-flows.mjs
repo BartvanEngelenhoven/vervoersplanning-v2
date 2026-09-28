@@ -512,7 +512,8 @@ await test("historie: de 50 nieuwste zonder alles te lezen, en bezorgde ritstops
   const history = await call(env, "GET", `/history?keys=${encodeURIComponent(`${DRS}:#H3`)}`, { key: PLANNER });
   assert.equal(history.data.entries.length, 50);
   assert.equal(history.data.entries[0].id, "#H119");
-  assert.ok(env.PLANNING_ORDERS.ops.get <= 50, `las ${env.PLANNING_ORDERS.ops.get} records`);
+  // Fifty records, and the one look at the code brake.
+  assert.ok(env.PLANNING_ORDERS.ops.get <= 51, `las ${env.PLANNING_ORDERS.ops.get} records`);
   assert.ok(history.data.delivered[`${DRS}:#H3`]);
   const driver = await call(env, "GET", `/history?keys=${encodeURIComponent(`${DRS}:#H3`)}`, { key: DRIVER });
   assert.equal(driver.data.entries.length, 0);
@@ -951,6 +952,45 @@ await test("DHL/FVR: de planner zet een order uit de voorstellen, bewaard los va
   assert.equal((await zet(PLANNER, { orderKey: a.key, extern: false })).status, 200);
   assert.equal((await call(env, "GET", "/orders", { key: PLANNER })).data.find((item) => item.id === a.order.id).extern, undefined);
   assert.equal(shop.orders.get(a.order.shopifyOrderId).tags.size, 0, "Shopify onaangeroerd");
+});
+
+await test("rem op codes: na 5 verschillende verkeerde codes wacht dat adres 5 minuten, ook met de goede code", async () => {
+  const env = makeEnv();
+  const vanaf = (ip, key) => call(env, "GET", "/whoami", { key, headers: { "cf-connecting-ip": ip } });
+  const thuis = "203.0.113.7";
+  for (let poging = 1; poging <= 4; poging += 1) assert.equal((await vanaf(thuis, `fout-${poging}`)).status, 401, `poging ${poging}`);
+  // The same wrong code again, and a request without any code, do not count.
+  assert.equal((await vanaf(thuis, "fout-4")).status, 401);
+  assert.equal((await call(env, "GET", "/orders", { headers: { "cf-connecting-ip": thuis } })).status, 401);
+  const vijfde = await vanaf(thuis, "fout-5");
+  assert.equal(vijfde.status, 429);
+  assert.match(vijfde.data.error, /Vijf keer een verkeerde code\. Wacht 5 minuten/);
+  assert.equal(vijfde.headers.get("retry-after"), "300");
+  assert.equal((await vanaf(thuis, PLANNER)).status, 429, "ook de goede code wacht");
+  assert.equal((await vanaf("198.51.100.9", PLANNER)).status, 200, "een ander adres merkt niets");
+  // Shopify's webhooks carry no code and never wait.
+  const a = await seedOrder(env, DRS, "#DRS899");
+  assert.equal((await webhook(env, DRS, { ...a.raw, updated_at: new Date(Date.now() + 1000).toISOString() })).status, 200);
+
+  const echteNu = Date.now;
+  Date.now = () => echteNu() + 5 * 60_000 + 1000;
+  try {
+    assert.equal((await vanaf(thuis, PLANNER)).status, 200, "na vijf minuten weer welkom");
+    for (let poging = 1; poging <= 4; poging += 1) assert.equal((await vanaf(thuis, `nog-fout-${poging}`)).status, 401);
+    assert.equal((await vanaf(thuis, DRIVER)).status, 200, "de goede code zet de teller op nul");
+    for (let poging = 1; poging <= 4; poging += 1) assert.equal((await vanaf(thuis, `weer-fout-${poging}`)).status, 401);
+  } finally {
+    Date.now = echteNu;
+  }
+});
+
+await test("rem op codes: een telefoon op IPv6 telt per blok, niet per adres", async () => {
+  const env = makeEnv();
+  const vanaf = (ip, key) => call(env, "GET", "/whoami", { key, headers: { "cf-connecting-ip": ip } });
+  const adressen = ["2001:db8:aa:1::1", "2001:db8:aa:1::2", "2001:0db8:00aa:0001:ffff::3", "2001:db8:aa:1:1:2:3:4", "2001:db8:aa:1::5"];
+  for (let index = 0; index < 4; index += 1) assert.equal((await vanaf(adressen[index], `fout-${index}`)).status, 401);
+  assert.equal((await vanaf(adressen[4], "fout-4")).status, 429);
+  assert.equal((await vanaf("2001:db8:aa:2::1", PLANNER)).status, 200, "een ander blok niet");
 });
 
 await test("bezorger: zijn stops met punt, orders in ritten na zijn twee weken bezet, en wat vandaag al bezorgd is", async () => {

@@ -2497,7 +2497,19 @@ async function backendFetch(url, options = {}) {
     if (!askOperatorKey("Die code klopt niet. Probeer het opnieuw:")) return response;
     response = await send();
   }
+  if (response.status === 429) await tellBrake(response);
   return response;
+}
+
+// Five wrong codes in a row, and the Worker makes this address wait five
+// minutes. Said once, not on every refresh; the stored code is kept, since it
+// may well be the right one.
+let brakeToldAt = 0;
+async function tellBrake(response) {
+  if (Date.now() - brakeToldAt < 60_000) return;
+  brakeToldAt = Date.now();
+  const text = await errorText(response.clone(), "Te vaak een verkeerde code. Wacht vijf minuten en probeer het dan opnieuw.");
+  window.alert(text);
 }
 
 // full: also fetch the planned routes and the deliveries. Each costs a list

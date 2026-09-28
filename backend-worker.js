@@ -220,6 +220,8 @@ async function runScheduled(event, env) {
 async function handleRequest(request, requestEnv) {
   const env = { ...requestEnv, REQUEST_ORIGIN: request.headers.get("origin") || "" };
   try {
+    const braked = await codeBrake(request, env);
+    if (braked) return braked;
     return await route(request, env);
   } catch (error) {
     // Without this a thrown error comes back as a bare 500 with no CORS
@@ -2250,6 +2252,66 @@ function roleFor(request, env) {
   const driver = String(env.DRIVER_KEY || "");
   if (driver && timingSafeEqual(driver, provided)) return "driver";
   return null;
+}
+
+// Five wrong codes from one address, and that address waits five minutes, the
+// right code included: without a pause, a short code is found by trying. The
+// same wrong code sent again (three requests at once, or a screen still
+// holding an old code) counts once, and a request without a code is not an
+// attempt. A right code clears the count. Only a keyed hash of a wrong code is
+// kept, for a quarter of an hour.
+const BRAKE_PREFIX = "brake:";
+const BRAKE_ATTEMPTS = 5;
+const BRAKE_WAIT_MS = 5 * 60_000;
+const BRAKE_WINDOW_MS = 15 * 60_000;
+
+async function codeBrake(request, env) {
+  const provided = request.headers.get("x-operator-key") || "";
+  if (!provided || request.method === "OPTIONS") return null;
+  const address = brakeAddress(request);
+  // Without an address everyone would share one count, and one person typing
+  // wrong would lock everybody out. Cloudflare always sends it; said in the log
+  // if it ever does not.
+  if (!address) {
+    console.warn("code brake: no client address");
+    return null;
+  }
+  const key = `${BRAKE_PREFIX}${address}`;
+  const now = Date.now();
+  const record = (await env.PLANNING_ORDERS.get(key, "json").catch(() => null)) || {};
+  if (record.until > now) return brakeAnswer(record.until - now, env);
+  if (roleFor(request, env)) {
+    if (record.wrong?.length || record.until) await env.PLANNING_ORDERS.delete(key).catch(() => {});
+    return null;
+  }
+  const mark = (await hmacHex(`brake|${env.OPERATOR_KEY || ""}|${env.DRIVER_KEY || ""}`, provided)).slice(0, 16);
+  const wrong = (record.wrong || []).filter((entry) => entry.at > now - BRAKE_WINDOW_MS);
+  if (!wrong.some((entry) => entry.mark === mark)) wrong.push({ mark, at: now });
+  if (wrong.length >= BRAKE_ATTEMPTS) {
+    await env.PLANNING_ORDERS.put(key, JSON.stringify({ until: now + BRAKE_WAIT_MS }), { expirationTtl: BRAKE_WAIT_MS / 1000 + 60 });
+    return brakeAnswer(BRAKE_WAIT_MS, env);
+  }
+  await env.PLANNING_ORDERS.put(key, JSON.stringify({ wrong }), { expirationTtl: BRAKE_WINDOW_MS / 1000 });
+  return null;
+}
+
+function brakeAnswer(waitMs, env) {
+  const minutes = Math.max(1, Math.ceil(waitMs / 60_000));
+  const response = json({ error: `Vijf keer een verkeerde code. Wacht ${minutes} ${minutes === 1 ? "minuut" : "minuten"} en probeer het dan opnieuw.` }, 429, env);
+  response.headers.set("retry-after", String(Math.ceil(waitMs / 1000)));
+  return response;
+}
+
+// Who is trying: the address Cloudflare saw. A phone on IPv6 gets a whole block
+// of addresses, so its first half (the /64) counts as one.
+function brakeAddress(request) {
+  const ip = String(request.headers.get("cf-connecting-ip") || "").trim().toLowerCase();
+  if (!ip.includes(":")) return ip;
+  const [head, tail = ""] = ip.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = ip.includes("::") ? [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right] : left;
+  return groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, "")).join(":");
 }
 
 function anyRoleAllowed(request, env) {
