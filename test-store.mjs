@@ -292,6 +292,17 @@ await test("de scripts vragen de code zonder hem te tonen en praten met de Worke
   }
 });
 
+await test("CORS: het nieuwe en het oude adres van de site mogen allebei, een ander adres niet", async () => {
+  const env = { PLANNING_ORDERS: new SqlKV(), OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://specialistenplanning.pages.dev,https://bartvanengelenhoven.github.io" };
+  const vanaf = async (origin) => (await worker.fetch(new Request("https://worker.test/orders", { headers: { "x-operator-key": PLANNER, origin } }), env)).headers.get("access-control-allow-origin");
+  assert.equal(await vanaf("https://specialistenplanning.pages.dev"), "https://specialistenplanning.pages.dev");
+  assert.equal(await vanaf("https://bartvanengelenhoven.github.io"), "https://bartvanengelenhoven.github.io");
+  assert.equal(await vanaf("https://kwaadwillend.example"), "https://specialistenplanning.pages.dev");
+  const preflight = await worker.fetch(new Request("https://worker.test/orders", { method: "OPTIONS", headers: { origin: "https://bartvanengelenhoven.github.io" } }), env);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://bartvanengelenhoven.github.io");
+  assert.equal(preflight.headers.get("vary"), "Origin");
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);

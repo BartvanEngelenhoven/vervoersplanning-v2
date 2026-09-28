@@ -13,7 +13,8 @@
  * - PLANNING_STORE: the Durable Object (SQLite) that holds everything; see planning-store.js
  * - PLANNING_ORDERS: the Cloudflare KV namespace that held everything before the move,
  *   copied over once and kept as it was; without PLANNING_STORE it is still the store
- * - CORS_ORIGIN: optional, for example https://bartvanengelenhoven.github.io
+ * - CORS_ORIGIN: the site's address, or several comma-separated, for example
+ *   https://specialistenplanning.pages.dev,https://bartvanengelenhoven.github.io
  * - OPERATOR_KEY: the planner's code; opens everything
  * - DRIVER_KEY: optional driver's code; opens the day's routes, reporting deliveries,
  *   taking a parcel along and breaking a route off, but no planning
@@ -105,8 +106,9 @@ export default {
       // The object itself could not answer: restarted by a deploy, or the free
       // tier's day spent. Said with CORS headers, or the screen reads nothing.
       console.error(error);
-      if (kvLimitSpent(error)) return json({ error: KV_LIMIT_MESSAGE }, 503, env);
-      return json({ error: "De opslag reageert even niet. Probeer het zo opnieuw." }, 503, env);
+      const answerEnv = { ...env, REQUEST_ORIGIN: request.headers.get("origin") || "" };
+      if (kvLimitSpent(error)) return json({ error: KV_LIMIT_MESSAGE }, 503, answerEnv);
+      return json({ error: "De opslag reageert even niet. Probeer het zo opnieuw." }, 503, answerEnv);
     }
   },
 };
@@ -215,7 +217,8 @@ async function runScheduled(event, env) {
   }
 }
 
-async function handleRequest(request, env) {
+async function handleRequest(request, requestEnv) {
+  const env = { ...requestEnv, REQUEST_ORIGIN: request.headers.get("origin") || "" };
   try {
     return await route(request, env);
   } catch (error) {
@@ -2676,10 +2679,15 @@ function escapeHtml(value) {
   })[char]);
 }
 
+// CORS_ORIGIN may name more than one site, comma-separated: the planning moved
+// from GitHub Pages to specialistenplanning.pages.dev, and a tab still open on
+// the old address keeps working. The browser is told the one it asked from.
 function corsHeaders(env) {
-  const origin = env.CORS_ORIGIN || "*";
+  const allowed = String(env.CORS_ORIGIN || "*").split(",").map((origin) => origin.trim()).filter(Boolean);
+  const origin = allowed.includes(env.REQUEST_ORIGIN) ? env.REQUEST_ORIGIN : allowed[0] || "*";
   return {
     "access-control-allow-origin": origin,
+    vary: "Origin",
     "access-control-allow-methods": "GET, POST, OPTIONS",
     "access-control-allow-headers": "content-type, x-shopify-hmac-sha256, x-operator-key",
   };

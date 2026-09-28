@@ -2,8 +2,8 @@
 
 De planning voor eigen bezorging van De Rijplaten Specialist en De Slowfeeder Specialist.
 
-- Site: https://bartvanengelenhoven.github.io/vervoersplanning-v2/
-- Handleiding voor planners en bezorgers: https://bartvanengelenhoven.github.io/vervoersplanning-v2/handleiding.html
+- Site: https://specialistenplanning.pages.dev (het oude adres, bartvanengelenhoven.github.io/vervoersplanning-v2, stuurt door)
+- Handleiding voor planners en bezorgers: https://specialistenplanning.pages.dev/handleiding
 
 ## Wat de site doet
 
@@ -44,7 +44,7 @@ Wat de Worker bewaart (sinds 28 september 2026 in één Durable Object met een e
 Wie gegevens te zien krijgt:
 
 - **Cloudflare** draait de Worker en de opslag.
-- **GitHub Pages** host alleen de site zelf, zonder klantgegevens.
+- **Cloudflare Pages** host de site zelf, zonder klantgegevens. **GitHub Pages** stuurt het oude adres door.
 - **PDOK** (de overheid) krijgt de adressen van Nederlandse orders, om ze op de kaart te zetten. Buitenlandse adressen gaan nergens heen.
 - **Google Maps**: de kaart op *Vandaag* laadt de adressen van de gekozen rit. De Maps-links gaan pas open als je erop tikt.
 - **OpenStreetMap** levert de kaarttegels voor *Kaart*; **unpkg** levert de kaartbibliotheek Leaflet, vastgezet op één versie met een controle-hash.
@@ -101,7 +101,7 @@ Dat controleert de syntax, de vertaling van Shopify-orders, alle Worker-stromen 
 
 ## De Worker live zetten
 
-De site is statisch (GitHub Pages). De Worker in `backend-worker.js` (Cloudflare Workers, gratis plan) ontvangt de Shopify-webhooks, bewaart de orders en praat met Shopify.
+De site is statisch (Cloudflare Pages, project `specialistenplanning`). Zet een nieuwe versie online met `npm run site:deploy`; dat plaatst alleen de bestanden die de browser nodig heeft. Een push naar GitHub zet alleen de doorverwijzing op het oude adres neer. De Worker in `backend-worker.js` (Cloudflare Workers, gratis plan) ontvangt de Shopify-webhooks, bewaart de orders en praat met Shopify.
 
 Eenmalig:
 

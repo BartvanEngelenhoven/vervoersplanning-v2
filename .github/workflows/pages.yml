@@ -1,4 +1,8 @@
-name: Publiceer Vervoersplanning V2
+name: Doorverwijzing naar specialistenplanning.pages.dev
+
+# The planning moved to https://specialistenplanning.pages.dev on 28 September
+# 2026 (npm run site:deploy). This keeps the old GitHub Pages address alive as a
+# redirect, so bookmarks and phones' home-screen icons still arrive.
 
 on:
   push:
@@ -21,14 +25,31 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Broncode ophalen
-        uses: actions/checkout@v6
+      - name: Doorverwijzing maken
+        run: |
+          mkdir -p _site
+          page() {
+            cat > "_site/$1" <<HTML
+          <!doctype html>
+          <html lang="nl"><head><meta charset="utf-8">
+          <meta name="referrer" content="no-referrer">
+          <meta http-equiv="refresh" content="0; url=https://specialistenplanning.pages.dev/$2">
+          <title>Vervoersplanning is verhuisd</title>
+          <script>location.replace("https://specialistenplanning.pages.dev/$2" + location.hash);</script>
+          </head><body style="font-family: system-ui, sans-serif; max-width: 36rem; margin: 3rem auto; padding: 0 1rem;">
+          <p>De vervoersplanning staat nu op <a href="https://specialistenplanning.pages.dev/$2">specialistenplanning.pages.dev</a>. Zet die link in je bladwijzers of op je beginscherm.</p>
+          </body></html>
+          HTML
+          }
+          page index.html ""
+          page handleiding.html handleiding
+          page 404.html ""
       - name: GitHub Pages instellen
         uses: actions/configure-pages@v5
       - name: Website verpakken
         uses: actions/upload-pages-artifact@v4
         with:
-          path: .
+          path: _site
       - name: Publiceren
         id: deployment
         uses: actions/deploy-pages@v4
