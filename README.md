@@ -15,8 +15,8 @@ De planning voor eigen bezorging van De Rijplaten Specialist en De Slowfeeder Sp
 
 Wat de site in Shopify verandert:
 
-- **Bezorgd**: zet de order op verzonden (fulfilled), **zonder** mail aan de klant, en schrijft een regel in de ordernotitie.
-- **Terugdraaien**: annuleert die verzending weer. Alleen voor verzendingen die de planning zelf maakte.
+- **Bezorgd**: zet de order op verzonden (fulfilled), **zonder** mail aan de klant, en schrijft een regel in de ordernotitie. Krijgt Bezorgd geen antwoord van Shopify, dan boekt de Worker de bezorging alsnog zodra Shopify zelf meldt dat de order verzonden is.
+- **Terugdraaien**: annuleert die verzending weer. Alleen voor verzendingen die de planning zelf maakte. De historie geeft naast de 50 nieuwste verzendingen (meestal DHL-pakketten) ook de nieuwste 200 bezorgingen van de planning zelf, zodat die niet uit beeld raken.
 - Een **pakket in een ingeplande rit** en **Toch zelf bezorgen** krijgen de tag `eigen bezorging`, zodat wie de DHL-labels print ze overslaat.
 - De **aankondiging om 16:00** staat op proef: zie hieronder.
 
@@ -25,7 +25,7 @@ Wat de site in Shopify verandert:
 Er zijn twee codes, allebei Worker-secrets:
 
 - `OPERATOR_KEY`: de planner. Opent alles.
-- `DRIVER_KEY`: de bezorger. Ziet alleen de ritten van de week ervoor tot de week erna, mag daarvan bezorgd melden en een rit afbreken, en mag onderweg een order meenemen in de rit die hij nu rijdt, maar alleen een order die de planning zelf zou aanbieden (betaald, adres compleet, geen afspraak, de dag blijft binnen 5:45). Van andere orders krijgt de telefoon alleen plaats, postcodecijfers, product en een punt op ongeveer een kilometer nauwkeurig; geen naam, straat of telefoon.
+- `DRIVER_KEY`: de bezorger. Ziet alleen de ritten van de week ervoor tot de week erna, mag daarvan bezorgd melden en een rit afbreken, en mag onderweg een order meenemen in de rit die hij nu rijdt, maar alleen een order die de planning zelf zou aanbieden (betaald, adres compleet, geen afspraak, de dag blijft binnen 5:45, waarbij wat vandaag al bezorgd is meetelt). Van andere orders krijgt de telefoon alleen plaats, postcodecijfers, product en een punt op ongeveer een kilometer nauwkeurig; geen naam, straat of telefoon.
 
 Er zit geen rem op verkeerde pogingen. Kies daarom lange codes, minstens twaalf tekens. De browser onthoudt de code; *Uitloggen* (in het menu, en onderaan het bezorgersscherm) vergeet hem op dat apparaat. Een code wijzigen doe je met `npx wrangler secret put OPERATOR_KEY` (of `DRIVER_KEY`); iedereen moet daarna de nieuwe code invullen.
 
@@ -35,8 +35,8 @@ Wat de Worker bewaart (Cloudflare KV) en hoe lang:
 
 | Wat | Inhoud | Bewaard |
 | --- | --- | --- |
-| `order:` | open order: naam, adres, telefoon, klantopmerking, producten | zolang de order open is; geannuleerd nog 14 dagen |
-| `delivered:` | bezorgde order, **zonder** telefoon en klantopmerking; van een pakket dat niet met de bus ging alleen ordernummer, plaats en product | 60 dagen (voor records van vóór 25 september 2026 pas na het eenmalige opruimscript, zie hieronder) |
+| `order:` | open order: naam, adres, telefoon, klantopmerking, producten | zolang de order open is; geannuleerd tot 14 dagen na de annulering |
+| `delivered:` | bezorgde order, **zonder** telefoon en klantopmerking; van een pakket dat niet met de bus ging alleen ordernummer, plaats en product | tot 60 dagen na de bezorging; een latere wijziging in Shopify (terugbetaling, tag) verlengt dat niet (voor records van vóór 25 september 2026 pas na het eenmalige opruimscript, zie hieronder) |
 | `plan:` | ingeplande rit: ordernummers, notities | tot 60 dagen na de ritdatum |
 | `plan-announce:` | verslag van de aankondiging | 60 dagen |
 | `geo:` | adres met coördinaat | 90 dagen (een adres dat niet gevonden werd: 7 dagen) |
@@ -80,14 +80,14 @@ De controle van september 2026 vond een paar plekken waar de planning afweek van
 
 ## De aankondiging om 16:00
 
-Om 16:00 de dag vóór een ingeplande rit zet de Worker de betaalde orders van die rit in Shopify op verzonden, **met** de verzendmail aan de klant. Om 16:10 volgt een tweede ronde voor wat de eerste niet kon afmaken. Zolang `AUTO_FULFILL` niet `aan` is, is dit een proef: er gaat niets naar Shopify of klanten, en de agenda toont wat er zou gebeuren.
+Om 16:00 de dag vóór een ingeplande rit zet de Worker de betaalde orders van die rit in Shopify op verzonden, **met** de verzendmail aan de klant. Om 16:10 volgt een tweede ronde voor wat de eerste niet kon afmaken. Die gaat zoals de ronde van 16:00 ging: was dat een proef, dan is 16:10 ook een proef. Zolang `AUTO_FULFILL` niet `aan` is, is dit een proef: er gaat niets naar Shopify of klanten, en de agenda toont wat er zou gebeuren.
 
 Voordat je hem aanzet:
 
 1. Test in beide winkels welke verzendmail Shopify stuurt zonder vervoerder, en pas de template aan ("wij bezorgen morgen met onze eigen bus").
 2. Kijk of er apps of Flows reageren op *fulfilled* (een reviewverzoek, een factuur): die gaan dan een dag vóór de bezorging af.
 3. Loop de agenda van de komende dagen na en haal proefritten weg.
-4. Zet hem aan ná 16:00, zodat de eerste echte ronde pas de volgende dag is: `npx wrangler secret put AUTO_FULFILL` met de waarde `aan`. Een secret blijft staan bij een deploy; een variabele in het dashboard niet.
+4. Zet hem aan ná 16:10, zodat de eerste echte ronde pas de volgende dag is: `npx wrangler secret put AUTO_FULFILL` met de waarde `aan`. Een secret blijft staan bij een deploy; een variabele in het dashboard niet.
 
 ## Lokale checks
 
@@ -129,6 +129,8 @@ npm run worker:deploy
 ```
 
 `config.js` bevat alleen de publieke Worker-URL, nooit een sleutel of code.
+
+**Gratis dagtegoed.** Het gratis plan van Cloudflare telt per dag hoe vaak de Worker de opslag gebruikt (onder meer 1.000 keer een lijst opvragen, 1.000 keer schrijven). Is dat op, dan meldt de site: *Het gratis dagtegoed van Cloudflare is op. Vanaf 02:00 werkt alles weer; bel tot die tijd de planner.* Bezorgd vraagt geen lijst meer op zolang de telefoon de rit meestuurt, dus dat blijft werken als alleen de lijsten op zijn.
 
 ## Shopify-koppeling
 

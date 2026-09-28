@@ -7,12 +7,20 @@ const realFetch = globalThis.fetch;
 
 // ---------------------------------------------------------------------------
 // A KV namespace in memory, with the parts of the real one the Worker leans on:
-// sorted listings of at most 1,000 keys with a cursor, metadata, expiry.
+// sorted listings of at most 1,000 keys with a cursor, metadata, expiry. With
+// perKeyRate on it also keeps KV's rule of one write per key per second.
 // ---------------------------------------------------------------------------
 class MemoryKV {
   constructor() {
     this.map = new Map();
     this.ops = { get: 0, put: 0, delete: 0, list: 0 };
+    this.perKeyRate = false;
+    this.lastWrite = new Map();
+  }
+  rate(key) {
+    const now = Date.now();
+    if (this.perKeyRate && now - (this.lastWrite.get(key) ?? -Infinity) < 1000) throw new Error(`KV PUT failed: 429 Too Many Requests (${key})`);
+    this.lastWrite.set(key, now);
   }
   alive(key) {
     const entry = this.map.get(key);
@@ -34,10 +42,12 @@ class MemoryKV {
     const now = Math.floor(Date.now() / 1000);
     const expiration = options.expiration || (options.expirationTtl ? now + options.expirationTtl : undefined);
     if (expiration && expiration < now + 60) throw new Error(`KV: expiration less than 60 s ahead for ${key}`);
+    this.rate(key);
     this.map.set(key, { value: String(value), expiration, metadata: options.metadata });
   }
   async delete(key) {
     this.ops.delete += 1;
+    this.rate(key);
     this.map.delete(key);
   }
   async list({ prefix = "", cursor, limit = 1000 } = {}) {
@@ -113,6 +123,7 @@ function fakeShopify(body) {
       const gid = target;
       const order = shop.orders.get(gid);
       order.fulfilled = true;
+      order.fulfillments.push(`gid://shopify/Fulfillment/${order.fulfillments.length + 1}${gid.split("/").pop()}`);
       if (variables.fulfillment.notifyCustomer) shop.mails.push(gid);
       throw new TypeError("fetch failed");
     }
@@ -165,8 +176,16 @@ globalThis.fetch = async (input, init = {}) => {
   const url = String(input instanceof Request ? input.url : input);
   fetchesThisRequest += 1;
   if (url.includes(".myshopify.com/admin/api/") && url.endsWith("/graphql.json")) {
-    const payload = fakeShopify(init.body);
-    if (/fulfillmentCreate\(/.test(JSON.parse(init.body).query) && shop.onFulfilled) await shop.onFulfilled();
+    const creates = /fulfillmentCreate\(/.test(JSON.parse(init.body).query);
+    let payload;
+    try {
+      payload = fakeShopify(init.body);
+    } catch (error) {
+      // Shopify's webhook can come in while the answer is still lost on its way.
+      if (creates && shop.onFulfilled) await shop.onFulfilled();
+      throw error;
+    }
+    if (creates && shop.onFulfilled) await shop.onFulfilled();
     return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
   }
   if (url.startsWith("https://api.pdok.nl/")) {
@@ -442,8 +461,9 @@ await test("Terugdraaien van een order die in Shopify zelf verzonden is: weigert
 await test("oude webhook na een nieuwere verandert niets", async () => {
   const env = makeEnv();
   const a = await seedOrder(env, DRS, "#DRS80");
-  await webhook(env, DRS, { ...a.raw, fulfillment_status: "fulfilled", updated_at: "2026-09-25T12:00:00+02:00" });
-  const late = await webhook(env, DRS, { ...a.raw, tags: "iets", updated_at: "2026-09-25T11:59:00+02:00" });
+  const at = Date.now() - 3600_000;
+  await webhook(env, DRS, { ...a.raw, fulfillment_status: "fulfilled", updated_at: new Date(at).toISOString() });
+  const late = await webhook(env, DRS, { ...a.raw, tags: "iets", updated_at: new Date(at - 60_000).toISOString() });
   assert.equal(late.status, 200);
   assert.equal(await env.PLANNING_ORDERS.get(`order:${a.key}`), null, "oude payload zette de order weer open");
   assert.ok(await env.PLANNING_ORDERS.get(`delivered:${a.key}`));
@@ -465,11 +485,12 @@ await test("webhook: geannuleerd blijft 14 dagen, notitie van de planning geknip
   assert.equal(stored.paymentStatus, "Terugbetaald");
   assert.equal(stored.ownDeliveryTagged, true);
 
-  await webhook(env, DSP, { ...raw, cancelled_at: "2026-09-25T10:00:00Z", updated_at: new Date().toISOString() });
+  const cancelledAt = new Date(Date.now() - 2 * 86400_000).toISOString();
+  await webhook(env, DSP, { ...raw, cancelled_at: cancelledAt, updated_at: new Date().toISOString() });
   const entry = env.PLANNING_ORDERS.entry(`order:${DSP}:#DSP90`);
   assert.ok(entry, "geannuleerde order blijft even staan");
   assert.equal(JSON.parse(entry.value).cancelled, true);
-  assert.ok(entry.expiration < Date.now() / 1000 + 15 * 86400);
+  assert.equal(entry.expiration, Math.floor(Date.parse(cancelledAt) / 1000) + 14 * 86400, "14 dagen na de annulering");
 });
 
 await test("onmogelijke leverdatum wordt niet overgenomen", async () => {
@@ -575,7 +596,7 @@ await test("mislukt inplannen haalt de al gezette tags weer weg", async () => {
 await test("Bezorgd op een geannuleerde order wordt geweigerd", async () => {
   const env = makeEnv();
   const a = await seedOrder(env, DRS, "#DRS640");
-  await webhook(env, DRS, { ...a.raw, cancelled_at: "2026-09-25T10:00:00Z", updated_at: new Date().toISOString() });
+  await webhook(env, DRS, { ...a.raw, cancelled_at: new Date(Date.now() - 86400_000).toISOString(), updated_at: new Date().toISOString() });
   const done = await call(env, "POST", "/actions/mark-delivered", { key: PLANNER, body: { id: a.order.id, shopDomain: DRS } });
   assert.equal(done.status, 409);
   assert.match(done.data.error, /geannuleerd/);
@@ -585,9 +606,9 @@ await test("Bezorgd op een geannuleerde order wordt geweigerd", async () => {
 await test("bezorgtijden in één tijdzone, en DHL-pakketten zonder naam en adres in de historie", async () => {
   const env = makeEnv();
   const pakket = await seedOrder(env, DSP, "#DSP650", { line_items: [{ title: "Pure Psyllium - Vlozaad", quantity: 1 }] });
-  await webhook(env, DSP, { ...pakket.raw, fulfillment_status: "fulfilled", updated_at: new Date().toISOString(), fulfillments: [{ created_at: "2026-09-25T09:14:51+02:00" }] });
+  await webhook(env, DSP, { ...pakket.raw, fulfillment_status: "fulfilled", updated_at: new Date().toISOString(), fulfillments: [{ created_at: `${amsterdamDay(-1)}T09:14:51+02:00` }] });
   const entry = env.PLANNING_ORDERS.entry(`delivered:${pakket.key}`);
-  assert.equal(entry.metadata.deliveredAt, "2026-09-25T07:14:51.000Z");
+  assert.equal(entry.metadata.deliveredAt, `${amsterdamDay(-1)}T07:14:51.000Z`);
   const record = JSON.parse(entry.value);
   assert.ok(!record.order.customer && !record.order.fullAddress, "geen naam of adres van een DHL-pakket");
   assert.equal(record.order.city, "Doorn");
@@ -695,6 +716,327 @@ await test("concept: wat er intussen bij kwam blijft staan, en een nieuwe poging
   // A change to a concept removed elsewhere does not bring it back.
   const gone = await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id: third, orderKeys: [b.key], update: true } });
   assert.equal(gone.status, 404);
+});
+
+// An order at a known point: the address cache holds its coordinates, as /geo
+// would have left them.
+async function seedPlaced(env, shopDomain, name, { city, zip, lat, lon }) {
+  const seeded = await seedOrder(env, shopDomain, name, { shipping_address: { first_name: "Test", last_name: `Klant ${name}`, address1: `Voorbeeldweg ${name.replace(/\D/g, "")}`, city, zip, country_code: "NL", phone: "06 1234 5678" } });
+  if (lat !== undefined) await env.PLANNING_ORDERS.put(`geo:${seeded.order.fullAddress.toLowerCase()}`, JSON.stringify({ lat, lon }));
+  return seeded;
+}
+
+const DAY_MS = 86400_000;
+
+// The Worker logs every error it answers with a 500 or 503. Errors a test
+// causes on purpose need not fill its output.
+async function quietly(fn) {
+  const log = console.error;
+  console.error = () => {};
+  try {
+    return await fn();
+  } finally {
+    console.error = log;
+  }
+}
+
+await test("concept wijzigen: erbij en eruit tegen de stand van nu, een scherm dat achterloopt maakt niets ongedaan", async () => {
+  const env = makeEnv();
+  const orders = [];
+  for (let index = 0; index < 6; index += 1) orders.push(await seedOrder(env, DRS, `#DRS80${index}`));
+  const [a, b, c, d, e, f] = orders;
+  const id = "abababab-0000-0000-0000-000000000001";
+  const change = (body) => call(env, "POST", "/concepts/save", { key: PLANNER, body: { id, update: true, ...body } });
+  await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id, name: "Doorn", orderKeys: [a.key, b.key] } });
+
+  // Screen A adds a stop; screen B, ten minutes behind, adds another and takes one out.
+  const fromA = await change({ add: [c.key] });
+  assert.equal(fromA.status, 200, JSON.stringify(fromA.data));
+  assert.equal(fromA.data.ok, true);
+  assert.deepEqual(fromA.data.concept.orderKeys, [a.key, b.key, c.key]);
+  const fromB = await change({ add: [d.key], remove: [b.key], name: "Doorn en Zeist" });
+  assert.deepEqual(fromB.data.concept.orderKeys, [a.key, c.key, d.key], "de stop van het andere scherm blijft staan");
+  assert.equal(fromB.data.concept.name, "Doorn en Zeist");
+
+  // Only taking out lists nothing, and keeps the name when none is sent.
+  const lists = env.PLANNING_ORDERS.ops.list;
+  const out = await change({ remove: [d.key] });
+  assert.equal(out.status, 200);
+  assert.equal(env.PLANNING_ORDERS.ops.list, lists, "alleen weghalen leest geen lijsten");
+  assert.equal(out.data.concept.name, "Doorn en Zeist");
+
+  // What is added is still checked: planned elsewhere, or in another concept.
+  await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(1), orderKeys: [e.key] } });
+  const planned = await change({ add: [e.key] });
+  assert.equal(planned.status, 409);
+  assert.match(planned.data.error, /staat al in rit/);
+  await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id: "cdcdcdcd-0000-0000-0000-000000000002", name: "Anders", orderKeys: [f.key] } });
+  const held = await change({ add: [f.key] });
+  assert.equal(held.status, 409);
+  assert.match(held.data.error, /concept Anders/);
+
+  assert.equal((await change({ remove: [a.key, c.key] })).status, 400, "een leeg concept bestaat niet");
+  // An older screen still sends the whole list, and still replaces it.
+  const whole = await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id, name: "Doorn", orderKeys: [a.key], update: true } });
+  assert.deepEqual(whole.data.concept.orderKeys, [a.key]);
+  await call(env, "POST", "/concepts/remove", { key: PLANNER, body: { id } });
+  assert.equal((await change({ add: [b.key] })).status, 404);
+});
+
+await test("concept: twee wijzigingen binnen één seconde gaan allebei door", async () => {
+  const env = makeEnv();
+  const a = await seedOrder(env, DRS, "#DRS810");
+  const b = await seedOrder(env, DRS, "#DRS811");
+  const c = await seedOrder(env, DRS, "#DRS812");
+  const id = "efefefef-0000-0000-0000-000000000003";
+  env.PLANNING_ORDERS.perKeyRate = true;
+  await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id, name: "Doorn", orderKeys: [a.key] } });
+  const first = await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id, update: true, add: [b.key] } });
+  const second = await call(env, "POST", "/concepts/save", { key: PLANNER, body: { id, update: true, add: [c.key] } });
+  assert.equal(first.status, 200, JSON.stringify(first.data));
+  assert.equal(second.status, 200, JSON.stringify(second.data));
+  assert.deepEqual((await env.PLANNING_ORDERS.get(`plan-concept:${id}`, "json")).orderKeys, [a.key, b.key, c.key]);
+});
+
+await test("rit: twee stops erbij binnen één seconde gaan allebei door, maar een wijziging van een ander scherm blijft staan", async () => {
+  const env = makeEnv();
+  const kv = env.PLANNING_ORDERS;
+  const a = await seedOrder(env, DRS, "#DRS820");
+  const b = await seedOrder(env, DRS, "#DRS821");
+  const c = await seedOrder(env, DRS, "#DRS822");
+  const d = await seedOrder(env, DRS, "#DRS823");
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(1), orderKeys: [a.key] } })).data.route;
+  kv.perKeyRate = true;
+  const first = await call(env, "POST", "/plan/add-stop", { key: PLANNER, body: { id: route.id, date: route.date, orderKey: b.key } });
+  const second = await call(env, "POST", "/plan/add-stop", { key: PLANNER, body: { id: route.id, date: route.date, orderKey: c.key } });
+  assert.equal(first.status, 200, JSON.stringify(first.data));
+  assert.equal(second.status, 200, JSON.stringify(second.data));
+  const recordKey = `plan:${route.date}:${route.id}`;
+  assert.deepEqual(JSON.parse(kv.entry(recordKey).value).orderKeys, [a.key, b.key, c.key]);
+
+  // Refused because another screen wrote the route in that same second: its
+  // change stands, and this one is not forced over it.
+  kv.perKeyRate = false;
+  const realPut = kv.put.bind(kv);
+  kv.put = async (key, value, options) => {
+    if (!key.startsWith("plan:")) return realPut(key, value, options);
+    kv.put = realPut;
+    const entry = kv.entry(key);
+    kv.map.set(key, { ...entry, value: JSON.stringify({ ...JSON.parse(entry.value), abortedAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" }) });
+    throw new Error(`KV PUT failed: 429 Too Many Requests (${key})`);
+  };
+  const clash = await quietly(() => call(env, "POST", "/plan/add-stop", { key: PLANNER, body: { id: route.id, date: route.date, orderKey: d.key } }));
+  kv.put = realPut;
+  assert.equal(clash.status, 500);
+  const after = JSON.parse(kv.entry(recordKey).value);
+  assert.ok(after.abortedAt, "afbreken van het andere scherm bleef staan");
+  assert.ok(!after.orderKeys.includes(d.key));
+});
+
+await test("de 5:45 van de bezorger telt wat vandaag al bezorgd is; zonder locatie noemt de melding de stop", async () => {
+  const env = makeEnv();
+  const kv = env.PLANNING_ORDERS;
+  const kampen = await seedPlaced(env, DRS, "#DRS841", { city: "Kampen", zip: "8261 AA", lat: 52.55, lon: 5.91 });
+  const zwolle = await seedPlaced(env, DRS, "#DRS842", { city: "Zwolle", zip: "8011 AA", lat: 52.51, lon: 6.09 });
+  const meppel = await seedPlaced(env, DRS, "#DRS843", { city: "Meppel", zip: "7941 AA", lat: 52.70, lon: 6.19 });
+  const hoogeveen = await seedPlaced(env, DRS, "#DRS844", { city: "Hoogeveen", zip: "7901 AA", lat: 52.72, lon: 6.48 });
+  const assen = await seedPlaced(env, DRS, "#DRS845", { city: "Assen", zip: "9401 AA", lat: 52.99, lon: 6.56 });
+  const nergens = await seedPlaced(env, DRS, "#DRS846", { city: "Zeist", zip: "3701 AA" });
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), name: "Noord", orderKeys: [kampen.key, zwolle.key, meppel.key, hoogeveen.key] } })).data.route;
+  const addAssen = () => call(env, "POST", "/plan/add-stop", { key: DRIVER, body: { id: route.id, date: route.date, orderKey: assen.key } });
+
+  const before = await addAssen();
+  assert.equal(before.status, 403);
+  assert.match(before.data.error, /5:45/);
+  for (const stop of [kampen, zwolle, meppel]) {
+    const done = await call(env, "POST", "/actions/mark-delivered", { key: DRIVER, body: { id: stop.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date } });
+    assert.equal(done.status, 200, JSON.stringify(done.data));
+  }
+  const after = await addAssen();
+  assert.equal(after.status, 403, "wat al gereden is telt mee");
+  assert.match(after.data.error, /5:45/);
+
+  // Delivered on an earlier day (a route left unfinished): another day's drive.
+  for (const stop of [kampen, zwolle, meppel]) {
+    const entry = kv.entry(`delivered:${stop.key}`);
+    kv.map.set(`delivered:${stop.key}`, { ...entry, value: JSON.stringify({ ...JSON.parse(entry.value), deliveredAt: new Date(Date.now() - DAY_MS).toISOString() }) });
+  }
+  assert.equal((await addAssen()).status, 200);
+
+  const unknown = await call(env, "POST", "/plan/add-stop", { key: DRIVER, body: { id: route.id, date: route.date, orderKey: nergens.key } });
+  assert.equal(unknown.status, 403);
+  assert.equal(unknown.data.error, "Van #DRS846 is geen locatie bekend, dus de rit is niet na te rekenen. Bel de planner.");
+});
+
+await test("bezorger: zijn stops met punt, orders in ritten na zijn twee weken bezet, en wat vandaag al bezorgd is", async () => {
+  const env = makeEnv();
+  const a = await seedPlaced(env, DRS, "#DRS850", { city: "Doorn", zip: "3941 BX", lat: 52.031234, lon: 5.324567 });
+  const b = await seedPlaced(env, DRS, "#DRS851", { city: "Zeist", zip: "3701 AA", lat: 52.09, lon: 5.23 });
+  const later = await seedOrder(env, DRS, "#DRS852");
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), orderKeys: [a.key, b.key] } })).data.route;
+  await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(9), orderKeys: [later.key] } });
+
+  const plan = (await call(env, "GET", "/plan", { key: DRIVER })).data;
+  assert.deepEqual(plan.stops.find((stop) => stop.id === a.order.id).point, { lat: 52.031234, lon: 5.324567 }, "eigen stop, niet afgerond");
+  assert.ok(!plan.routes.some((entry) => entry.orderKeys.includes(later.key)), "die rit valt buiten zijn week");
+  assert.ok(plan.heldKeys.includes(later.key), "maar zijn order wordt niet aangeboden");
+  assert.deepEqual(plan.doneToday, []);
+
+  assert.equal((await call(env, "POST", "/actions/mark-delivered", { key: DRIVER, body: { id: a.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date } })).status, 200);
+  const after = (await call(env, "GET", "/plan", { key: DRIVER })).data;
+  assert.deepEqual(after.doneToday, [{ key: a.key, point: { lat: 52.03, lon: 5.32 }, products: a.order.products }]);
+  const planner = (await call(env, "GET", `/plan?from=${amsterdamDay(-7)}`, { key: PLANNER })).data;
+  assert.deepEqual(planner.doneToday.map((entry) => entry.point), [{ lat: 52.031234, lon: 5.324567 }]);
+});
+
+await test("Bezorgd met de rit erbij werkt ook als de lijsten van vandaag op zijn; anders legt de Worker het dagtegoed uit", async () => {
+  const env = makeEnv();
+  const kv = env.PLANNING_ORDERS;
+  const a = await seedOrder(env, DRS, "#DRS860");
+  const b = await seedOrder(env, DRS, "#DRS861");
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), orderKeys: [a.key] } })).data.route;
+  const realList = kv.list.bind(kv);
+  kv.list = async () => { throw new Error("KV list() limit exceeded for the day."); };
+  const plain = await quietly(() => call(env, "POST", "/actions/mark-delivered", { key: DRIVER, body: { id: a.order.id, shopDomain: DRS } }));
+  assert.equal(plain.status, 503);
+  assert.equal(plain.data.error, "Het gratis dagtegoed van Cloudflare is op. Vanaf 02:00 werkt alles weer; bel tot die tijd de planner.");
+  assert.equal(plain.headers.get("access-control-allow-origin"), "https://example.test");
+  assert.equal(shop.orders.get(a.order.shopifyOrderId).fulfilled, false);
+  const withRoute = await call(env, "POST", "/actions/mark-delivered", { key: DRIVER, body: { id: a.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date } });
+  assert.equal(withRoute.status, 200, JSON.stringify(withRoute.data));
+  assert.equal((await quietly(() => call(env, "GET", "/orders", { key: DRIVER }))).status, 503);
+  kv.list = realList;
+
+  // A route that does not hold the stop is not taken at its word.
+  const wrong = await call(env, "POST", "/actions/mark-delivered", { key: DRIVER, body: { id: b.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date } });
+  assert.equal(wrong.status, 403);
+});
+
+await test("historie: eigen bezorgingen blijven vindbaar voorbij de 50 nieuwste, de bezorger vraagt zonder lijst", async () => {
+  const env = makeEnv();
+  const kv = env.PLANNING_ORDERS;
+  const own = await seedOrder(env, DRS, "#DRS870");
+  assert.equal((await call(env, "POST", "/actions/mark-delivered", { key: PLANNER, body: { id: own.order.id, shopDomain: DRS } })).status, 200);
+  assert.equal(kv.entry(`delivered:${own.key}`).metadata.own, true);
+  const pakket = await seedOrder(env, DSP, "#DSP870", { line_items: [{ title: "Pure Psyllium - Vlozaad", quantity: 1 }] });
+  await webhook(env, DSP, { ...pakket.raw, fulfillment_status: "fulfilled", updated_at: new Date().toISOString(), fulfillments: [{ created_at: new Date(Date.now() + 500).toISOString() }] });
+  assert.ok(!kv.entry(`delivered:${pakket.key}`).metadata.own, "een DHL-pakket is geen eigen bezorging");
+  // Sixty more parcels shipped after it, and a planning delivery from before the "own" mark.
+  for (let index = 0; index < 60; index += 1) {
+    const at = new Date(Date.now() + (index + 1) * 1000).toISOString();
+    await kv.put(`delivered:${DSP}:#P${index}`, JSON.stringify({ id: `#P${index}`, shopDomain: DSP, deliveredAt: at, source: "shopify", fulfillment: null }), { expirationTtl: 86400, metadata: { deliveredAt: at } });
+  }
+  const oldAt = new Date(Date.now() - DAY_MS).toISOString();
+  await kv.put(`delivered:${DRS}:#OUD1`, JSON.stringify({ id: "#OUD1", shopDomain: DRS, deliveredAt: oldAt, source: "bezorger", fulfillment: { id: "gid://shopify/Fulfillment/9" } }), { expirationTtl: 86400, metadata: { deliveredAt: oldAt } });
+
+  const history = (await call(env, "GET", "/history?keys=", { key: PLANNER })).data;
+  assert.equal(history.entries.length, 50);
+  assert.ok(!history.entries.some((entry) => entry.id === own.order.id));
+  assert.deepEqual(history.own.map((entry) => entry.id), [own.order.id]);
+  assert.ok(Array.isArray((await call(env, "GET", "/history", { key: PLANNER })).data), "oude schermen: nog steeds een lijst");
+
+  const lists = kv.ops.list;
+  const driver = (await call(env, "GET", `/history?keys=${encodeURIComponent(`${own.key},${DRS}:#NIETS`)}`, { key: DRIVER })).data;
+  assert.equal(kv.ops.list, lists, "de bezorger kost geen lijst");
+  assert.deepEqual(Object.keys(driver.delivered), [own.key]);
+  assert.deepEqual(driver.entries, []);
+});
+
+await test("bewaren telt vanaf de bezorging en de annulering, niet vanaf de laatste webhook", async () => {
+  const env = makeEnv();
+  const kv = env.PLANNING_ORDERS;
+  const now = () => new Date().toISOString();
+
+  // Delivered by the van 45 days ago; a refund now does not start the sixty days again.
+  const a = await seedOrder(env, DRS, "#DRS880");
+  const deliveredAt = new Date(Date.now() - 45 * DAY_MS).toISOString();
+  await kv.put(`delivered:${a.key}`, JSON.stringify({ id: a.order.id, shopDomain: DRS, order: a.order, fulfillment: { id: "gid://shopify/Fulfillment/1" }, deliveredAt, source: "bezorger" }), { expirationTtl: 15 * 86400, metadata: { deliveredAt } });
+  await kv.delete(`order:${a.key}`);
+  await webhook(env, DRS, { ...a.raw, fulfillment_status: "fulfilled", financial_status: "refunded", updated_at: now() });
+  assert.equal(kv.entry(`delivered:${a.key}`).expiration, Math.floor(Date.parse(deliveredAt) / 1000) + 60 * 86400);
+
+  // Delivered 90 days ago: a late webhook does not bring the record back.
+  const b = await seedOrder(env, DRS, "#DRS881");
+  await webhook(env, DRS, { ...b.raw, fulfillment_status: "fulfilled", updated_at: now(), fulfillments: [{ created_at: new Date(Date.now() - 90 * DAY_MS).toISOString() }] });
+  assert.equal(kv.entry(`delivered:${b.key}`), null);
+  assert.equal(kv.entry(`order:${b.key}`), null);
+
+  // A record that outlived its sixty days under the old rule goes at the next webhook.
+  const c = await seedOrder(env, DRS, "#DRS882");
+  const oldAt = new Date(Date.now() - 70 * DAY_MS).toISOString();
+  await kv.put(`delivered:${c.key}`, JSON.stringify({ id: c.order.id, shopDomain: DRS, order: c.order, fulfillment: null, deliveredAt: oldAt, source: "shopify" }), { expirationTtl: 30 * 86400, metadata: { deliveredAt: oldAt } });
+  await kv.delete(`order:${c.key}`);
+  await webhook(env, DRS, { ...c.raw, fulfillment_status: "fulfilled", tags: "iets", updated_at: now() });
+  assert.equal(kv.entry(`delivered:${c.key}`), null);
+
+  // Cancelled twelve days ago: two days left, whatever Shopify sends now. Twenty days ago: gone.
+  const d = await seedOrder(env, DRS, "#DRS883");
+  const cancelledAt = new Date(Date.now() - 12 * DAY_MS).toISOString();
+  await webhook(env, DRS, { ...d.raw, cancelled_at: cancelledAt, financial_status: "refunded", updated_at: now() });
+  assert.equal(kv.entry(`order:${d.key}`).expiration, Math.floor(Date.parse(cancelledAt) / 1000) + 14 * 86400);
+  const e = await seedOrder(env, DRS, "#DRS884");
+  await webhook(env, DRS, { ...e.raw, cancelled_at: new Date(Date.now() - 20 * DAY_MS).toISOString(), updated_at: now() });
+  assert.equal(kv.entry(`order:${e.key}`), null);
+});
+
+await test("Bezorgd zonder antwoord van Shopify: de webhook boekt het alsnog als eigen bezorging, en Terugdraaien werkt", async () => {
+  const env = makeEnv();
+  const kv = env.PLANNING_ORDERS;
+  const fulfilledPayload = (seeded) => ({ ...seeded.raw, fulfillment_status: "fulfilled", updated_at: new Date(Date.now() + 1000).toISOString(), fulfillments: [{ admin_graphql_api_id: shop.orders.get(seeded.order.shopifyOrderId).fulfillments.at(-1), created_at: new Date().toISOString(), status: "success" }] });
+
+  // The answer is lost; Shopify's webhook comes in afterwards.
+  const a = await seedOrder(env, DRS, "#DRS890");
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), orderKeys: [a.key] } })).data.route;
+  shop.failNext = { mode: "network-during", gid: a.order.shopifyOrderId };
+  const lost = await call(env, "POST", "/actions/mark-delivered", { key: DRIVER, body: { id: a.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date } });
+  assert.equal(lost.status, 502);
+  assert.match(lost.data.error, /Geen antwoord van Shopify/);
+  assert.equal(kv.entry(`reporting:${a.key}`), null, "de webhook hoeft niet opzij te gaan");
+  assert.equal((await webhook(env, DRS, fulfilledPayload(a))).status, 200);
+  const record = await kv.get(`delivered:${a.key}`, "json");
+  assert.equal(record.source, "bezorger");
+  assert.equal(record.fulfillment.id, shop.orders.get(a.order.shopifyOrderId).fulfillments.at(-1));
+  assert.equal(await kv.get(`order:${a.key}`), null, "de stop staat als bezorgd");
+  const undo = await call(env, "POST", "/actions/undo-delivered", { key: PLANNER, body: { id: a.order.id, shopDomain: DRS } });
+  assert.equal(undo.status, 200, JSON.stringify(undo.data));
+  assert.equal(shop.orders.get(a.order.shopifyOrderId).fulfilled, false);
+
+  // The webhook came in while the answer was still on its way: Bezorgd files it itself.
+  const b = await seedOrder(env, DRS, "#DRS891");
+  shop.failNext = { mode: "network-during", gid: b.order.shopifyOrderId };
+  shop.onFulfilled = async () => {
+    shop.onFulfilled = null;
+    await webhook(env, DRS, fulfilledPayload(b));
+  };
+  const during = await call(env, "POST", "/actions/mark-delivered", { key: PLANNER, body: { id: b.order.id, shopDomain: DRS } });
+  shop.onFulfilled = null;
+  assert.equal(during.status, 200, JSON.stringify(during.data));
+  const recordB = await kv.get(`delivered:${b.key}`, "json");
+  assert.equal(recordB.source, "planner");
+  assert.equal(recordB.fulfillment.id, shop.orders.get(b.order.shopifyOrderId).fulfillments.at(-1));
+
+  // A fulfillment someone made in Shopify outside that wait is not the planning's to undo.
+  const c = await seedOrder(env, DRS, "#DRS892");
+  await kv.put(`reporting-unsure:${c.key}`, JSON.stringify({ from: new Date(Date.now() - 3600_000).toISOString(), until: new Date(Date.now() - 3585_000).toISOString(), source: "bezorger" }), { expirationTtl: 600 });
+  await webhook(env, DRS, { ...c.raw, fulfillment_status: "fulfilled", updated_at: new Date().toISOString(), fulfillments: [{ admin_graphql_api_id: "gid://shopify/Fulfillment/77", created_at: new Date().toISOString() }] });
+  const recordC = await kv.get(`delivered:${c.key}`, "json");
+  assert.equal(recordC.fulfillment, null);
+  assert.equal(recordC.source, "shopify");
+});
+
+await test("adressen: het land beslist, niet een woord in de straat", async () => {
+  const env = makeEnv();
+  const addresses = {
+    "Belgiëlaan 3, 3811 AB Amersfoort, Netherlands": true,
+    "Kerkstraat 1, 3941 BX Doorn, Nederland": true,
+    "Voorbeeldweg 1, 3941 BX Doorn": true,
+    "Bahnhofstrasse 1, 8001 ZH Zürich, Switzerland": false,
+    "Rue Haute 1, 1000 BR Bruxelles, BE": false,
+  };
+  const result = await call(env, "POST", "/geo", { key: PLANNER, body: { addresses: Object.keys(addresses) } });
+  assert.equal(result.status, 200);
+  for (const [address, dutch] of Object.entries(addresses)) assert.equal(Boolean(result.data.results[address]), dutch, address);
+  assert.equal(result.data.looked, 3, "alleen Nederlandse adressen naar PDOK");
 });
 
 // --- The announcement --------------------------------------------------------
@@ -810,6 +1152,54 @@ await test("aankondiging: een fout halverwege laat toch een verslag achter", asy
   kv.get = originalGet;
   const log = await kv.get(`plan-announce:${cronRouteDay}`, "json");
   assert.match(log.error, /daglimiet/);
+});
+
+await test("aankondiging echt: de markering krijgt de fulfillment ook als Shopify binnen de seconde antwoordt", async () => {
+  const env = makeEnv({ AUTO_FULFILL: "aan" });
+  const a = await seedOrder(env, DRS, "#DRS230");
+  const b = await seedOrder(env, DRS, "#DRS231");
+  await env.PLANNING_ORDERS.put(`plan:${cronRouteDay}:r1`, JSON.stringify({ id: "r1", number: 1, date: cronRouteDay, name: "Doorn", orderKeys: [a.key, b.key] }));
+  env.PLANNING_ORDERS.perKeyRate = true;
+  await worker.scheduled(scheduledAt(`${cronDay}T14:00:00Z`), env);
+  for (const seeded of [a, b]) {
+    const marker = await env.PLANNING_ORDERS.get(`announced:${seeded.key}`, "json");
+    assert.equal(marker.fulfillmentId, shop.orders.get(seeded.order.shopifyOrderId).fulfillments.at(-1), "Terugdraaien kent de fulfillment");
+  }
+  const log = await env.PLANNING_ORDERS.get(`plan-announce:${cronRouteDay}`, "json");
+  assert.deepEqual(log.routes[0].results.map((result) => result.status), ["aangekondigd", "aangekondigd"]);
+});
+
+await test("16:10 gaat zoals 16:00 ging: AUTO_FULFILL tussendoor aangezet mailt nog niemand, uitgezet ook niet meer", async () => {
+  // A trial at 16:00, switched on at 16:03, a route planned at 16:05.
+  const env = makeEnv();
+  const a = await seedOrder(env, DRS, "#DRS240");
+  const b = await seedOrder(env, DRS, "#DRS241");
+  await env.PLANNING_ORDERS.put(`plan:${cronRouteDay}:r1`, JSON.stringify({ id: "r1", number: 1, date: cronRouteDay, name: "Doorn", orderKeys: [a.key] }));
+  await worker.scheduled(scheduledAt(`${cronDay}T14:00:00Z`), env);
+  env.AUTO_FULFILL = "aan";
+  await env.PLANNING_ORDERS.put(`plan:${cronRouteDay}:r2`, JSON.stringify({ id: "r2", number: 2, date: cronRouteDay, name: "Zeist", orderKeys: [b.key] }));
+  await worker.scheduled(scheduledAt(`${cronDay}T14:10:00Z`), env);
+  assert.equal(shop.calls, 0, "niets naar Shopify");
+  assert.equal(shop.mails.length, 0);
+  let log = await env.PLANNING_ORDERS.get(`plan-announce:${cronRouteDay}`, "json");
+  assert.equal(log.mode, "proef", "de agenda zegt eerlijk: proef");
+  assert.deepEqual(log.routes.map((route) => route.results[0].status), ["zou aangekondigd worden", "zou aangekondigd worden"]);
+
+  // Live at 16:00, switched off before 16:10: the second run stays out of Shopify.
+  const live = makeEnv({ AUTO_FULFILL: "aan" });
+  const c = await seedOrder(live, DRS, "#DRS242");
+  const d = await seedOrder(live, DRS, "#DRS243");
+  await live.PLANNING_ORDERS.put(`plan:${cronRouteDay}:r1`, JSON.stringify({ id: "r1", number: 1, date: cronRouteDay, name: "Doorn", orderKeys: [c.key] }));
+  await worker.scheduled(scheduledAt(`${cronDay}T14:00:00Z`), live);
+  assert.equal(shop.mails.length, 1);
+  delete live.AUTO_FULFILL;
+  await live.PLANNING_ORDERS.put(`plan:${cronRouteDay}:r2`, JSON.stringify({ id: "r2", number: 2, date: cronRouteDay, name: "Zeist", orderKeys: [d.key] }));
+  const calls = shop.calls;
+  await worker.scheduled(scheduledAt(`${cronDay}T14:10:00Z`), live);
+  assert.equal(shop.calls, calls, "uitgezet is uit");
+  log = await live.PLANNING_ORDERS.get(`plan-announce:${cronRouteDay}`, "json");
+  assert.equal(log.mode, "echt", "om 16:00 ging er wel echt iets uit");
+  assert.equal(log.routes.find((route) => route.id === "r2").results[0].status, "zou aangekondigd worden");
 });
 
 globalThis.fetch = realFetch;
