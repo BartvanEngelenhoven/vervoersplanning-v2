@@ -28,10 +28,11 @@
  *   variable is wiped by the next deploy.
  *
  * What is kept, and for how long:
- * - order:<shop>:<id>      open orders, while open. A cancelled one stays 14 days so a
- *                          planned route can say "geannuleerd" instead of "not found".
- * - delivered:<shop>:<id>  60 days, without phone or customer note, for undo and the
- *                          driver's "bezorgd" ticks.
+ * - order:<shop>:<id>      open orders, while open. A cancelled one stays until 14 days
+ *                          after it was cancelled, so a planned route can say
+ *                          "geannuleerd" instead of "not found".
+ * - delivered:<shop>:<id>  until 60 days after the delivery, without phone or customer
+ *                          note, for undo and the driver's "bezorgd" ticks.
  * - plan:<date>:<id>       until 60 days after the route's date.
  * - geo:<address>          90 days (a point), 7 days (a miss).
  */
@@ -55,6 +56,20 @@ const KNOWN_SHOPS = ["de-rijplaten-specialist.myshopify.com", "slowfeeder-specia
 // Set for a minute while the Bezorgd button reports an order, so Shopify's own
 // webhook for that fulfillment does not write over the report.
 const REPORTING_PREFIX = "reporting:";
+// When Shopify gives the Bezorgd button no answer, it may still have made the
+// fulfillment, and only its webhook can say so. These two notes, kept for ten
+// minutes and holding no customer details, let the report and the webhook find
+// each other whichever comes first (see markDelivered and storeShopifyOrder).
+const REPORT_SEEN_PREFIX = "reporting-seen:";
+const REPORT_UNSURE_PREFIX = "reporting-unsure:";
+const REPORT_NOTE_TTL = 600;
+// Who reported a delivery through the planning. Only those deliveries hold a
+// fulfillment the planning made, which Terugdraaien can undo.
+const OWN_SOURCES = ["planner", "bezorger", "driver"];
+// The free plan allows so many KV reads, writes and listings a day; past that
+// every call fails until the count resets at midnight UTC. Said plainly, so the
+// driver phones instead of trying again and again.
+const KV_LIMIT_MESSAGE = "Het gratis dagtegoed van Cloudflare is op. Vanaf 02:00 werkt alles weer; bel tot die tijd de planner.";
 // The same drive-time model as the planning in app.js, for the one check the
 // Worker makes itself: a stop the driver adds must keep the day within 5:45.
 const DEPOT_POINT = { lat: 52.07309, lon: 5.63884 };
@@ -65,19 +80,25 @@ export default {
   // fires at 14:00 and 15:00 UTC and only the one that is 16:00 in Amsterdam
   // goes ahead: 14:00 in summer time, 15:00 in winter time. A second trigger ten
   // minutes later picks up whatever the first could not finish or got refused.
+  //
+  // That second run is a second chance for the first, not a second announcement,
+  // so it goes the way the 16:00 run went. AUTO_FULFILL switched on at 16:03
+  // would otherwise mail every customer of tomorrow's routes that same day, under
+  // a report still headed "proef". It is never live while AUTO_FULFILL is off.
   async scheduled(event, env) {
     const now = amsterdamNow(new Date(event.scheduledTime));
     if (now.hour !== ANNOUNCE_HOUR) return;
     const date = nextDay(now.day);
     const logKey = `${ANNOUNCE_LOG_PREFIX}${date}`;
-    const report = { date, ranAt: new Date().toISOString(), mode: announceLive(env) ? "echt" : "proef", routes: [] };
+    const earlier = now.minute >= 10 ? await env.PLANNING_ORDERS.get(logKey, "json").catch(() => null) : null;
+    const live = announceLive(env) && earlier?.mode !== "proef";
+    const report = { date, ranAt: new Date().toISOString(), mode: live ? "echt" : "proef", routes: [] };
     try {
-      await runAnnouncement(env, date, { report });
+      await runAnnouncement(env, date, { preview: !live, report });
     } catch (error) {
       report.error = String(error?.message || error).slice(0, 200);
     } finally {
       // Written whatever happened, so the agenda never shows a silent gap.
-      const earlier = now.minute >= 10 ? await env.PLANNING_ORDERS.get(logKey, "json").catch(() => null) : null;
       await env.PLANNING_ORDERS.put(logKey, JSON.stringify(mergeAnnounceReports(earlier, report)), { expirationTtl: 60 * DAY_SECONDS });
     }
   },
@@ -90,6 +111,7 @@ export default {
       // headers, and the browser reports only "Failed to fetch" instead of
       // anything the planner could act on.
       console.error(error);
+      if (kvLimitSpent(error)) return json({ error: KV_LIMIT_MESSAGE }, 503, env);
       return json({ error: "Er ging iets mis op de server. Probeer het zo opnieuw." }, 500, env);
     }
   },
@@ -219,6 +241,49 @@ async function listAll(env, prefix) {
   return keys;
 }
 
+// KV's own words when the day's budget is spent: "KV put() limit exceeded for
+// the day."
+function kvLimitSpent(error) {
+  const message = String(error?.message || error || "");
+  return /limit/i.test(message) && /exceeded|day/i.test(message);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// KV takes one write per key per second: a second write to the same key within
+// that second (Shopify's webhook for the order just reported, two quick taps)
+// is refused. One more try once the second is over nearly always lands. A spent
+// day's budget is not tried again; that would only wait and fail the same way.
+async function putWithRetry(env, key, value, options) {
+  try {
+    await env.PLANNING_ORDERS.put(key, value, options);
+  } catch (error) {
+    if (kvLimitSpent(error)) throw error;
+    await sleep(1100);
+    await env.PLANNING_ORDERS.put(key, value, options);
+  }
+}
+
+// The point PDOK gave an order's address, from the cache /geo keeps. null when
+// the address was never looked up or not found.
+async function cachedPoint(env, order) {
+  const point = await env.PLANNING_ORDERS.get(geoKeyForOrder(order), "json").catch(() => null);
+  return point && !point.miss ? { lat: point.lat, lon: point.lon } : null;
+}
+
+// About a kilometre: close enough to weigh a detour, too coarse to find a house.
+function roundPoint(point) {
+  return point ? { lat: Math.round(point.lat * 100) / 100, lon: Math.round(point.lon * 100) / 100 } : null;
+}
+
+// Delivered on this Amsterdam day, by the time on the delivery record.
+function deliveredOn(record, day) {
+  const at = new Date(record?.deliveredAt || "");
+  return !Number.isNaN(at.getTime()) && amsterdamNow(at).day === day;
+}
+
 // What the driver's phone needs of an order that is not one of their stops: enough
 // to weigh "can it come along", nothing to identify the customer by. Name, street,
 // phone and note only reach the phone for stops of their own routes, via /plan.
@@ -259,8 +324,8 @@ async function getOrders(request, env) {
       // without holding the address. Rounded to about a kilometre: a point to
       // eight decimals is a house, and PDOK turns a house back into an address.
       // A kilometre costs the detour sum a minute or two, no more.
-      const point = await env.PLANNING_ORDERS.get(geoKeyForOrder(order), "json").catch(() => null);
-      if (point && !point.miss) slim.point = { lat: Math.round(point.lat * 100) / 100, lon: Math.round(point.lon * 100) / 100 };
+      const point = await cachedPoint(env, order);
+      if (point) slim.point = roundPoint(point);
       return slim;
     }));
   }
@@ -278,33 +343,63 @@ async function getHistory(request, env) {
 
   const url = new URL(request.url);
   const asked = new Set(String(url.searchParams.get("keys") || "").split(",").map((key) => key.trim()).filter(Boolean).slice(0, 200));
+  const legacy = !url.searchParams.has("keys");
+  // The driver only asks after the stops of their own routes. Those are read one
+  // by one: reads are plentiful on the free plan, listings are not (1,000 a day),
+  // and Bezorgd and the planner's screen need what is left of those.
+  if (role === "driver") {
+    if (legacy) return json([], 200, env);
+    const delivered = {};
+    await Promise.all([...asked].map(async (orderKey) => {
+      const record = await env.PLANNING_ORDERS.get(`delivered:${orderKey}`, "json");
+      if (record) delivered[orderKey] = record.deliveredAt || "";
+    }));
+    return json({ entries: [], delivered }, 200, env);
+  }
+
   const listed = await listAll(env, "delivered:");
   const delivered = {};
   for (const key of listed) {
     const orderKey = key.name.slice("delivered:".length);
     if (asked.has(orderKey)) delivered[orderKey] = key.metadata?.deliveredAt || "";
   }
-  const legacy = !url.searchParams.has("keys");
-  if (role === "driver") return json(legacy ? [] : { entries: [], delivered }, 200, env);
+  const read = async (keys) => (await Promise.all(keys.map(async (key) => ({ name: key.name, record: await env.PLANNING_ORDERS.get(key.name, "json") })))).filter((entry) => entry.record);
 
   const withTime = listed.filter((key) => key.metadata?.deliveredAt);
   const newest = withTime
     .sort((a, b) => String(b.metadata.deliveredAt).localeCompare(String(a.metadata.deliveredAt)))
     .slice(0, 50);
-  let entries = (await Promise.all(newest.map((key) => env.PLANNING_ORDERS.get(key.name, "json")))).filter(Boolean);
+  let entries = await read(newest);
   // Deliveries written before the time went into the metadata have to be read
   // to be placed. Only while the newer ones do not fill the screen yet.
   if (newest.length < 50) {
     const older = listed.filter((key) => !key.metadata?.deliveredAt).slice(0, 200);
-    entries = [...entries, ...(await Promise.all(older.map((key) => env.PLANNING_ORDERS.get(key.name, "json")))).filter(Boolean)];
+    entries = [...entries, ...(await read(older))];
   }
-  entries.sort((a, b) => String(b.deliveredAt || "").localeCompare(String(a.deliveredAt || "")));
-  return json(legacy ? entries.slice(0, 50) : { entries: entries.slice(0, 50), delivered }, 200, env);
+  entries.sort((a, b) => String(b.record.deliveredAt || "").localeCompare(String(a.record.deliveredAt || "")));
+  entries = entries.slice(0, 50);
+  if (legacy) return json(entries.map((entry) => entry.record), 200, env);
+
+  // The deliveries the planning made itself, the ones Terugdraaien can undo, also
+  // once they are past the newest fifty. Those fifty are mostly DHL parcels that
+  // Shopify reports, and pushed a van delivery off the screen within a day or
+  // two. Found from the listing alone: the key's metadata says "own". Records
+  // from before that mark only show among the newest fifty.
+  const shown = new Set(entries.map((entry) => entry.name));
+  const own = await read(withTime.filter((key) => key.metadata.own && !shown.has(key.name)).slice(0, 200));
+  return json({ entries: entries.map((entry) => entry.record), delivered, own: own.map((entry) => entry.record) }, 200, env);
 }
 
-// A delivery on record: sixty days, with the time in the key's metadata so the
-// history can find the newest without reading everything. Phone and customer note
-// are left out; they served the driver at the door and nobody after.
+// A delivery on record: until sixty days after the delivery, with the time in the
+// key's metadata so the history can find the newest without reading everything.
+// A delivery the planning made itself is marked "own" there too. Phone and
+// customer note are left out; they served the driver at the door and nobody after.
+//
+// The sixty days count from the delivery, not from the last write. Shopify sends
+// the order again on every later change (a refund weeks on, a tag, "Sync
+// Shopify"), and each of those used to start the sixty days afresh, so name and
+// address outlived the promise, and a delivery whose record had already gone was
+// written back. Past its sixty days nothing is written, and what is there goes.
 async function putDelivered(env, key, record) {
   const order = record.order ? { ...record.order } : null;
   if (order) {
@@ -314,16 +409,26 @@ async function putDelivered(env, key, record) {
   // One clock for everything: Shopify writes "+02:00", the Worker "Z", and as
   // text the two sort up to two hours wrong in the history.
   const deliveredAt = shopifyTime(record.deliveredAt) || new Date().toISOString();
-  const value = JSON.stringify({ ...record, deliveredAt, order });
-  const options = { expirationTtl: DELIVERED_TTL, metadata: { deliveredAt } };
-  try {
-    await env.PLANNING_ORDERS.put(`delivered:${key}`, value, options);
-  } catch {
-    // KV takes one write per key per second, and Shopify's webhook for the
-    // same order can land in that second.
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-    await env.PLANNING_ORDERS.put(`delivered:${key}`, value, options);
+  const expiration = Math.floor(Date.parse(deliveredAt) / 1000) + DELIVERED_TTL;
+  // KV refuses an expiry less than a minute ahead; a minute and a half leaves room.
+  if (expiration < Date.now() / 1000 + 90) {
+    await env.PLANNING_ORDERS.delete(`delivered:${key}`);
+    return false;
   }
+  const own = Boolean(record.fulfillment?.id) || OWN_SOURCES.includes(record.source);
+  const value = JSON.stringify({ ...record, deliveredAt, order });
+  // Shopify's webhook for the same order can land in the same second.
+  await putWithRetry(env, `delivered:${key}`, value, { expiration, metadata: own ? { deliveredAt, own: true } : { deliveredAt } });
+  return true;
+}
+
+// Until fourteen days after it was cancelled, counted the same way: a refund or a
+// tag a week later does not start the fortnight again. An order Shopify does not
+// date is kept the fortnight from now.
+function cancelledExpiration(shopifyOrder) {
+  const cancelledAt = Date.parse(shopifyOrder.cancelled_at || "");
+  const from = Number.isNaN(cancelledAt) ? Date.now() : cancelledAt;
+  return Math.floor(from / 1000) + CANCELLED_TTL;
 }
 
 // What is kept of an order Shopify shipped that never went with the van (a DHL
@@ -372,8 +477,14 @@ async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
   if (planningOrder.fulfilled) {
     // Shopify answers the Bezorgd button's fulfillment with this webhook, often
     // before the button's own record is written. That record, with the
-    // fulfillment undo needs, is on its way: this one steps aside.
-    if (reporting) return planningOrder;
+    // fulfillment undo needs, is on its way: this one steps aside. The report
+    // may yet end without an answer from Shopify, though, and Shopify sends this
+    // webhook only once: what it knows is noted, so the report can file it then.
+    if (reporting) {
+      const made = history ? null : newestFulfillment(shopifyOrder);
+      if (made) await env.PLANNING_ORDERS.put(`${REPORT_SEEN_PREFIX}${key}`, JSON.stringify(made), { expirationTtl: REPORT_NOTE_TTL }).catch(() => {});
+      return planningOrder;
+    }
     // Fulfilled by our own announcement the day before is not delivered: the
     // order stays on the planning, marked, until the driver reports it.
     if (announced) {
@@ -389,18 +500,25 @@ async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
       return planningOrder;
     }
     const merged = storedOrder ? { ...storedOrder, ...planningOrder } : planningOrder;
+    // A Bezorgd that got no answer from Shopify left a note of when it waited.
+    // A fulfillment made in that window is the report's own: filed as the
+    // planning's, so Terugdraaien can undo it. Any other fulfillment was made in
+    // Shopify itself, and is not the planning's to undo. Only looked for while no
+    // delivery is on record: the first webhook after such a report files it.
+    const unsure = history ? null : await env.PLANNING_ORDERS.get(`${REPORT_UNSURE_PREFIX}${key}`, "json");
+    const ours = unsure ? madeWhileReporting(newestFulfillment(shopifyOrder), unsure) : null;
     // Went with the van: rijplaten always do, and a slowfeeder order only when
     // it carries the own-delivery tag or was announced. (The shipping line says
     // "Bezorgen" for DHL parcels too, so it says nothing here.)
-    const ownDelivery = shopDomain.includes("rijplaten") || merged.ownDeliveryTagged || merged.announced;
+    const ownDelivery = ours || shopDomain.includes("rijplaten") || merged.ownDeliveryTagged || merged.announced;
     await putDelivered(env, key, {
       id: planningOrder.id,
       shopDomain,
       shopifyOrderId: planningOrder.shopifyOrderId,
       order: ownDelivery ? merged : shippedElsewhere(merged),
-      fulfillment: null,
-      deliveredAt: history?.deliveredAt || shopifyFulfilledAt(shopifyOrder) || new Date().toISOString(),
-      source: "shopify",
+      fulfillment: ours ? { id: ours.id, status: "SUCCESS" } : null,
+      deliveredAt: history?.deliveredAt || ours?.at || shopifyFulfilledAt(shopifyOrder) || new Date().toISOString(),
+      source: ours ? unsure.source : "shopify",
       shopifyUpdatedAt: incoming,
     });
     if (storedOrder) await env.PLANNING_ORDERS.delete(storageKey);
@@ -414,7 +532,9 @@ async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
 
   if (planningOrder.cancelled) {
     // Kept a fortnight, so a route it sat in says "geannuleerd, niet afleveren".
-    await env.PLANNING_ORDERS.put(storageKey, JSON.stringify(planningOrder), { expirationTtl: CANCELLED_TTL });
+    const expiration = cancelledExpiration(shopifyOrder);
+    if (expiration < Date.now() / 1000 + 90) await env.PLANNING_ORDERS.delete(storageKey);
+    else await env.PLANNING_ORDERS.put(storageKey, JSON.stringify(planningOrder), { expiration });
   } else {
     await env.PLANNING_ORDERS.put(storageKey, JSON.stringify(planningOrder));
   }
@@ -548,11 +668,23 @@ async function markDelivered(request, env) {
   if (storedOrder.cancelled) return json({ error: "Deze order is geannuleerd. Niet afleveren." }, 409, env);
   if (storedOrder.refunded) return json({ error: "Deze order is terugbetaald. Niet afleveren; bel de planner." }, 409, env);
 
-  // The driver reports deliveries of their own routes only.
+  // The driver reports deliveries of their own routes only. The phone says which
+  // route the stop is in, so that one route is read instead of every route being
+  // listed: Bezorgd keeps working when the day's listings are used up. Without
+  // it (an older phone), or when it does not check out, every route in the
+  // driver's fortnight is looked through as before.
   if (role === "driver") {
     const window = driverWindow();
-    const stops = await plannedStops(env, window.from, window.to);
-    if (!stops.has(key)) return json({ error: "Deze order staat niet in een van jouw ritten." }, 403, env);
+    const routeDate = String(payload.routeDate || "");
+    const routeId = String(payload.routeId || "");
+    const named = /^[A-Za-z0-9-]{1,64}$/.test(routeId) && isPlanDate(routeDate) && routeDate >= window.from && routeDate <= window.to
+      ? await readPlanRecord(env, routeDate, routeId)
+      : null;
+    const inNamedRoute = named && !named.abortedAt && (named.orderKeys || []).includes(key);
+    if (!inNamedRoute) {
+      const stops = await plannedStops(env, window.from, window.to);
+      if (!stops.has(key)) return json({ error: "Deze order staat niet in een van jouw ritten." }, 403, env);
+    }
   }
 
   const shopifyOrderId = storedOrder.shopifyOrderId || payload.shopifyOrderId;
@@ -568,15 +700,37 @@ async function markDelivered(request, env) {
   // While this report runs, Shopify's own webhook for the fulfillment leaves
   // the order alone (see storeShopifyOrder). Sixty seconds is KV's shortest life.
   const reportingKey = `${REPORTING_PREFIX}${key}`;
-  await env.PLANNING_ORDERS.put(reportingKey, new Date().toISOString(), { expirationTtl: 60 });
+  const source = role === "driver" ? "bezorger" : "planner";
+  const askedAt = new Date().toISOString();
+  await env.PLANNING_ORDERS.put(reportingKey, askedAt, { expirationTtl: 60 });
   const created = await createShopifyFulfillment(shopDomain, token, shopifyOrderId, false);
-  if (created.error) {
-    if (!created.ambiguous) await env.PLANNING_ORDERS.delete(reportingKey).catch(() => {});
-    return json({ error: created.ambiguous
-      ? "Geen antwoord van Shopify. Wacht een minuut, ververs en kijk of de stop als bezorgd staat voor je het opnieuw probeert."
-      : created.error, userErrors: created.userErrors }, created.status, env);
+  let fulfillment = created.fulfillment || (announced?.fulfillmentId ? { id: announced.fulfillmentId, status: "SUCCESS" } : null);
+  if (created.error && !created.ambiguous) {
+    await deleteWithRetry(env, reportingKey);
+    return json({ error: created.error, userErrors: created.userErrors }, created.status, env);
   }
-  const fulfillment = created.fulfillment || (announced?.fulfillmentId ? { id: announced.fulfillmentId, status: "SUCCESS" } : null);
+  if (created.error) {
+    // No answer from Shopify, which may still have made the fulfillment. Its
+    // webhook may already have come in while this report waited, and left what
+    // it knew (see storeShopifyOrder): then it is certain after all.
+    const waited = { from: askedAt, until: new Date().toISOString() };
+    const seenKey = `${REPORT_SEEN_PREFIX}${key}`;
+    let ours = madeWhileReporting(await env.PLANNING_ORDERS.get(seenKey, "json"), waited);
+    if (!ours) {
+      // Otherwise the webhook is still to come, and must not step aside: this
+      // report is not going to write the delivery. The reporting marker goes,
+      // and a note of when this report waited takes its place, so the webhook
+      // files the fulfillment as this report's and Terugdraaien can undo it.
+      await env.PLANNING_ORDERS.put(`${REPORT_UNSURE_PREFIX}${key}`, JSON.stringify({ ...waited, source }), { expirationTtl: REPORT_NOTE_TTL }).catch(() => {});
+      await deleteWithRetry(env, reportingKey);
+      // A webhook that slipped in just before the marker went.
+      ours = madeWhileReporting(await env.PLANNING_ORDERS.get(seenKey, "json"), waited);
+    }
+    if (!ours) {
+      return json({ error: "Geen antwoord van Shopify. Wacht een minuut, ververs en kijk of de stop als bezorgd staat voor je het opnieuw probeert.", userErrors: created.userErrors }, created.status, env);
+    }
+    fulfillment = { id: ours.id, status: "SUCCESS" };
+  }
 
   // Written the moment Shopify said yes; the note, which is only context, last.
   const now = new Date().toISOString();
@@ -587,7 +741,7 @@ async function markDelivered(request, env) {
     order: storedOrder,
     fulfillment,
     deliveredAt: now,
-    source: role === "driver" ? "bezorger" : "planner",
+    source,
     shopifyUpdatedAt: now,
   });
   await env.PLANNING_ORDERS.delete(`order:${key}`);
@@ -826,8 +980,19 @@ const GEO_HIT_TTL = 90 * 24 * 3600;
 // leaves room; anything past it is simply looked up on the next refresh.
 const GEO_BATCH_LIMIT = 40;
 
+// Decided on the country, which the planning writes last in every address
+// ("..., 3941 BX Doorn, Netherlands"). Any word for a country anywhere in the
+// address used to count, so a customer on the Belgiëlaan in Amersfoort was never
+// placed, and only a list of names kept other countries out. A last part with no
+// digits in it is taken as the country: the Netherlands under any of its names
+// is Dutch, anything else (a name, a code like BE or CH) is not. Only an address
+// without a country falls back to the look of a Dutch postcode.
 function looksDutch(address) {
-  return /\b\d{4}\s?[A-Z]{2}\b/i.test(address) && !/(belgi|belgium|deutschland|germany|czech|france|luxemb)/i.test(address);
+  const parts = String(address).split(",").map((part) => part.trim()).filter(Boolean);
+  const last = parts.length > 1 ? parts[parts.length - 1] : "";
+  const hasPostcode = /\b\d{4}\s?[A-Z]{2}\b/i.test(address);
+  if (last && !/\d/.test(last)) return hasPostcode && /^(nl|nld|netherlands|the netherlands|nederland|holland)$/i.test(last);
+  return hasPostcode;
 }
 
 function postcodeOf(address) {
@@ -975,6 +1140,7 @@ async function runAnnouncement(env, date, { preview = false, report }) {
   const list = await env.PLANNING_ORDERS.list({ prefix: `${PLAN_PREFIX}${date}:` });
   const routes = (await Promise.all(list.keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json")))).filter(Boolean);
   let fetches = 0;
+  const withFulfillment = [];
 
   for (const route of routes) {
     const entry = { id: route.id, number: route.number, name: route.name, results: [] };
@@ -1038,7 +1204,9 @@ async function runAnnouncement(env, date, { preview = false, report }) {
         // A year: Bezorgd clears it, and an announced order must never fall back
         // to "delivered" just because a route was broken off for a while.
         await env.PLANNING_ORDERS.put(markerKey, JSON.stringify(marker), { expirationTtl: 365 * DAY_SECONDS });
+        const markedAt = Date.now();
         fetches += 2;
+        report.reachedShopify = true;
         const created = await createShopifyFulfillment(shopDomain, token, order.shopifyOrderId, true);
         if (created.error && created.ambiguous) {
           // The request went out and no answer came: Shopify may have fulfilled
@@ -1048,7 +1216,7 @@ async function runAnnouncement(env, date, { preview = false, report }) {
           continue;
         }
         if (created.error) throw new Error(created.error);
-        if (created.fulfillment?.id) await env.PLANNING_ORDERS.put(markerKey, JSON.stringify({ ...marker, fulfillmentId: created.fulfillment.id }), { expirationTtl: 365 * DAY_SECONDS }).catch(() => {});
+        if (created.fulfillment?.id) withFulfillment.push({ markerKey, value: JSON.stringify({ ...marker, fulfillmentId: created.fulfillment.id }), markedAt });
         result.status = created.alreadyFulfilled ? "stond al op verzonden in Shopify, geen mail" : "aangekondigd";
       } catch (error) {
         // Certain that nothing was made: the lookup failed, or Shopify said no.
@@ -1058,15 +1226,32 @@ async function runAnnouncement(env, date, { preview = false, report }) {
     }
   }
 
+  // The markers again, now with the fulfillment Terugdraaien needs. KV takes one
+  // write per key per second and Shopify often answers within that second, so
+  // each is written once its first second is over: here, after the walk, so the
+  // waits do not add up order by order. A refusal is tried once more. Should that
+  // fail too, the customer was still told: the announcement stands, and is
+  // undone in Shopify if need be.
+  for (const { markerKey, value, markedAt } of withFulfillment) {
+    await sleep(Math.max(0, 1100 - (Date.now() - markedAt)));
+    await putWithRetry(env, markerKey, value, { expirationTtl: 365 * DAY_SECONDS }).catch(() => {});
+  }
+
   return report;
 }
 
 // The run at 16:10 does the same walk again: orders announced at 16:00 answer
 // "al aangekondigd" and keep the result they had; anything that failed or had to
-// wait gets its second chance, and its new outcome replaces the old.
+// wait gets its second chance, and its new outcome replaces the old. The report
+// says "echt" once either run really went to Shopify, and not before: the agenda
+// shows a trial as "Proef", which tells the planner no customer was mailed.
 function mergeAnnounceReports(earlier, later) {
   if (!earlier) return later;
   const merged = { ...earlier, retriedAt: later.ranAt, routes: [...(earlier.routes || [])] };
+  if (later.mode === "echt" && later.reachedShopify) {
+    merged.mode = "echt";
+    merged.reachedShopify = true;
+  }
   if (later.error) merged.error = later.error;
   for (const route of later.routes || []) {
     const existing = merged.routes.find((entry) => entry.id === route.id);
@@ -1164,10 +1349,34 @@ async function getPlan(request, env) {
   else body.concepts = concepts.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
   if (role === "driver") {
     // Name, address, phone and note of the stops on the driver's own routes: the
-    // only customers whose details the phone is given.
+    // only customers whose details the phone is given. Each with its point from
+    // the address cache, so "kan er nog bij" weighs the route as it really lies
+    // and not by a guess from the postcode. Not rounded: the phone has these
+    // addresses anyway.
     const stopKeys = [...new Set(planned.filter((route) => !route.abortedAt).flatMap((route) => route.orderKeys || []))];
-    body.stops = (await Promise.all(stopKeys.map((key) => env.PLANNING_ORDERS.get(`order:${key}`, "json")))).filter(Boolean);
+    const stops = (await Promise.all(stopKeys.map((key) => env.PLANNING_ORDERS.get(`order:${key}`, "json")))).filter(Boolean);
+    body.stops = await Promise.all(stops.map(async (order) => {
+      const point = await cachedPoint(env, order);
+      return point ? { ...order, point } : order;
+    }));
+    // Orders in routes planned past the driver's fortnight: the phone does not
+    // see those routes, so without this it offered their orders under "kan er
+    // nog bij", and the Worker then refused them as planned elsewhere.
+    const laterNames = names.filter((name) => name.startsWith(PLAN_PREFIX) && name.slice(PLAN_PREFIX.length, PLAN_PREFIX.length + 10) > to);
+    const later = (await Promise.all(laterNames.map((name) => env.PLANNING_ORDERS.get(name, "json")))).filter((route) => route && !route.abortedAt);
+    body.heldKeys = [...new Set([...body.heldKeys, ...later.flatMap((route) => route.orderKeys || [])])];
   }
+  // Stops of today's routes that were delivered today, with where they were and
+  // what went there. "Kan er nog bij" counts the day as driven, not only what is
+  // left of it (see routeMinutesWith). The driver gets the point to a kilometre.
+  const today = amsterdamNow().day;
+  const todayKeys = [...new Set(planned.filter((route) => route.date === today && !route.abortedAt).flatMap((route) => route.orderKeys || []))];
+  body.doneToday = (await Promise.all(todayKeys.map(async (key) => {
+    const record = await env.PLANNING_ORDERS.get(`delivered:${key}`, "json");
+    if (!record || !deliveredOn(record, today)) return null;
+    const point = record.order ? await cachedPoint(env, record.order) : null;
+    return { key, point: role === "driver" ? roundPoint(point) : point, products: record.order?.products || [] };
+  }))).filter(Boolean);
   return json(body, 200, env);
 }
 
@@ -1290,16 +1499,81 @@ async function settleConcept(env, conceptId, plannedKeys) {
 // "plan" prefix so the one listing each refresh already does picks it up.
 const CONCEPT_PREFIX = "plan-concept:";
 
+const CONCEPT_GONE = "Dit concept bestaat niet meer: het is intussen ingepland of verwijderd.";
+const CONCEPT_EMPTY = "Een concept heeft minstens één stop nodig.";
+
 async function saveConcept(request, env) {
   const denied = plannerOnly(request, env);
   if (denied) return denied;
   const payload = await request.json().catch(() => ({}));
+  if (payload.update && (Array.isArray(payload.add) || Array.isArray(payload.remove))) return changeConcept(env, payload);
   const orderKeys = cleanKeys(payload.orderKeys);
   const id = /^[A-Za-z0-9-]{8,64}$/.test(String(payload.id || "")) ? String(payload.id) : crypto.randomUUID();
-  if (!orderKeys.length) return json({ error: "Een concept heeft minstens één stop nodig." }, 400, env);
+  if (!orderKeys.length) return json({ error: CONCEPT_EMPTY }, 400, env);
   const existing = await env.PLANNING_ORDERS.get(`${CONCEPT_PREFIX}${id}`, "json");
-  if (payload.update && !existing) return json({ error: "Dit concept bestaat niet meer: het is intussen ingepland of verwijderd." }, 404, env);
+  if (payload.update && !existing) return json({ error: CONCEPT_GONE }, 404, env);
 
+  const conflict = await conceptConflict(env, id, orderKeys);
+  if (conflict) return conflict;
+
+  const now = new Date().toISOString();
+  const concept = { id, name: cleanName(payload.name, "Concept"), orderKeys, createdAt: existing?.createdAt || now, updatedAt: now };
+  await putWithRetry(env, `${CONCEPT_PREFIX}${id}`, JSON.stringify(concept));
+  return json({ ok: true, concept }, 200, env);
+}
+
+// A change to an opened concept comes as what was added and what was taken out,
+// and is applied to the concept as it is on record now. The whole list from the
+// screen used to replace it, so a screen that was ten minutes behind silently
+// undid what another screen had added or removed meanwhile. (Older screens still
+// send the whole list, and still get it replaced; see saveConcept.)
+async function changeConcept(env, payload) {
+  const id = String(payload.id || "");
+  if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) return json({ error: "Concept ontbreekt in het verzoek." }, 400, env);
+  const key = `${CONCEPT_PREFIX}${id}`;
+  const add = cleanKeys(payload.add);
+  const remove = new Set(cleanKeys(payload.remove));
+  const apply = (concept) => {
+    const kept = (concept.orderKeys || []).filter((entry) => !remove.has(entry));
+    return {
+      ...concept,
+      name: payload.name ? cleanName(payload.name, concept.name) : concept.name,
+      orderKeys: [...kept, ...add.filter((entry) => !kept.includes(entry))],
+      updatedAt: new Date().toISOString(),
+    };
+  };
+
+  const existing = await env.PLANNING_ORDERS.get(key, "json");
+  if (!existing) return json({ error: CONCEPT_GONE }, 404, env);
+  // Only what is added can clash with a route or another concept; the rest was
+  // checked when it went in. Nothing added, nothing listed: that spares the
+  // day's listing budget.
+  const added = add.filter((entry) => !(existing.orderKeys || []).includes(entry));
+  if (added.length) {
+    const conflict = await conceptConflict(env, id, added);
+    if (conflict) return conflict;
+  }
+  let concept = apply(existing);
+  if (!concept.orderKeys.length) return json({ error: CONCEPT_EMPTY }, 400, env);
+  try {
+    await env.PLANNING_ORDERS.put(key, JSON.stringify(concept));
+  } catch (error) {
+    if (kvLimitSpent(error)) throw error;
+    // Two quick taps on one concept can land within KV's one write per key per
+    // second. Tried again once that second is over, on the concept as it is
+    // then, so the change of the first tap is kept as well.
+    await sleep(1100);
+    const current = await env.PLANNING_ORDERS.get(key, "json");
+    if (!current) return json({ error: CONCEPT_GONE }, 404, env);
+    concept = apply(current);
+    if (!concept.orderKeys.length) return json({ error: CONCEPT_EMPTY }, 400, env);
+    await env.PLANNING_ORDERS.put(key, JSON.stringify(concept));
+  }
+  return json({ ok: true, concept }, 200, env);
+}
+
+// A 409 when one of these orders is in a planned route, or in another concept.
+async function conceptConflict(env, id, orderKeys) {
   const stops = await plannedStops(env, shiftDay(amsterdamNow().day, -7), "9999-12-31");
   const planned = orderKeys.filter((key) => stops.has(key));
   if (planned.length) {
@@ -1312,11 +1586,7 @@ async function saveConcept(request, env) {
     const first = held.get(elsewhere[0]);
     return json({ error: `${elsewhere.map((key) => key.split(":").pop()).join(", ")} ${elsewhere.length === 1 ? "staat" : "staan"} al in het concept ${first.name}.`, conflicts: elsewhere }, 409, env);
   }
-
-  const now = new Date().toISOString();
-  const concept = { id, name: cleanName(payload.name, "Concept"), orderKeys, createdAt: existing?.createdAt || now, updatedAt: now };
-  await env.PLANNING_ORDERS.put(`${CONCEPT_PREFIX}${id}`, JSON.stringify(concept));
-  return json({ concept }, 200, env);
+  return null;
 }
 
 async function removeConcept(request, env) {
@@ -1360,8 +1630,23 @@ async function readPlanRecord(env, date, id) {
 }
 
 async function writePlanRecord(env, record) {
+  const basedOn = record.updatedAt || null;
   record.updatedAt = new Date().toISOString();
-  await env.PLANNING_ORDERS.put(`${PLAN_PREFIX}${record.date}:${record.id}`, JSON.stringify(record), { expiration: planExpiration(record.date) });
+  const key = `${PLAN_PREFIX}${record.date}:${record.id}`;
+  const options = { expiration: planExpiration(record.date) };
+  try {
+    await env.PLANNING_ORDERS.put(key, JSON.stringify(record), options);
+  } catch (error) {
+    if (kvLimitSpent(error)) throw error;
+    // KV takes one write per key per second, so a second change to the same
+    // route within that second is refused. Tried again once the second is over,
+    // but only while the route on record is still the one this change started
+    // from: a stop added or the route broken off meanwhile is not written over.
+    await sleep(1100);
+    const current = await env.PLANNING_ORDERS.get(key, "json");
+    if ((current?.updatedAt || null) !== basedOn) throw error;
+    await env.PLANNING_ORDERS.put(key, JSON.stringify(record), options);
+  }
   return record;
 }
 
@@ -1398,9 +1683,9 @@ async function addPlanStop(request, env) {
     const eligible = order.paid && !order.refunded && order.addressComplete && order.deliveryMethod !== "pickup"
       && !order.deliveryAppointmentLocked && !(order.dueDate && order.dueDate < HIDE_ORDERS_DUE_BEFORE);
     if (!eligible) return json({ error: "Deze order kan niet zomaar mee. Bel de planner." }, 403, env);
-    const minutes = await routeMinutesWith(env, record, order);
-    if (minutes === null) return json({ error: "Van deze order is geen locatie bekend. Bel de planner." }, 403, env);
-    if (minutes > DAY_LIMIT_MINUTES) return json({ error: "Met deze stop wordt de rit langer dan 5:45. Bel de planner." }, 403, env);
+    const weighed = await routeMinutesWith(env, record, order);
+    if (weighed.missing) return json({ error: `Van ${weighed.missing} is geen locatie bekend, dus de rit is niet na te rekenen. Bel de planner.` }, 403, env);
+    if (weighed.minutes > DAY_LIMIT_MINUTES) return json({ error: "Met deze stop wordt de rit langer dan 5:45. Bel de planner." }, 403, env);
   }
 
   const stops = await plannedStops(env, shiftDay(amsterdamNow().day, -7), "9999-12-31");
@@ -1440,22 +1725,33 @@ async function addPlanStop(request, env) {
 
 // How long the route takes with this order added where it costs least, by the
 // planning's own estimate (see app.js), from the points PDOK gave the addresses.
-// null when an address has no point: then nothing sensible can be said.
+// Returns { minutes }, or { missing: order number } when an address has no
+// point: then nothing sensible can be said, and the driver is told which stop.
+//
+// The day counts as driven: stops of this route delivered today stay in the loop
+// and in the unloading. Counting only the open ones let the check shrink with
+// every delivery, so by the afternoon it let in what it refused that morning.
+// Stops delivered on an earlier day (a route of last week, still unfinished)
+// were another day's drive and do not count.
 async function routeMinutesWith(env, record, extra) {
-  const open = (await Promise.all((record.orderKeys || []).map((key) => env.PLANNING_ORDERS.get(`order:${key}`, "json")))).filter((order) => order && !order.fulfilled && !order.cancelled);
-  const orders = [...open, extra];
-  const points = await Promise.all(orders.map(async (order) => {
-    const point = await env.PLANNING_ORDERS.get(geoKeyForOrder(order), "json").catch(() => null);
-    return point && !point.miss ? point : null;
+  const today = amsterdamNow().day;
+  const stops = await Promise.all((record.orderKeys || []).map(async (key) => {
+    const order = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
+    if (order) return order.fulfilled || order.cancelled ? null : order;
+    const delivered = await env.PLANNING_ORDERS.get(`delivered:${key}`, "json");
+    return delivered?.order && deliveredOn(delivered, today) ? { ...delivered.order, id: delivered.order.id || delivered.id } : null;
   }));
-  if (points.some((point) => !point)) return null;
+  const orders = [...stops.filter(Boolean), extra];
+  const points = await Promise.all(orders.map((order) => cachedPoint(env, order)));
+  const unplaced = orders.find((_, index) => !points[index]);
+  if (unplaced) return { missing: unplaced.id || "deze order" };
   const km = (a, b) => Math.sqrt(((a.lat - b.lat) * 111) ** 2 + ((a.lon - b.lon) * 70) ** 2);
   const loop = (list) => list.reduce((sum, point, index) => sum + km(index ? list[index - 1] : DEPOT_POINT, point), 0) + km(list[list.length - 1], DEPOT_POINT);
   const route = points.slice(0, -1);
   let best = Infinity;
   for (let index = 0; index <= route.length; index += 1) best = Math.min(best, loop([...route.slice(0, index), points[points.length - 1], ...route.slice(index)]));
   const unloading = orders.reduce((sum, order) => sum + (/hooihuisje|hoihuisje/.test((order.products || []).join(" ").toLowerCase()) ? 90 : 20), 0);
-  return Math.round(20.2 + 5 * (orders.length - 1) + 0.975 * best) + unloading;
+  return { minutes: Math.round(20.2 + 5 * (orders.length - 1) + 0.975 * best) + unloading };
 }
 
 // The planner taking a stop out of a planned route. Before this existed the
@@ -1999,6 +2295,26 @@ function paymentStatus(order) {
   if (status === "voided") return "Betaling vervallen";
   if (status === "authorized") return "Betaling gereserveerd";
   return "In afwachting van betaling";
+}
+
+// The newest fulfillment on an order Shopify sent, as the id undo needs and its time.
+function newestFulfillment(order) {
+  const made = (Array.isArray(order.fulfillments) ? order.fulfillments : [])
+    .filter((item) => item && item.status !== "cancelled" && (item.admin_graphql_api_id || item.id) && shopifyTime(item.created_at))
+    .map((item) => ({ id: item.admin_graphql_api_id || `gid://shopify/Fulfillment/${item.id}`, at: shopifyTime(item.created_at) }))
+    .sort((a, b) => a.at.localeCompare(b.at));
+  return made.at(-1) || null;
+}
+
+// A fulfillment made while a Bezorgd report waited for Shopify: from half a minute
+// before it asked (two clocks) to a minute after it gave up (a request still on
+// its way). Anything outside that was made in Shopify by someone else.
+function madeWhileReporting(made, report) {
+  if (!made?.id || !report) return null;
+  const at = Date.parse(made.at || "");
+  const from = Date.parse(report.from || "") - 30_000;
+  const until = Date.parse(report.until || "") + 60_000;
+  return at >= from && at <= until ? made : null;
 }
 
 function shopifyFulfilledAt(order) {
