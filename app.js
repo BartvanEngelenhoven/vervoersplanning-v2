@@ -28,15 +28,27 @@ const CONFIG = {
 };
 
 const state = { concepts: [], heldKeys: new Set(), openConcept: null, routeInHandConcept: null, orders: [], decisions: [], routes: [], reviewRoutes: [], history: [], deliveredKeys: new Map(), historyLoaded: false, selected: new Set(), manualRoute: null, suggestions: [], plan: [], planStops: [], dayNotes: [], announcements: [], announceLive: false, allOrders: [], geo: {}, role: null, driverRouteId: null, openPlan: null, routeInHand: null, placing: false, lastFetchOk: false, driveMinutes: null, driveDepot: "", driveEstimateUnavailable: false };
-const decisionLabels = { include: "Meenemen", planned: "Ingepland", concept: "In concept", review: "Controleren", dhl: "DHL/FVR", far: "Te ver", exclude: "Niet meenemen" };
+const decisionLabels = { include: "Meenemen", planned: "Ingepland", concept: "In concept", review: "Controleren", dhl: "DHL", fvr: "FVR", exclude: "Niet meenemen" };
+
+// What does not go with the van goes with a carrier, by shop: rijplaten with
+// FVR, slowfeeders with DHL. Inside the planning both are the one decision
+// "dhl"; this is what the planner sees and filters on.
+function statusOf(item) {
+  if (item.decision !== "dhl" && item.decision !== "far") return item.decision;
+  return isRijplatenOrder(item.order) ? "fvr" : "dhl";
+}
+
+function carrierOf(order) {
+  return isRijplatenOrder(order) ? "FVR" : "DHL";
+}
 
 // Every order brings its own travel budget to the trip and the budgets pool, so
 // two rijplaten may share a 240 minute drive although neither pays for 120 on
 // its own. Minutes are round trips, because routeDriveMinutes drives out and
 // back. Hay houses go whatever the distance, so they carry no ceiling.
 const transportRules = {
-  rijplaten: { label: "Rijplaten", budgetMinutes: 120, overflow: "far" },
-  alwaysOwn: { label: "Altijd eigen bezorging", budgetMinutes: Infinity, overflow: "far" },
+  rijplaten: { label: "Rijplaten", budgetMinutes: 120, overflow: "dhl" },
+  alwaysOwn: { label: "Altijd eigen bezorging", budgetMinutes: Infinity, overflow: "dhl" },
   xxl: { label: "XXL bak", budgetMinutes: 60, overflow: "dhl" },
 };
 
@@ -141,7 +153,7 @@ function decide(order) {
   if (order.deliveryMethod === "pickup") return { decision: "exclude", reason: "Klant haalt de bestelling af" };
   // Taken out of a proposal with the "−": the planner decided it does not go
   // with the van. It stays out of every proposal until put back.
-  if (order.extern) return { decision: "dhl", external: true, reason: "Uit een voorstel gehaald: gaat met DHL/FVR, niet met de bus" };
+  if (order.extern) return { decision: "dhl", external: true, reason: `Uit een voorstel gehaald: gaat met ${carrierOf(order)}, niet met de bus` };
 
   const plan = transportPlan(order);
   if (!plan) {
@@ -151,7 +163,7 @@ function decide(order) {
     if (order.ownDeliveryTagged) {
       return { decision: "review", taggedParcel: true, reason: "In Shopify getagd als eigen bezorging, maar zit in geen rit. Neem hem mee in een rit, of haal de tag in Shopify weg zodat hij met DHL gaat" };
     }
-    return { decision: "dhl", reason: "Staat niet in de vaste eigen-bezorgingslijst en is geen XXL bak; gaat via DHL/FVR" };
+    return { decision: "dhl", reason: `Staat niet in de vaste eigen-bezorgingslijst en is geen XXL bak; gaat met ${carrierOf(order)}` };
   }
 
   if (!order.addressComplete) return { decision: "review", reason: "Bezorgadres is onvolledig" };
@@ -432,7 +444,7 @@ function startOfDay(date) {
 // that group. Everything that needs no decision today is named once in a quiet
 // line below, so it is accounted for without competing for attention.
 function renderSummary() {
-  const count = (key) => state.decisions.filter((item) => item.decision === key).length;
+  const count = (key) => state.decisions.filter((item) => statusOf(item) === key).length;
   const urgent = urgentDecisions().length;
 
   const dagLine = document.querySelector("#dayLine");
@@ -479,8 +491,8 @@ function renderSummary() {
     const delen = [
       count("planned") ? `${count("planned")} ingepland` : "",
       count("concept") ? `${count("concept")} in een concept` : "",
-      count("dhl") ? `${count("dhl")} via DHL/FVR` : "",
-      count("far") ? `${count("far")} te ver` : "",
+      count("dhl") ? `${count("dhl")} via DHL` : "",
+      count("fvr") ? `${count("fvr")} via FVR` : "",
       count("exclude") ? `${count("exclude")} vervallen of opgehaald` : "",
       state.selected.size ? `${state.selected.size} geselecteerd` : "",
     ].filter(Boolean);
@@ -499,9 +511,10 @@ function renderRules() {
   const kaarten = [
     ["Rijplaten", `Altijd eigen bezorging ${budget(transportRules.rijplaten)}. Orders in dezelfde rit tellen hun tijd bij elkaar op, dus samen mogen ze verder${v3 ? `. Liggen twee orders vlak bij elkaar maar net aan weerszijden van een windrichting (binnen ${CONFIG.neighbourPoolKm} km), dan tellen ze toch samen` : ""}.`],
     ["Grote slowfeeders", `${alwaysOwnTransportProducts.length} producttitels uit de vaste lijst gaan altijd zelf, ${budget(transportRules.alwaysOwn)}.${v3 ? " Rijplaten en XXL bakken dezelfde kant op rijden mee als de extra rijtijd binnen hun eigen budget past; het hooihuisje maakt hun budget niet groter." : ""}`],
-    ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Anders via DHL/FVR.`],
-    ["Uit een voorstel gehaald", "Met het min-teken haal je een order uit een voorstel. Hij gaat dan met DHL/FVR en komt niet meer in een voorstel. Onder Orders zet Terug naar de planning hem terug."],
-    ["Al het andere", `Gaat via DHL/FVR, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit ${formatMinutes(CONFIG.packageDetourMinutes)} langer van worden. Zo'n pakket krijgt bij het inplannen in Shopify de tag 'eigen bezorging', zodat het niet ook met DHL meegaat.`],
+    ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Anders via DHL.`],
+    ["Niet met de bus", "Wat niet met de bus kan, gaat met een vervoerder: rijplaten met FVR, slowfeeders met DHL. Rijdt er een rit vlak langs, dan gaat hij toch mee als de rit er hooguit een uur langer van wordt."],
+    ["Uit een voorstel gehaald", "Met het min-teken haal je een order uit een voorstel. Hij gaat dan met FVR (rijplaten) of DHL (slowfeeders) en komt niet meer in een voorstel. Onder Orders zet Terug naar de planning hem terug."],
+    ["Al het andere", `Gaat via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit ${formatMinutes(CONFIG.packageDetourMinutes)} langer van worden. Zo'n pakket krijgt bij het inplannen in Shopify de tag 'eigen bezorging', zodat het niet ook met DHL meegaat.`],
     ["Net erover", v3
       ? `Zit een groep orders tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan staat hij als rit onder Controleren: met één klik inplannen, of eerst een order eruit halen.`
       : `Zit een rit tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan komen de orders bij Controleren te staan in plaats van dat ze afvallen.`],
@@ -1302,10 +1315,23 @@ function renderPlanningMap() {
   });
 }
 
+// DHL and FVR on the map are mostly noise when planning the van: they can be
+// left off. Remembered on this screen only.
+const hideCarriersKey = "vervoersplanning.kaartZonderDhlFvr";
+function hideCarriers() {
+  try {
+    return localStorage.getItem(hideCarriersKey) === "1";
+  } catch {
+    return false;
+  }
+}
+
 function renderAllOrdersMap(holder) {
+  const zonder = hideCarriers();
   const openOrders = state.decisions
     .filter((item) => !item.order.cancelled && !item.order.fulfilled)
-    .filter((item) => hasKnownPoint(item.order));
+    .filter((item) => hasKnownPoint(item.order))
+    .filter((item) => !zonder || !["dhl", "fvr"].includes(statusOf(item)));
   if (!openOrders.length) {
     holder.innerHTML = '<p class="empty">Geen open orders om op de kaart te tonen.</p>';
     return;
@@ -1321,15 +1347,24 @@ function renderAllOrdersMap(holder) {
       <span>${openOrders.length} punten. Tik op een punt, of wijs het aan, voor de bestelling.</span>
       <a class="button ghost" href="${googleMapsUrl(openOrders.map((item) => item.order))}" target="_blank" rel="noreferrer">Open alle orders in Google Maps</a>
     </div>
+    <label class="map-filter"><input type="checkbox" id="mapHideCarriers"${zonder ? " checked" : ""}> DHL en FVR verbergen</label>
     <div class="map-legend">
       <span><i class="map-dot include"></i> Meenemen</span>
       <span><i class="map-dot planned"></i> Ingepland</span>
       <span><i class="map-dot concept"></i> In concept</span>
       <span><i class="map-dot review"></i> Controleren</span>
-      <span><i class="map-dot dhl"></i> DHL/FVR</span>
-      <span><i class="map-dot far"></i> Te ver</span>
+      <span><i class="map-dot dhl"></i> DHL</span>
+      <span><i class="map-dot fvr"></i> FVR</span>
       <span><i class="map-dot exclude"></i> Niet meenemen</span>
     </div>`;
+  holder.querySelector("#mapHideCarriers")?.addEventListener("change", (event) => {
+    try {
+      localStorage.setItem(hideCarriersKey, event.target.checked ? "1" : "0");
+    } catch {
+      // Not remembered; the map still follows the box for now.
+    }
+    renderPlanningOverview();
+  });
   renderLeafletOrderMap(openOrders);
 }
 
@@ -1366,14 +1401,15 @@ function renderLeafletOrderMap(items) {
     fillOpacity: 1,
   }).addTo(allOrdersMarkers).bindTooltip("Goorsteeg 46, Ede");
 
-  items.forEach(({ order, decision }) => {
+  items.forEach((item) => {
+    const { order } = item;
     const point = orderPoint(order);
     markerPoints.push([point.lat, point.lon]);
     L.circleMarker([point.lat, point.lon], {
       radius: 7,
       color: "#ffffff",
       weight: 2,
-      fillColor: markerColor(decision),
+      fillColor: markerColor(statusOf(item)),
       fillOpacity: 1,
     }).addTo(allOrdersMarkers).bindTooltip(orderTooltip(order), {
       direction: "top",
@@ -1395,7 +1431,7 @@ function markerColor(decision) {
   if (decision === "concept") return "#7a5c2e";
   if (decision === "review") return "#c7810c";
   if (decision === "dhl") return "#2f6fb3";
-  if (decision === "far") return "#6b5b95";
+  if (decision === "fvr") return "#6b5b95";
   return "#b94a3f";
 }
 
@@ -1438,7 +1474,7 @@ function renderOrders() {
   const urgent = new Set(urgentDecisions());
   const visible = state.decisions.filter((item) => {
     const haystack = [item.order.id, item.order.webshop, item.order.customer, item.order.city, item.order.postcode, (item.order.products || []).join(" ")].join(" ").toLowerCase();
-    const matches = filter === "all" || (filter === "urgent" ? urgent.has(item) : item.decision === filter);
+    const matches = filter === "all" || (filter === "urgent" ? urgent.has(item) : statusOf(item) === filter);
     return (!term || haystack.includes(term)) && matches;
   });
 
@@ -1468,13 +1504,13 @@ function groupedOrderSections(items) {
     ["planned", "Ingepland", "Staan al in een rit in de agenda"],
     ["concept", "In concept", "Staan in een concept dat nog geen dag heeft"],
     ["review", "Controleren", "Betaling, afspraak, adres of net boven het budget: jij beslist"],
-    ["dhl", "DHL/FVR", "Niet in de vaste eigen-bezorgingslijst en geen XXL bak, een XXL bak die te ver ligt, of door de planner uit een voorstel gehaald"],
-    ["far", "Te ver voor eigen vervoer", "Rijplaten buiten het bereik die op geen enkele rit passen"],
+    ["fvr", "FVR", "Rijplaten die niet met de bus kunnen: buiten het budget, of door de planner uit een voorstel gehaald"],
+    ["dhl", "DHL", "Slowfeeders die niet met de bus gaan: niet op de vaste lijst, een XXL bak buiten zijn budget, of door de planner uit een voorstel gehaald"],
     ["exclude", "Niet meenemen", "Geannuleerd, terugbetaald, afgehaald of al verzonden"],
   ];
   return groups
     .map(([key, title, subtitle]) => {
-      const groupItems = items.filter((item) => item.decision === key);
+      const groupItems = items.filter((item) => statusOf(item) === key);
       if (!groupItems.length) return "";
       return `<section class="order-group ${key}">
         <div class="order-group-heading">
@@ -1498,7 +1534,7 @@ function orderCard(item) {
       <div class="order-title-row">
         <label class="select-order"><input class="order-select" type="checkbox" data-order-key="${key}" ${state.selected.has(key) ? "checked" : ""}${planned || held ? " disabled" : ""} /><span>Selecteer</span></label>
         <span class="shop-chip ${businessClass(order)}">${businessLogo(order)}</span>
-        <span class="badge ${item.decision}">${decisionLabels[item.decision]}</span>
+        <span class="badge ${statusOf(item)}">${decisionLabels[statusOf(item)]}</span>
         ${planned ? `<span class="badge-planned"><span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span> ${formatDate(planned.date)}</span>` : ""}
         ${held && item.concept ? `<span class="badge-planned">Concept: ${escapeHtml(item.concept.name)}</span>` : ""}
       </div>
@@ -2206,7 +2242,9 @@ function addNearbyPackages() {
   // A parcel already on a hand-made route is a stop of it: merged in a second
   // time it showed twice, with two Bezorgd buttons and 25 minutes too many.
   const onRoute = new Set(state.routes.flatMap((route) => route.orders.map(orderKey)));
-  const parcels = state.decisions.filter((entry) => entry.decision === "dhl" || entry.taggedParcel);
+  // Parcels only: rijplaten past their budget (FVR) are offered on a planned
+  // route instead, weighed against their own budget, as before.
+  const parcels = state.decisions.filter((entry) => (entry.decision === "dhl" && (!entry.plan || entry.plan === transportRules.xxl)) || entry.taggedParcel);
   for (const item of parcels) {
     const order = item.order;
     if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) continue;
@@ -2232,7 +2270,7 @@ function addNearbyPackages() {
     onRoute.add(orderKey(order));
     item.decision = "include";
     item.parcel = true;
-    item.reason = `Pakketorder, maar de rit naar ${routeLabel(best.merged)} wordt er maar ${formatMinutes(best.grows)} langer van; goedkoper zelf meenemen. ${dueDateReason(order)}`;
+    item.reason = `Zou met ${carrierOf(order)} gaan, maar de rit naar ${routeLabel(best.merged)} wordt er maar ${formatMinutes(best.grows)} langer van; goedkoper zelf meenemen. ${dueDateReason(order)}`;
   }
 }
 
@@ -2988,9 +3026,7 @@ function markDropped(region, dropped, size) {
     item.droppedFromPool = true;
     item.decision = item.plan.overflow;
     const samen = size > 1 ? `, ook samen met de andere orders richting ${region}` : "";
-    item.reason = item.plan.overflow === "dhl"
-      ? `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt; gaat via DHL/FVR`
-      : `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt${samen}`;
+    item.reason = `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt${samen}; gaat met ${carrierOf(item.order)}`;
     // Tagged "eigen bezorging" in Shopify, the DHL pile skips it: back under
     // DHL here, nobody would deliver it.
     if (item.plan.overflow === "dhl" && item.order.ownDeliveryTagged) {
@@ -3275,7 +3311,9 @@ function fitsAsAddition(fit, order, decision) {
   if (fit.totaal > CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes) return false;
   if (fit.loadKnown && fit.load > CONFIG.vehicleCapacityKg) return false;
   const plan = transportPlan(order);
-  if (plan && decision !== "dhl") return fit.extraDrive <= plan.budgetMinutes;
+  // An XXL bak past its budget travels as a parcel would. Rijplaten past theirs
+  // (FVR) still pay their own way, as when they were called "te ver".
+  if (plan && !(plan === transportRules.xxl && decision === "dhl")) return fit.extraDrive <= plan.budgetMinutes;
   return fit.extra <= CONFIG.packageDetourMinutes;
 }
 

@@ -8,7 +8,7 @@ De planning voor eigen bezorging van De Rijplaten Specialist en De Slowfeeder Sp
 ## Wat de site doet
 
 - Leest de open orders van beide winkels, die Shopify via webhooks doorgeeft.
-- Deelt elke order in: **Meenemen**, **Ingepland**, **Controleren**, **DHL**, **Te ver** of **Niet meenemen**. De regels staan in de site onder *Regels* en worden rechtstreeks uit de code opgebouwd.
+- Deelt elke order in: **Meenemen**, **Ingepland**, **In concept**, **Controleren**, **FVR** (rijplaten die niet met de bus gaan), **DHL** (slowfeeders die niet met de bus gaan) of **Niet meenemen**. Met het min-teken in een voorstel zet de planner een order op FVR of DHL; dat bewaart de Worker (`shipping:`), los van Shopify. De regels staan in de site onder *Regels* en worden rechtstreeks uit de code opgebouwd.
 - Maakt ritvoorstellen (A, B, C…). Een voorstel dat je inplant, krijgt een vast ritnummer dat nooit terugkomt.
 - Laat de bezorger op de telefoon zijn ritten zien, met per stop naam, adres, telefoon, producten en opmerking, en een knop *Bezorgd*.
 - Ververst elke 2 minuten zolang het scherm zichtbaar is; ritten en historie elke 10 minuten en na elke actie.

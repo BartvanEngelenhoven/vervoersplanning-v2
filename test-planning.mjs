@@ -101,10 +101,10 @@ test("een hooihuisje maakt het budget van een verre rijplatenorder niet oneindig
   const groningen = order("Groningen", 53.22, 6.57);
   const nieuw = plan(v3, [huisje, groningen]);
   assert.equal(nieuw.decision(huisje), "include");
-  assert.equal(nieuw.decision(groningen), "far");
+  assert.equal(nieuw.decision(groningen), "dhl", "FVR");
   // The old rules let it through. Weighed per day-trip, they no longer do:
   // Hensbroek and Groningen are no single day, so Groningen pays its own way.
-  assert.equal(plan(v2, [huisje, groningen]).decision(groningen), "far");
+  assert.equal(plan(v2, [huisje, groningen]).decision(groningen), "dhl", "FVR");
 });
 
 test("een rijplatenorder vlak bij een hooihuisje rijdt mee", () => {
@@ -144,8 +144,8 @@ test("buren aan weerszijden van een windrichting tellen samen (Dalfsen en Ommen)
   assert.equal(nieuw.decision(ommen), "include");
   assert.equal(nieuw.routes.length, 1);
   const oud = plan(v2, [dalfsen, ommen]);
-  assert.equal(oud.decision(dalfsen), "far");
-  assert.equal(oud.decision(ommen), "far");
+  assert.equal(oud.decision(dalfsen), "dhl");
+  assert.equal(oud.decision(ommen), "dhl");
 });
 
 test("twee ritten vlak naast elkaar over een windrichting worden één rit (Elst en Huissen)", () => {
@@ -433,6 +433,24 @@ test("Kan er nog bij zet een nieuwe stop nooit tussen stops die vandaag al bezor
   state.deliveredKeys = new Map();
   assert.deepEqual(Array.from(dag, (item) => item.id), [amsterdam.id, apeldoorn.id, arnhem.id], "bezorgd eerst, op volgorde");
   assert.ok(!aangeboden.some((kandidaat) => kandidaat.item.order.id === haarlem.id), "Haarlem ligt ver achter de bus");
+});
+
+test("wat niet met de bus kan, gaat met FVR (rijplaten) of DHL (slowfeeders); Te ver bestaat niet meer", () => {
+  const { fn } = v2;
+  const groningen = order("Groningen", 53.22, 6.57);
+  const pakket = order("Doorn", 52.03, 5.32, { shop: DSP, products: ["1x Slowfeeder hooinet"] });
+  const uitkomst = plan(v2, [groningen, pakket]);
+  const item = (o) => v2.state.decisions.find((entry) => entry.order === o);
+  assert.equal(fn.statusOf(item(groningen)), "fvr");
+  assert.match(uitkomst.reason(groningen), /gaat met FVR/);
+  assert.equal(fn.statusOf(item(pakket)), "dhl");
+  assert.match(uitkomst.reason(pakket), /gaat met DHL/);
+  assert.ok(!v2.state.decisions.some((entry) => entry.decision === "far"));
+  // Rijplaten past their budget are not slipped into a proposal as parcels.
+  const utrecht = order("Utrecht", 52.09, 5.12);
+  const verDichtbij = order("Hilversum", 52.23, 5.18);
+  const beide = plan(v2, [utrecht, verDichtbij, groningen]);
+  assert.ok(!beide.routes.some((route) => route.orders.includes(groningen)));
 });
 
 let failed = 0;
