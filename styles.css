@@ -521,6 +521,7 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
   border-radius: 10px; background: #e7f2ec; color: var(--brand); font-weight: 750; text-decoration: none; }
 .driver-products { font-size: .92rem; }
 .driver-customer-note { padding: .45rem .6rem; border-radius: 8px; background: #fdf6e0; font-size: .9rem; }
+.order-note { display: block; margin-top: .3rem; padding: .3rem .5rem; border-radius: 6px; background: #fdf6e0; color: #5b4a12; font-size: .85rem; line-height: 1.35; white-space: pre-line; }
 .driver-meta { color: var(--muted); font-size: .8rem; }
 .driver-deliver { justify-self: stretch; min-height: 52px; margin-top: .3rem; font-size: 1.05rem; }
 

@@ -230,6 +230,15 @@ await test("na 16:10 in Ede ingepland is niet aangekondigd, ook op een laptop in
   assert.match(fn.announceLine(rit), /Aankondiging 28-09-2026 om 16:00/);
 });
 
+await test("de opmerking uit Shopify (Notities) staat bij de order, veilig ge-escaped, en ingekort waar het krap is", () => {
+  assert.equal(fn.orderNote({}), "");
+  const html = fn.orderNote({ customerNote: "Woensdag leveren. <img src=x onerror=alert(1)>" });
+  assert.match(html, /^<span class="order-note">Opmerking: Woensdag leveren\. &lt;img/);
+  assert.ok(!html.includes("<img"));
+  const kort = fn.orderNote({ customerNote: "x".repeat(300) }, { short: true });
+  assert.ok(kort.length < 200 && kort.includes("…"));
+});
+
 await test("na Bezorgd staat de stop meteen als bezorgd, ook als verversen daarna mislukt", () => {
   realClock();
   const a = order("Doorn", 52.03, 5.32);

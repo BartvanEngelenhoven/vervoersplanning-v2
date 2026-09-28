@@ -652,7 +652,7 @@ function renderDriverRoute(holder, planned) {
           <a class="driver-address" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">${addressSummary(order)}</a>
           ${order.phone ? `<a class="driver-phone" href="${telHref(order.phone)}">Bel ${escapeHtml(order.phone)}</a>` : ""}
           <span class="driver-products">${productSummary(order)}</span>
-          ${order.customerNote ? `<span class="driver-customer-note">Klant schreef: ${escapeHtml(order.customerNote)}</span>` : ""}
+          ${order.customerNote ? `<span class="driver-customer-note">Opmerking: ${escapeHtml(order.customerNote)}</span>` : ""}
           <span class="driver-meta">${escapeHtml(order.id)} · ${escapeHtml(order.webshop || "")} · ${deliveryMinutes(order)} min lossen</span>
           ${planned.abortedAt ? "" : `<button class="button primary mark-delivered driver-deliver" type="button" data-order-key="${orderKey(order)}">Bezorgd</button>`}
         </div>
@@ -664,7 +664,7 @@ function renderDriverRoute(holder, planned) {
     ${erbij.length ? `<div class="plan-additions"><h3>Kan er nog bij</h3>${erbij.map((kandidaat) => {
       const o = kandidaat.item.order;
       return `<div class="plan-addition"><div><b>${escapeHtml(o.id)} · ${escapeHtml(o.city || "")}</b>
-        <span>${productSummary(o)}</span>
+        <span>${productSummary(o)}</span>${orderNote(o, { short: true })}
         <span>+${formatMinutes(kandidaat.extra)}, rit wordt dan ${formatMinutes(kandidaat.totaal)}</span></div>
         <button class="button primary accept-addition" type="button" data-key="${orderKey(o)}">Meenemen</button></div>`;
     }).join("")}</div>` : ""}
@@ -1176,7 +1176,7 @@ function renderOpenPlan() {
         return `<div class="plan-addition">
           <div>
             <b>${escapeHtml(o.id)} · ${escapeHtml(o.city || "plaats onbekend")}</b>
-            <span>${productSummary(o)}</span>
+            <span>${productSummary(o)}</span>${orderNote(o, { short: true })}
             <span>+${formatMinutes(kandidaat.extra)}, rit wordt dan ${formatMinutes(kandidaat.totaal)}${needsOwnDeliveryTag(o) ? " · krijgt in Shopify de tag eigen bezorging" : ""}</span>
           </div>
           <button class="button primary accept-addition" type="button" data-key="${orderKey(o)}">Meenemen</button>
@@ -1234,7 +1234,7 @@ function renderPlanningMap() {
     <div>
       <b>${index + 1}. ${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}</b>
       <span>${productSummary(order)}</span>
-      <small>${addressSummary(order)}</small>
+      <small>${addressSummary(order)}</small>${orderNote(order)}
     </div>
     <button class="button subtle-action remove-from-active-route" type="button" data-order-key="${orderKey(order)}">Uit rit halen</button>
   </li>`).join("");
@@ -1396,7 +1396,7 @@ function orderTooltip(order) {
   return `<div class="map-tooltip-content">
     <b>${escapeHtml(order.id)} · ${escapeHtml(order.customer || "Onbekende klant")}</b>
     <span>${productSummary(order)}</span>
-    <span>${addressSummary(order)}</span>
+    <span>${addressSummary(order)}</span>${orderNote(order, { short: true })}
     <small>${escapeHtml(order.paymentStatus || (order.paid ? "Betaald" : "In afwachting"))} · uiterlijk ${formatDate(order.dueDate)}</small>
   </div>`;
 }
@@ -1494,7 +1494,7 @@ function orderCard(item) {
       </div>
       <h3>${escapeHtml(order.id)} · ${escapeHtml(order.customer)}${order.announced ? '<span class="badge-announced">aangekondigd</span>' : ""}</h3>
       <p class="product-line">${productSummary(order)}</p>
-      <p class="address-line">${addressSummary(order)}</p>
+      <p class="address-line">${addressSummary(order)}</p>${orderNote(order)}
       <p class="reason">${escapeHtml(item.reason)}</p>
     </div>
     <div class="order-side">
@@ -1571,7 +1571,7 @@ function renderRoutes() {
     }
     // Buttons carry shop and number together: the number alone is only unique
     // for as long as the two shops keep different prefixes.
-    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${escapeHtml(order.id)} uit deze rit halen">−</button><b>${escapeHtml(order.city)} · ${escapeHtml(order.id)}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-key="${orderKey(order)}">Bezorgd</button></span></li>`).join("");
+    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li><button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${escapeHtml(order.id)} uit deze rit halen">−</button><b>${escapeHtml(order.city)} · ${escapeHtml(order.id)}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-key="${orderKey(order)}">Bezorgd</button></span>${orderNote(order)}</li>`).join("");
     fragment.querySelectorAll(".remove-route-stop").forEach((button) => {
       button.addEventListener("click", () => removeOrderFromRoute(button.dataset.orderKey, index));
     });
@@ -1976,6 +1976,17 @@ function mapsAddress(order) {
   return order.fullAddress
     || [order.addressLine, [order.postcode, order.city].filter(Boolean).join(" "), order.country || "Nederland"].filter(Boolean).join(", ")
     || [order.postcode, order.city, "Nederland"].filter(Boolean).join(", ");
+}
+
+// What is in Shopify's Notities box on the order (top right): the customer's
+// checkout remark, or a delivery instruction a colleague put there. A comment
+// in the order's timeline never reaches the planning; Shopify does not hand
+// those to apps. The planning's own lines below [Vervoersplanning] stay out.
+function orderNote(order, { short = false } = {}) {
+  const note = String(order.customerNote || "").trim();
+  if (!note) return "";
+  const text = short && note.length > 120 ? `${note.slice(0, 117)}…` : note;
+  return `<span class="order-note">Opmerking: ${escapeHtml(text)}</span>`;
 }
 
 function productSummary(order) {
@@ -3371,7 +3382,7 @@ function renderConcepts() {
     // so it can be taken out of one of them.
     const stops = route ? route.orders.map((order) => {
       const ook = plannedFor(order);
-      return `<li><b>${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}</b><span>${productSummary(order)}</span>${ook ? `<span class="concept-also">Staat ook in rit ${escapeHtml(ook.number || "?")} op ${formatDate(ook.date)}: haal hem uit een van de twee.</span>` : ""}</li>`;
+      return `<li><b>${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}</b><span>${productSummary(order)}</span>${orderNote(order, { short: true })}${ook ? `<span class="concept-also">Staat ook in rit ${escapeHtml(ook.number || "?")} op ${formatDate(ook.date)}: haal hem uit een van de twee.</span>` : ""}</li>`;
     }).join("") : "";
     return `<article class="concept-card">
       <div class="concept-head">
