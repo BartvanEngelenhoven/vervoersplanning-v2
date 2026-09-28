@@ -15,8 +15,6 @@ const CONFIG = {
   packageDetourMinutes: 60,
   maxRouteMinutes: 330,
   nearlyOverMinutes: 15,
-  farRouteCombineMinutes: 75,
-  exceptionRouteMinutes: 480,
   // Orders on either side of a compass line pool their budgets when they lie
   // this close together: Dalfsen and Ommen, 12 km apart, fell into two sectors
   // and were each too far alone, although together they fit.
@@ -154,7 +152,7 @@ function decide(order) {
   }
 
   if (!order.addressComplete) return { decision: "review", reason: "Bezorgadres is onvolledig" };
-  if (CONFIG.ritregelsV3 && !hasKnownPoint(order)) {
+  if (!hasKnownPoint(order)) {
     return { decision: "review", reason: "Adres buiten Nederland en België of zonder geldige postcode: de rijtijd is niet te schatten, zelf beoordelen" };
   }
   if (order.deliveryAppointmentLocked) return { decision: "review", reason: "Aflevermoment is afgestemd; niet verplaatsen zonder toestemming" };
@@ -203,34 +201,60 @@ function buildRoutes(included) {
     // An order pooled with a neighbour across a sector line drives with that
     // neighbour, so it is grouped with it.
     const region = item.poolRegion || regionFor(item.order);
-    if (!groups.has(region)) groups.set(region, []);
-    groups.get(region).push(item.order);
+    if (!groups.has(region)) groups.set(region, new Map());
+    // The trips as they were weighed stay together; an order chosen by hand
+    // joins whichever of them it fits.
+    const seeds = groups.get(region);
+    const seed = item.tripKey || orderKey(item.order);
+    if (!seeds.has(seed)) seeds.set(seed, []);
+    seeds.get(seed).push(item.order);
   }
 
   const routes = [];
-  for (const [region, orders] of groups) {
-    orders.sort((a, b) => routeSortScore(a) - routeSortScore(b));
-    let current = [];
-    for (const order of orders) {
-      const candidate = optimizedStopOrder([...current, order]);
-      const candidateSummary = routeSummary(region, candidate);
-      const currentSummary = current.length ? routeSummary(region, current) : null;
-      const addedMinutes = currentSummary ? candidateSummary.totalMinutes - currentSummary.totalMinutes : candidateSummary.totalMinutes;
-      const loadTooHigh = candidateSummary.loadKnown && candidateSummary.load > CONFIG.vehicleCapacityKg;
-      const routeTooLong = candidateSummary.totalMinutes > CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
-      const usefulFarCombination = sameRouteCorridor(current, order)
-        && candidateSummary.totalMinutes <= CONFIG.exceptionRouteMinutes
-        && (currentSummary?.overByMinutes || addedMinutes <= CONFIG.farRouteCombineMinutes || countryName(order) === "BE");
-      if (current.length && (loadTooHigh || (routeTooLong && !usefulFarCombination))) {
-        routes.push(routeSummary(region, optimizedStopOrder(current)));
-        current = [order];
-      } else {
-        current = candidate;
-      }
-    }
-    if (current.length) routes.push(routeSummary(region, optimizedStopOrder(current)));
+  for (const [region, seeds] of groups) {
+    for (const trip of dayTrips([...seeds.values()])) routes.push(routeSummary(region, trip));
   }
   return CONFIG.ritregelsV3 ? mergeNeighbourRoutes(routes) : routes;
+}
+
+// Orders heading one way are cut into trips that each fit a working day and the
+// van. The two orders that save the most kilometres by sharing a trip (out to
+// each and back, against one loop past both) are joined first, then the next
+// pair, as long as the joined trip still fits. Filling one trip per direction in
+// a fixed order, as before, never proposed more than four routes and let a trip
+// run on to eight hours: Geijsteren, Arcen, Geleen and Oost-West-en-Middelbeers
+// came out as one 6:23 day.
+function dayTrips(seeds) {
+  const dayLimit = CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
+  const trips = seeds.map((orders) => [...orders]);
+  const tripOf = new Map();
+  trips.forEach((trip, index) => trip.forEach((order) => tripOf.set(order, index)));
+  // An address the planning cannot place sits on the depot on paper; joined to
+  // anything, the trip's minutes would be fiction.
+  const orders = trips.flat();
+  const pairs = [];
+  for (let i = 0; i < orders.length; i += 1) {
+    for (let j = i + 1; j < orders.length; j += 1) {
+      if (!hasKnownPoint(orders[i]) || !hasKnownPoint(orders[j])) continue;
+      const a = orderPoint(orders[i]);
+      const b = orderPoint(orders[j]);
+      const saving = distanceKm(DEPOT_POINT, a) + distanceKm(DEPOT_POINT, b) - distanceKm(a, b);
+      if (saving > 0) pairs.push({ a: orders[i], b: orders[j], saving });
+    }
+  }
+  pairs.sort((x, y) => y.saving - x.saving || orderKey(x.a).localeCompare(orderKey(y.a)) || orderKey(x.b).localeCompare(orderKey(y.b)));
+  for (const { a, b } of pairs) {
+    const from = tripOf.get(a);
+    const into = tripOf.get(b);
+    if (from === into) continue;
+    const joined = routeSummary("", optimizedStopOrder([...trips[from], ...trips[into]]));
+    if (joined.totalMinutes > dayLimit) continue;
+    if (joined.loadKnown && joined.load > CONFIG.vehicleCapacityKg) continue;
+    trips[from] = joined.orders;
+    for (const order of trips[into]) tripOf.set(order, from);
+    trips[into] = [];
+  }
+  return trips.filter((trip) => trip.length).map((trip) => optimizedStopOrder(trip));
 }
 
 function routeSummary(region, orders) {
@@ -249,6 +273,9 @@ function routeSummary(region, orders) {
     driveMinutes: driveEstimate,
     totalMinutes,
     overByMinutes: Math.max(0, totalMinutes - CONFIG.maxRouteMinutes),
+    // A stop without a place sits on the depot on paper, so the minutes above
+    // leave its drive out.
+    unknownPoint: orders.some((order) => !hasKnownPoint(order)),
   };
 }
 
@@ -349,11 +376,6 @@ function optimizedStopOrder(orders) {
   return ordered;
 }
 
-function routeSortScore(order) {
-  const point = orderPoint(order);
-  return bearingFromDepot(point) * 10 + distanceKm(DEPOT_POINT, point) / 10;
-}
-
 function deliveryMinutes(order) {
   // Worked out here from the products, never taken from order.deliveryMinutes.
   // The backend stamps that field with its own copy of the rule, and when it
@@ -364,6 +386,7 @@ function deliveryMinutes(order) {
 }
 
 function routeWarning(route) {
+  if (route.unknownPoint) return "Rijtijd onbekend: een adres ligt buiten Nederland en België of heeft geen geldige postcode; zelf nakijken";
   if (route.loadKnown && route.load > CONFIG.vehicleCapacityKg) return `Let op laadcapaciteit: ${route.load.toLocaleString("nl-NL")} kg`;
   if (!route.overByMinutes) return "Binnen 5:30 uur op basis van de schatting";
   if (route.overByMinutes <= CONFIG.nearlyOverMinutes) return `Bijna passend: ${route.overByMinutes} min boven 5:30 uur`;
@@ -471,7 +494,7 @@ function renderRules() {
   const budget = (rule) => rule.budgetMinutes === Infinity ? "hoe ver ook" : `tot ${formatMinutes(rule.budgetMinutes)} heen/terug`;
   const dagGrens = formatMinutes(CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes);
   const kaarten = [
-    ["Rijplaten", `Altijd eigen bezorging ${budget(transportRules.rijplaten)}. Orders dezelfde kant op tellen hun tijd bij elkaar op, dus samen mogen ze verder${v3 ? `. Liggen twee orders vlak bij elkaar maar net aan weerszijden van een windrichting (binnen ${CONFIG.neighbourPoolKm} km), dan tellen ze toch samen` : ""}.`],
+    ["Rijplaten", `Altijd eigen bezorging ${budget(transportRules.rijplaten)}. Orders in dezelfde rit tellen hun tijd bij elkaar op, dus samen mogen ze verder${v3 ? `. Liggen twee orders vlak bij elkaar maar net aan weerszijden van een windrichting (binnen ${CONFIG.neighbourPoolKm} km), dan tellen ze toch samen` : ""}.`],
     ["Grote slowfeeders", `${alwaysOwnTransportProducts.length} producttitels uit de vaste lijst gaan altijd zelf, ${budget(transportRules.alwaysOwn)}.${v3 ? " Rijplaten en XXL bakken dezelfde kant op rijden mee als de extra rijtijd binnen hun eigen budget past; het hooihuisje maakt hun budget niet groter." : ""}`],
     ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Anders via DHL.`],
     ["Al het andere", `Gaat als pakket via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit ${formatMinutes(CONFIG.packageDetourMinutes)} langer van worden. Zo'n pakket krijgt bij het inplannen in Shopify de tag 'eigen bezorging', zodat het niet ook met DHL meegaat.`],
@@ -484,7 +507,8 @@ function renderRules() {
     ["Aankondiging", state.announceLive
       ? "Om 16:00 de dag voor een ingeplande rit gaan de betaalde orders in Shopify op verzonden, met de verzendmail aan de klant. Bezorgd melden stuurt daarna geen tweede mail."
       : "Staat op proef. Om 16:00 de dag voor een ingeplande rit schrijft het systeem in de agenda op welke orders het zou aankondigen, maar er gaat niets naar Shopify en niets naar klanten."],
-    ["Lengte van een dag", `Ritten starten en eindigen op ${CONFIG.depot}. Boven ${formatMinutes(CONFIG.maxRouteMinutes)} volgt een waarschuwing. Pakketten liften mee zolang de rit onder ${dagGrens} blijft.`],
+    ["Lengte van een dag", `Ritten starten en eindigen op ${CONFIG.depot}. Orders dezelfde kant op worden geknipt in ritten van hooguit ${dagGrens}, en elke rit moet passen binnen de budgetten van zijn eigen orders; zo komen er zoveel ritten als er werk is. Boven ${formatMinutes(CONFIG.maxRouteMinutes)} volgt een waarschuwing. Pakketten liften mee zolang de rit onder ${dagGrens} blijft.`],
+    ["Buitenland", "Een adres in België wordt geschat uit de postcode. Een adres in een ander land staat onder Controleren: daar is de rijtijd niet te schatten. Kies je Toch zelf bezorgen, dan wordt het een eigen rit met de melding Rijtijd onbekend."],
   ];
   holder.innerHTML = kaarten.map(([titel, tekst]) => `<article><b>${titel}</b><p>${escapeHtml(tekst)}</p></article>`).join("");
 }
@@ -1168,7 +1192,7 @@ function renderPlanningMap() {
   const routeKeys = new Set(route.orders.map(orderKey));
   const addableOrders = state.openPlan ? [] : state.decisions
     .filter((item) => !routeKeys.has(orderKey(item.order)) && !["exclude", "planned", "concept"].includes(item.decision))
-    .filter((item) => !CONFIG.ritregelsV3 || hasKnownPoint(item.order))
+    .filter((item) => hasKnownPoint(item.order))
     .map((item) => item.order)
     .map((order) => {
       const nextRoute = routeSummary(route.region, optimizedStopOrder([...route.orders, order]));
@@ -1222,7 +1246,7 @@ function renderPlanningMap() {
 function renderAllOrdersMap(holder) {
   const openOrders = state.decisions
     .filter((item) => !item.order.cancelled && !item.order.fulfilled)
-    .filter((item) => !CONFIG.ritregelsV3 || hasKnownPoint(item.order));
+    .filter((item) => hasKnownPoint(item.order));
   if (!openOrders.length) {
     holder.innerHTML = '<p class="empty">Geen open orders om op de kaart te tonen.</p>';
     return;
@@ -1528,19 +1552,23 @@ function renderSuggestions() {
   });
 }
 
+// Weighed as any addition is: a parcel when the route grows by an hour at most,
+// a rijplaten order or XXL bak within its own budget. A flat two hours here let
+// a DHL parcel 85 minutes away into a hand-made route, and planned it tagged
+// "eigen bezorging", where no other route screen would have offered it.
 function nearbySuggestions() {
   if (!state.manualRoute || state.openPlan) return [];
-  const routeOrders = manualRouteOrders();
-  if (!routeOrders.length) return [];
+  // The route as shown: parcels that joined it on their own are stops too.
+  const route = state.routes[0];
+  const routeOrders = route?.orders || [];
+  if (!routeOrders.length || route.unknownPoint) return [];
   const routeKeys = new Set(routeOrders.map(orderKey));
-  const currentRouteMinutes = routeSummary("rit", optimizedStopOrder(routeOrders)).totalMinutes;
+  const inOrder = optimizedStopOrder(routeOrders);
   return state.decisions
     .filter((item) => suggestionCandidate(item, routeKeys))
-    .map((item) => {
-      const nextRoute = routeSummary("rit", optimizedStopOrder([...routeOrders, item.order]));
-      return { order: item.order, extraMinutes: Math.max(0, nextRoute.totalMinutes - currentRouteMinutes), routeWouldBeMinutes: nextRoute.totalMinutes };
-    })
-    .filter((entry) => entry.extraMinutes <= 120 && entry.routeWouldBeMinutes <= CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes)
+    .map((item) => ({ item, fit: additionFor(inOrder, item.order) }))
+    .filter(({ item, fit }) => fitsAsAddition(fit, item.order, item.decision))
+    .map(({ item, fit }) => ({ order: item.order, extraMinutes: Math.max(0, fit.extra), routeWouldBeMinutes: fit.totaal }))
     .sort((a, b) => a.extraMinutes - b.extraMinutes)
     .slice(0, 3);
 }
@@ -1550,18 +1578,22 @@ function suggestionCandidate(item, routeKeys) {
   if (routeKeys.has(orderKey(order)) || state.manualRoute?.removed?.has(orderKey(order))) return false;
   if (["exclude", "planned", "concept"].includes(item.decision)) return false;
   if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) return false;
-  return !CONFIG.ritregelsV3 || hasKnownPoint(order);
+  return hasKnownPoint(order);
 }
 
-function sameRouteCorridor(routeOrders, candidate) {
-  return routeOrders.some((order) => regionFor(order) === regionFor(candidate) || countryName(order) && countryName(order) === countryName(candidate));
-}
-
+// The Worker stores Shopify's two-letter country code; the address text only
+// decides for records older than that, and then only its last part. Matching
+// "belg" anywhere put a Dutch Belgiëlaan in Belgium, and every country but these
+// two came back empty, so a Swiss 8001 and a Danish 8000 were read as Dutch
+// postcodes and placed in Flevoland.
 function countryName(order) {
-  const text = [order.country, order.fullAddress].filter(Boolean).join(" ");
-  if (/belg|\bbe\b/i.test(text)) return "BE";
-  if (/nederland|netherlands|\bnl\b/i.test(text)) return "NL";
-  return "";
+  const code = String(order.country || "").trim().toUpperCase();
+  if (/^[A-Z]{2}$/.test(code)) return code;
+  const last = String(order.country || order.fullAddress || "").split(",").pop().trim();
+  if (!last || /\d/.test(last)) return "";
+  if (/^(belgi[eë]|belgium|belgique)$/i.test(last)) return "BE";
+  if (/^(nederland|netherlands|the netherlands|holland)$/i.test(last)) return "NL";
+  return last.toUpperCase();
 }
 
 // Where an order is: the point the backend sent (the driver's phone gets no
@@ -1577,6 +1609,9 @@ function estimatedPoint(order) {
   const postcode = String(order.postcode || "").replace(/\s+/g, "").toUpperCase();
   const country = countryName(order);
   const number = Number((postcode.match(/\d+/) || [0])[0]);
+  // Outside the two countries the postcode table knows, any guess is a place in
+  // the Netherlands: no point, and the order goes to Controleren.
+  if (country && country !== "NL" && country !== "BE") return null;
   if (CONFIG.ritregelsV3) {
     // Only a Dutch or Belgian postcode says where an order is. A German or Czech
     // one used to land on the depot itself: 0:20 to Velké Březno.
@@ -1918,10 +1953,8 @@ function clearForceInclude(order) {
   rebuildPlanning();
 }
 
-// Orders heading the same way share one trip, so they are weighed together: the
-// drive has to fit inside the budgets they bring between them. When it does not,
-// the order paying least for the detour it causes drops out and the rest is
-// weighed again, because losing it may well bring the trip back within budget.
+// Orders heading the same way share trips, so they are weighed together: each
+// trip's drive has to fit inside the budgets its orders bring between them.
 function qualifyCandidates() {
   const byRegion = new Map();
   for (const item of state.decisions.filter((entry) => entry.decision === "candidate")) {
@@ -1929,8 +1962,47 @@ function qualifyCandidates() {
     if (!byRegion.has(region)) byRegion.set(region, []);
     byRegion.get(region).push(item);
   }
-  for (const [region, candidates] of byRegion) applyPool(region, candidates, evaluatePool(candidates));
+  for (const [region, candidates] of byRegion) applyRegion(region, candidates, evaluateRegion(candidates));
   if (CONFIG.ritregelsV3) poolAcrossSectorLines();
+}
+
+// A direction is weighed trip by trip, cut into days as buildRoutes will show
+// them. Weighing it as one trip let Groningen, Drachten and Heerenveen share six
+// hours of budget that no single day holds; cut into two days, Groningen then
+// drove five hours on its own two. When a trip is over, the order paying least
+// for its detour leaves it, and the rest is cut into days again, because without
+// it the others may well fit.
+function evaluateRegion(candidates) {
+  const pool = [...candidates];
+  const dropped = [];
+  for (;;) {
+    const itemOf = new Map(pool.map((item) => [item.order, item]));
+    const trips = dayTrips(pool.map((item) => [item.order])).map((orders) => {
+      const items = orders.map((order) => itemOf.get(order));
+      return { items, result: evaluatePool(items) };
+    });
+    const leaving = trips.filter((trip) => trip.result.dropped.length).map((trip) => trip.result.dropped[0]);
+    if (!leaving.length) return { trips, dropped, size: candidates.length };
+    for (const item of leaving) {
+      pool.splice(pool.indexOf(item), 1);
+      dropped.push(item);
+    }
+  }
+}
+
+function applyRegion(region, candidates, evaluation) {
+  for (const item of candidates) {
+    item.poolRegion = region;
+    item.droppedFromPool = false;
+    item.poolReview = false;
+    item.tripKey = "";
+  }
+  markDropped(region, evaluation.dropped, evaluation.size);
+  evaluation.trips.forEach((trip, index) => applyTrip(region, trip.result, `${region}#${index}`));
+}
+
+function tripHolding(evaluation, item) {
+  return evaluation.trips.find((trip) => trip.items.includes(item));
 }
 
 // A parcel that happens to sit next to a planned route is cheaper to drop off
@@ -1943,19 +2015,24 @@ function addNearbyPackages() {
   // them on screen but in neither the saved route nor Shopify.
   if (state.openPlan || state.openConcept) return;
   const removed = state.manualRoute?.removed || new Set();
+  // A parcel already on a hand-made route is a stop of it: merged in a second
+  // time it showed twice, with two Bezorgd buttons and 25 minutes too many.
+  const onRoute = new Set(state.routes.flatMap((route) => route.orders.map(orderKey)));
   const parcels = state.decisions.filter((entry) => entry.decision === "dhl" || entry.taggedParcel);
   for (const item of parcels) {
     const order = item.order;
     if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) continue;
+    if (onRoute.has(orderKey(order))) continue;
     // Taken out of this route by the planner: it stays out.
     if (removed.has(orderKey(order))) continue;
-    if (CONFIG.ritregelsV3 && !hasKnownPoint(order)) continue;
+    if (!hasKnownPoint(order)) continue;
 
     // Routes are packed to the edge of a day before parcels are offered them,
     // so without this a couple of parcels would quietly turn 5:30 into 7:30.
     const dayLimit = CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes;
     let best = null;
     state.routes.forEach((route, index) => {
+      if (route.unknownPoint) return;
       const merged = routeSummary(route.region, optimizedStopOrder([...route.orders, order]));
       const grows = merged.totalMinutes - route.totalMinutes;
       if (grows > CONFIG.packageDetourMinutes || merged.totalMinutes > dayLimit) return;
@@ -1964,6 +2041,7 @@ function addNearbyPackages() {
     if (!best) continue;
 
     state.routes[best.index] = best.merged;
+    onRoute.add(orderKey(order));
     item.decision = "include";
     item.parcel = true;
     item.reason = `Pakketorder, maar de rit naar ${routeLabel(best.merged)} wordt er maar ${formatMinutes(best.grows)} langer van; goedkoper zelf meenemen. ${dueDateReason(order)}`;
@@ -2488,6 +2566,7 @@ function mergeNeighbourRoutes(routes) {
     let best = null;
     for (let i = 0; i < list.length; i += 1) {
       for (let j = i + 1; j < list.length; j += 1) {
+        if (list[i].unknownPoint || list[j].unknownPoint) continue;
         if (!close(list[i], list[j])) continue;
         const combined = routeSummary(list[i].region, optimizedStopOrder([...list[i].orders, ...list[j].orders]));
         if (combined.totalMinutes > dayLimit) continue;
@@ -2561,17 +2640,11 @@ function evaluatePool(candidates) {
   return { fixed, kept, dropped, verdict, drive, budget, basis, size: candidates.length };
 }
 
-function applyPool(region, candidates, result) {
-  const { fixed, kept, dropped, verdict, drive, budget } = result;
-  for (const item of candidates) {
-    item.poolRegion = region;
-    item.droppedFromPool = false;
-    item.poolReview = false;
-  }
+function markDropped(region, dropped, size) {
   for (const item of dropped) {
     item.droppedFromPool = true;
     item.decision = item.plan.overflow;
-    const samen = result.size > 1 ? `, ook samen met de andere orders richting ${region}` : "";
+    const samen = size > 1 ? `, ook samen met de andere orders richting ${region}` : "";
     item.reason = item.plan.overflow === "dhl"
       ? `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt; gaat als pakket via DHL`
       : `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt${samen}`;
@@ -2583,13 +2656,20 @@ function applyPool(region, candidates, result) {
       item.reason = "In Shopify getagd als eigen bezorging, maar zit in geen rit. Neem hem mee in een rit, of haal de tag in Shopify weg zodat hij met DHL gaat";
     }
   }
+}
+
+// One trip's verdict on the orders in it. The trip key keeps them together when
+// buildRoutes draws the routes, so the route shown is the trip that was weighed.
+function applyTrip(region, result, tripKey) {
+  const { fixed, kept, verdict, drive, budget } = result;
+  for (const item of [...fixed, ...kept]) item.tripKey = tripKey;
   for (const item of fixed) {
     item.decision = "include";
     item.reason = `${item.plan.label}: ${routeMinutesFromDepot(item.order)}; gaat altijd zelf, hoe ver ook. ${dueDateReason(item.order)}`;
   }
   if (!kept.length) return;
 
-  const samen = kept.length > 1 ? `${kept.length} orders richting ${region} samen ` : "";
+  const samen = kept.length > 1 ? `${kept.length} orders in één rit richting ${region} samen ` : "";
   const gezamenlijk = kept.length > 1 ? "gezamenlijke " : "";
   let shared;
   if (budget === Infinity) {
@@ -2627,11 +2707,15 @@ function poolAcrossSectorLines() {
       const members = pooled.filter((other) => other.poolRegion === region && !other.droppedFromPool);
       const looseThere = pooled.filter((other) => other.poolRegion === region && other.droppedFromPool && near(other));
       const group = [...members, ...looseThere, item];
-      const trial = evaluatePool(group);
-      const everyoneKept = members.every((member) => trial.kept.includes(member) || trial.fixed.includes(member));
-      const noneWorse = members.every((member) => member.decision !== "include" || trial.verdict === "include" || trial.fixed.includes(member));
-      if (trial.kept.includes(item) && everyoneKept && noneWorse) {
-        applyPool(region, group, trial);
+      const trial = evaluateRegion(group);
+      const everyoneKept = members.every((member) => !trial.dropped.includes(member));
+      const noneWorse = members.every((member) => {
+        if (member.decision !== "include") return true;
+        const trip = tripHolding(trial, member);
+        return trip.result.verdict === "include" || trip.result.fixed.includes(member);
+      });
+      if (!trial.dropped.includes(item) && everyoneKept && noneWorse) {
+        applyRegion(region, group, trial);
         break;
       }
     }

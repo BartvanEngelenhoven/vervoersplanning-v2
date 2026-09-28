@@ -102,8 +102,9 @@ test("een hooihuisje maakt het budget van een verre rijplatenorder niet oneindig
   const nieuw = plan(v3, [huisje, groningen]);
   assert.equal(nieuw.decision(huisje), "include");
   assert.equal(nieuw.decision(groningen), "far");
-  // The old rules let it through: this is what the change is about.
-  assert.equal(plan(v2, [huisje, groningen]).decision(groningen), "include");
+  // The old rules let it through. Weighed per day-trip, they no longer do:
+  // Hensbroek and Groningen are no single day, so Groningen pays its own way.
+  assert.equal(plan(v2, [huisje, groningen]).decision(groningen), "far");
 });
 
 test("een rijplatenorder vlak bij een hooihuisje rijdt mee", () => {
@@ -131,7 +132,8 @@ test("een adres in Tsjechië staat niet op het depot maar op Controleren", () =>
   const uitkomst = plan(v3, [tsjechie]);
   assert.equal(uitkomst.decision(tsjechie), "review");
   assert.match(uitkomst.reason(tsjechie), /buiten Nederland/);
-  assert.equal(plan(v2, [tsjechie]).decision(tsjechie), "include", "zo ging het mis");
+  // Abroad is never guessed onto a Dutch postcode, whichever rules are on.
+  assert.equal(plan(v2, [tsjechie]).decision(tsjechie), "review");
 });
 
 test("buren aan weerszijden van een windrichting tellen samen (Dalfsen en Ommen)", () => {
@@ -273,6 +275,120 @@ test("de bezorger krijgt een concept-order niet aangeboden", () => {
   const uitkomst = plan(v3, [doorn, woerden]);
   v3.state.heldKeys = new Set();
   assert.equal(uitkomst.decision(woerden), "concept");
+});
+
+const dagGrens = 345;
+const ruif = ["1x Vierkante slowfeeder ruif 120 x 120 cm"];
+
+test("een richting met meer dan een dag werk wordt meer dan één rit", () => {
+  const geijsteren = order("Geijsteren", 51.56, 6.03);
+  const arcen = order("Arcen", 51.48, 6.18);
+  const geleen = order("Geleen", 50.97, 5.83);
+  const oostWest = order("Oost West en Middelbeers", 51.46, 5.26, { shop: DSP, products: ruif });
+  for (const regels of [v2, v3]) {
+    const uitkomst = plan(regels, [geijsteren, arcen, geleen, oostWest]);
+    assert.ok(uitkomst.routes.length >= 2, `${uitkomst.routes.length} rit(ten)`);
+    for (const route of uitkomst.routes) {
+      if (route.orders.length > 1) assert.ok(route.totalMinutes <= dagGrens, `${route.orders.map((item) => item.city).join(" > ")}: ${route.totalMinutes} min`);
+    }
+  }
+});
+
+test("orders in alle richtingen geven meer dan vier ritten, geen langer dan een dag", () => {
+  const huisjes = [
+    ["Groningen", 53.22, 6.57], ["Leeuwarden", 53.20, 5.80], ["Den Helder", 52.96, 4.76], ["Enschede", 52.22, 6.89],
+    ["Winterswijk", 51.97, 6.72], ["Maastricht", 50.85, 5.69], ["Eindhoven", 51.44, 5.47], ["Middelburg", 51.50, 3.61], ["Den Haag", 52.07, 4.30],
+  ].map(([plaats, lat, lon]) => order(plaats, lat, lon, { shop: DSP, products: ruif }));
+  for (const regels of [v2, v3]) {
+    const uitkomst = plan(regels, huisjes);
+    assert.ok(uitkomst.routes.length > 4, `${uitkomst.routes.length} ritten`);
+    for (const route of uitkomst.routes) {
+      if (route.orders.length > 1) assert.ok(route.totalMinutes <= dagGrens, `${route.orders.map((item) => item.city).join(" > ")}: ${route.totalMinutes} min`);
+    }
+    assert.equal(uitkomst.routes.flatMap((route) => route.orders).length, huisjes.length, "elke order zit in precies één rit");
+  }
+});
+
+test("Groningen, Drachten en Heerenveen: elke rit past binnen de budgetten van zijn eigen orders", () => {
+  const groningen = order("Groningen", 53.22, 6.57);
+  const drachten = order("Drachten", 53.11, 6.10);
+  const heerenveen = order("Heerenveen", 52.96, 5.92);
+  for (const regels of [v2, v3]) {
+    const uitkomst = plan(regels, [groningen, drachten, heerenveen]);
+    for (const route of uitkomst.routes) {
+      const budget = route.orders.length * 120;
+      assert.ok(route.driveMinutes <= budget * 1.2, `${route.orders.map((item) => item.city).join(" > ")}: ${route.driveMinutes} min rijden tegen ${budget}`);
+    }
+    // Whatever is proposed to drive is in a route; nothing include hangs loose.
+    const inRoute = new Set(uitkomst.routes.flatMap((route) => route.orders.map((item) => item.id)));
+    for (const item of [groningen, drachten, heerenveen]) {
+      if (uitkomst.decision(item) === "include") assert.ok(inRoute.has(item.id), `${item.city} staat op Meenemen maar in geen rit`);
+    }
+  }
+});
+
+test("Zwitserland, Denemarken en Oostenrijk komen niet in Flevoland terecht", () => {
+  const zurich = order("Zürich", null, null, { country: "CH", postcode: "8001" });
+  const aarhus = order("Aarhus", null, null, { country: "DK", postcode: "8000" });
+  const innsbruck = order("Innsbruck", null, null, { shop: DSP, products: hooihuisje, country: "AT", postcode: "6020" });
+  const lelystad = order("Lelystad", 52.52, 5.47);
+  for (const regels of [v2, v3]) {
+    const uitkomst = plan(regels, [zurich, aarhus, innsbruck, lelystad]);
+    for (const item of [zurich, aarhus, innsbruck]) assert.equal(uitkomst.decision(item), "review", `${item.city} (${regels === v2 ? "oude" : "nieuwe"} regels)`);
+    assert.ok(uitkomst.routes.every((route) => route.orders.every((item) => item === lelystad)));
+  }
+});
+
+test("een Nederlandse Belgiëlaan ligt niet in België", () => {
+  const { fn } = v2;
+  assert.equal(fn.countryName({ fullAddress: "Belgiëlaan 3, 3512 AB Utrecht" }), "");
+  assert.equal(fn.countryName({ country: "NL", fullAddress: "Belgiëlaan 3, 3512 AB Utrecht, Netherlands" }), "NL");
+  assert.equal(fn.countryName({ fullAddress: "Kerkstraat 1, 2000 Antwerpen, Belgium" }), "BE");
+  assert.equal(fn.countryName({ fullAddress: "Bahnhofstrasse 1, 8001 Zürich, Switzerland" }), "SWITZERLAND");
+});
+
+test("een pakket dat al in een eigen rit zit, komt er niet nog een keer bij", () => {
+  const doorn = order("Doorn", 52.03, 5.32);
+  const zeist = order("Zeist", 52.09, 5.23);
+  const driebergen = order("Driebergen", 52.05, 5.28, { shop: DSP, products: ["1x Slowfeeder hooinet"] });
+  for (const regels of [v2, v3]) {
+    const { state, fn } = regels;
+    plan(regels, [doorn, zeist, driebergen]);
+    state.manualRoute = { keys: [doorn, zeist, driebergen].map(fn.orderKey), keepOrder: false, removed: new Set() };
+    fn.rebuildPlanning();
+    const stops = state.routes[0].orders.map((item) => item.id);
+    state.manualRoute = null;
+    assert.equal(new Set(stops).size, stops.length, `dubbel: ${stops.join(", ")}`);
+    assert.equal(stops.length, 3);
+  }
+});
+
+test("Kan er makkelijk bij biedt een pakket alleen aan als de rit hooguit een uur langer wordt", () => {
+  const veenendaal = order("Veenendaal", 52.03, 5.56);
+  const utrecht = order("Utrecht", 52.09, 5.12, { shop: DSP, products: ["1x Slowfeeder hooinet"] });
+  const renswoude = order("Renswoude", 52.07, 5.54, { shop: DSP, products: ["1x Slowfeeder hooinet"] });
+  for (const regels of [v2, v3]) {
+    const { state, fn } = regels;
+    plan(regels, [veenendaal, utrecht, renswoude]);
+    state.manualRoute = { keys: [fn.orderKey(veenendaal)], keepOrder: false, removed: new Set() };
+    fn.rebuildPlanning();
+    const aangeboden = fn.nearbySuggestions().map((entry) => entry.order.id);
+    const opRit = state.routes[0].orders.map((item) => item.id);
+    state.manualRoute = null;
+    assert.ok(!aangeboden.includes(utrecht.id), "Utrecht kost meer dan een uur");
+    assert.ok(!aangeboden.includes(renswoude.id) || !opRit.includes(renswoude.id), "wat al meerijdt, wordt niet nog eens aangeboden");
+  }
+});
+
+test("een adres zonder plek wordt nooit bij een andere rit gevoegd", () => {
+  const { fn } = v3;
+  const kleve = order("Kleve", null, null, { country: "DE", postcode: "47533" });
+  const veenendaal = order("Veenendaal", 52.03, 5.56);
+  plan(v3, [kleve, veenendaal]);
+  const ritten = fn.dayTrips([[kleve], [veenendaal]]);
+  assert.equal(ritten.length, 2);
+  assert.equal(fn.routeSummary("x", [kleve]).unknownPoint, true);
+  assert.match(fn.routeWarning(fn.routeSummary("x", [kleve])), /Rijtijd onbekend/);
 });
 
 let failed = 0;
