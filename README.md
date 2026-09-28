@@ -27,7 +27,7 @@ Er zijn twee codes, allebei Worker-secrets:
 - `OPERATOR_KEY`: de planner. Opent alles.
 - `DRIVER_KEY`: de bezorger. Ziet alleen de ritten van de week ervoor tot de week erna, mag daarvan bezorgd melden en een rit afbreken, en mag onderweg een order meenemen in de rit die hij nu rijdt, maar alleen een order die de planning zelf zou aanbieden (betaald, adres compleet, geen afspraak, de dag blijft binnen 5:45, waarbij wat vandaag al bezorgd is meetelt). Van andere orders krijgt de telefoon alleen plaats, postcodecijfers, product en een punt op ongeveer een kilometer nauwkeurig; geen naam, straat of telefoon.
 
-Er zit geen rem op verkeerde pogingen. Kies daarom lange codes, minstens twaalf tekens. De browser onthoudt de code; *Uitloggen* (in het menu, en onderaan het bezorgersscherm) vergeet hem op dat apparaat. Een code wijzigen doe je met `npx wrangler secret put OPERATOR_KEY` (of `DRIVER_KEY`); iedereen moet daarna de nieuwe code invullen.
+Na vijf verschillende verkeerde codes vanaf één adres wacht dat adres vijf minuten, ook met de goede code (op IPv6 telt een blok van /48 als één adres). Alleen de plannerscode zet de teller op nul. Staan planner en bezorger achter hetzelfde internetadres, dan wachten ze samen. De rem remt raden af maar houdt het niet tegen, want wie veel adressen heeft, raadt verder: kies daarom lange codes, minstens twaalf tekens. De browser onthoudt de code; *Uitloggen* (in het menu, en onderaan het bezorgersscherm) vergeet hem op dat apparaat. Een code wijzigen doe je met `npx wrangler secret put OPERATOR_KEY` (of `DRIVER_KEY`); iedereen moet daarna de nieuwe code invullen.
 
 ## Privacy (AVG)
 

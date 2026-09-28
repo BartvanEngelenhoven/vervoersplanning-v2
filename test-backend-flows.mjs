@@ -977,20 +977,23 @@ await test("rem op codes: na 5 verschillende verkeerde codes wacht dat adres 5 m
   try {
     assert.equal((await vanaf(thuis, PLANNER)).status, 200, "na vijf minuten weer welkom");
     for (let poging = 1; poging <= 4; poging += 1) assert.equal((await vanaf(thuis, `nog-fout-${poging}`)).status, 401);
-    assert.equal((await vanaf(thuis, DRIVER)).status, 200, "de goede code zet de teller op nul");
+    assert.equal((await vanaf(thuis, PLANNER)).status, 200, "de plannerscode zet de teller op nul");
     for (let poging = 1; poging <= 4; poging += 1) assert.equal((await vanaf(thuis, `weer-fout-${poging}`)).status, 401);
+    // The driver's code does not: else it could be used to guess the planner's.
+    assert.equal((await vanaf(thuis, DRIVER)).status, 200);
+    assert.equal((await vanaf(thuis, "weer-fout-5")).status, 429);
   } finally {
     Date.now = echteNu;
   }
 });
 
-await test("rem op codes: een telefoon op IPv6 telt per blok, niet per adres", async () => {
+await test("rem op codes: op IPv6 telt een /48 als één adres", async () => {
   const env = makeEnv();
   const vanaf = (ip, key) => call(env, "GET", "/whoami", { key, headers: { "cf-connecting-ip": ip } });
-  const adressen = ["2001:db8:aa:1::1", "2001:db8:aa:1::2", "2001:0db8:00aa:0001:ffff::3", "2001:db8:aa:1:1:2:3:4", "2001:db8:aa:1::5"];
+  const adressen = ["2001:db8:aa:1::1", "2001:db8:aa:2::2", "2001:0db8:00aa:0c7::3", "2001:db8:aa:1:1:2:3:4", "2001:db8:aa:ffff::5"];
   for (let index = 0; index < 4; index += 1) assert.equal((await vanaf(adressen[index], `fout-${index}`)).status, 401);
-  assert.equal((await vanaf(adressen[4], "fout-4")).status, 429);
-  assert.equal((await vanaf("2001:db8:aa:2::1", PLANNER)).status, 200, "een ander blok niet");
+  assert.equal((await vanaf(adressen[4], "fout-4")).status, 429, "65.536 netwerken in een /48 tellen als één");
+  assert.equal((await vanaf("2001:db8:ab::1", PLANNER)).status, 200, "een ander blok niet");
 });
 
 await test("bezorger: zijn stops met punt, orders in ritten na zijn twee weken bezet, en wat vandaag al bezorgd is", async () => {

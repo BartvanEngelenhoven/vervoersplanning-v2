@@ -2258,8 +2258,9 @@ function roleFor(request, env) {
 // right code included: without a pause, a short code is found by trying. The
 // same wrong code sent again (three requests at once, or a screen still
 // holding an old code) counts once, and a request without a code is not an
-// attempt. A right code clears the count. Only a keyed hash of a wrong code is
-// kept, for a quarter of an hour.
+// attempt. Only the planner's code clears the count: cleared by the driver's,
+// whoever holds that short code could go on guessing the planner's for ever.
+// Only a keyed hash of a wrong code is kept, for a quarter of an hour.
 const BRAKE_PREFIX = "brake:";
 const BRAKE_ATTEMPTS = 5;
 const BRAKE_WAIT_MS = 5 * 60_000;
@@ -2280,8 +2281,9 @@ async function codeBrake(request, env) {
   const now = Date.now();
   const record = (await env.PLANNING_ORDERS.get(key, "json").catch(() => null)) || {};
   if (record.until > now) return brakeAnswer(record.until - now, env);
-  if (roleFor(request, env)) {
-    if (record.wrong?.length || record.until) await env.PLANNING_ORDERS.delete(key).catch(() => {});
+  const role = roleFor(request, env);
+  if (role) {
+    if (role === "planner" && record.wrong?.length) await env.PLANNING_ORDERS.delete(key).catch(() => {});
     return null;
   }
   const mark = (await hmacHex(`brake|${env.OPERATOR_KEY || ""}|${env.DRIVER_KEY || ""}`, provided)).slice(0, 16);
@@ -2302,8 +2304,8 @@ function brakeAnswer(waitMs, env) {
   return response;
 }
 
-// Who is trying: the address Cloudflare saw. A phone on IPv6 gets a whole block
-// of addresses, so its first half (the /64) counts as one.
+// Who is trying: the address Cloudflare saw. On IPv6 one party easily holds a
+// whole block (a free tunnel gives 65,536 networks), so a /48 counts as one.
 function brakeAddress(request) {
   const ip = String(request.headers.get("cf-connecting-ip") || "").trim().toLowerCase();
   if (!ip.includes(":")) return ip;
@@ -2311,7 +2313,7 @@ function brakeAddress(request) {
   const left = head ? head.split(":") : [];
   const right = tail ? tail.split(":") : [];
   const groups = ip.includes("::") ? [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right] : left;
-  return groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, "")).join(":");
+  return groups.slice(0, 3).map((group) => group.replace(/^0+(?=.)/, "")).join(":");
 }
 
 function anyRoleAllowed(request, env) {
