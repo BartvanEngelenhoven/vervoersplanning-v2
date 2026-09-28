@@ -934,6 +934,25 @@ await test("een pakket dat Shopify verzendt, houdt geen adres en ook geen kaartp
   assert.ok(await kv.get(`geo:${plaat.order.fullAddress.toLowerCase()}`));
 });
 
+await test("DHL/FVR: de planner zet een order uit de voorstellen, bewaard los van Shopify, en zet hem terug", async () => {
+  const env = makeEnv();
+  const a = await seedOrder(env, DRS, "#DRS880");
+  const zet = (key, body) => call(env, "POST", "/orders/shipping", { key, body });
+  assert.equal((await zet(DRIVER, { orderKey: a.key, extern: true })).status, 403, "alleen de planner");
+  assert.equal((await zet(PLANNER, { orderKey: "evil.myshopify.com:#1", extern: true })).status, 400);
+  assert.equal((await zet(PLANNER, { orderKey: a.key, extern: true })).status, 200);
+  const planner = (await call(env, "GET", "/orders", { key: PLANNER })).data;
+  assert.equal(planner.find((item) => item.id === a.order.id).extern, true);
+  const driver = (await call(env, "GET", "/orders", { key: DRIVER })).data;
+  assert.equal(driver.find((item) => item.id === a.order.id).extern, true, "de telefoon biedt hem niet aan");
+  // A webhook rewrites the order record; the choice stays.
+  await webhook(env, DRS, { ...a.raw, note: "Andere notitie", updated_at: new Date(Date.now() + 1000).toISOString() });
+  assert.equal((await call(env, "GET", "/orders", { key: PLANNER })).data.find((item) => item.id === a.order.id).extern, true);
+  assert.equal((await zet(PLANNER, { orderKey: a.key, extern: false })).status, 200);
+  assert.equal((await call(env, "GET", "/orders", { key: PLANNER })).data.find((item) => item.id === a.order.id).extern, undefined);
+  assert.equal(shop.orders.get(a.order.shopifyOrderId).tags.size, 0, "Shopify onaangeroerd");
+});
+
 await test("bezorger: zijn stops met punt, orders in ritten na zijn twee weken bezet, en wat vandaag al bezorgd is", async () => {
   const env = makeEnv();
   const a = await seedPlaced(env, DRS, "#DRS850", { city: "Doorn", zip: "3941 BX", lat: 52.031234, lon: 5.324567 });

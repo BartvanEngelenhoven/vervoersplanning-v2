@@ -28,7 +28,7 @@ const CONFIG = {
 };
 
 const state = { concepts: [], heldKeys: new Set(), openConcept: null, routeInHandConcept: null, orders: [], decisions: [], routes: [], reviewRoutes: [], history: [], deliveredKeys: new Map(), historyLoaded: false, selected: new Set(), manualRoute: null, suggestions: [], plan: [], planStops: [], dayNotes: [], announcements: [], announceLive: false, allOrders: [], geo: {}, role: null, driverRouteId: null, openPlan: null, routeInHand: null, placing: false, lastFetchOk: false, driveMinutes: null, driveDepot: "", driveEstimateUnavailable: false };
-const decisionLabels = { include: "Meenemen", planned: "Ingepland", concept: "In concept", review: "Controleren", dhl: "DHL", far: "Te ver", exclude: "Niet meenemen" };
+const decisionLabels = { include: "Meenemen", planned: "Ingepland", concept: "In concept", review: "Controleren", dhl: "DHL/FVR", far: "Te ver", exclude: "Niet meenemen" };
 
 // Every order brings its own travel budget to the trip and the budgets pool, so
 // two rijplaten may share a 240 minute drive although neither pays for 120 on
@@ -139,6 +139,9 @@ function decide(order) {
   if (order.fulfilled) return { decision: "exclude", reason: "Order is al volledig bezorgd" };
   if (order.refunded) return { decision: "exclude", reason: "Order is terugbetaald" };
   if (order.deliveryMethod === "pickup") return { decision: "exclude", reason: "Klant haalt de bestelling af" };
+  // Taken out of a proposal with the "−": the planner decided it does not go
+  // with the van. It stays out of every proposal until put back.
+  if (order.extern) return { decision: "dhl", external: true, reason: "Uit een voorstel gehaald: gaat met DHL/FVR, niet met de bus" };
 
   const plan = transportPlan(order);
   if (!plan) {
@@ -148,7 +151,7 @@ function decide(order) {
     if (order.ownDeliveryTagged) {
       return { decision: "review", taggedParcel: true, reason: "In Shopify getagd als eigen bezorging, maar zit in geen rit. Neem hem mee in een rit, of haal de tag in Shopify weg zodat hij met DHL gaat" };
     }
-    return { decision: "dhl", reason: "Staat niet in de vaste eigen-bezorgingslijst en is geen XXL bak; gaat als pakket via DHL" };
+    return { decision: "dhl", reason: "Staat niet in de vaste eigen-bezorgingslijst en is geen XXL bak; gaat via DHL/FVR" };
   }
 
   if (!order.addressComplete) return { decision: "review", reason: "Bezorgadres is onvolledig" };
@@ -163,7 +166,7 @@ function decide(order) {
 }
 
 function applyManualDecision(order, automatic) {
-  if (!forcedIncludes.has(orderKey(order))) return automatic;
+  if (!forcedIncludes.has(orderKey(order)) || order.extern) return automatic;
   if (order.cancelled || order.fulfilled || order.refunded || order.deliveryMethod === "pickup") return automatic;
   // Chosen by hand, but not without an address to drive to.
   if (!order.addressComplete) return automatic;
@@ -476,7 +479,7 @@ function renderSummary() {
     const delen = [
       count("planned") ? `${count("planned")} ingepland` : "",
       count("concept") ? `${count("concept")} in een concept` : "",
-      count("dhl") ? `${count("dhl")} via DHL` : "",
+      count("dhl") ? `${count("dhl")} via DHL/FVR` : "",
       count("far") ? `${count("far")} te ver` : "",
       count("exclude") ? `${count("exclude")} vervallen of opgehaald` : "",
       state.selected.size ? `${state.selected.size} geselecteerd` : "",
@@ -496,8 +499,9 @@ function renderRules() {
   const kaarten = [
     ["Rijplaten", `Altijd eigen bezorging ${budget(transportRules.rijplaten)}. Orders in dezelfde rit tellen hun tijd bij elkaar op, dus samen mogen ze verder${v3 ? `. Liggen twee orders vlak bij elkaar maar net aan weerszijden van een windrichting (binnen ${CONFIG.neighbourPoolKm} km), dan tellen ze toch samen` : ""}.`],
     ["Grote slowfeeders", `${alwaysOwnTransportProducts.length} producttitels uit de vaste lijst gaan altijd zelf, ${budget(transportRules.alwaysOwn)}.${v3 ? " Rijplaten en XXL bakken dezelfde kant op rijden mee als de extra rijtijd binnen hun eigen budget past; het hooihuisje maakt hun budget niet groter." : ""}`],
-    ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Anders via DHL.`],
-    ["Al het andere", `Gaat als pakket via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit ${formatMinutes(CONFIG.packageDetourMinutes)} langer van worden. Zo'n pakket krijgt bij het inplannen in Shopify de tag 'eigen bezorging', zodat het niet ook met DHL meegaat.`],
+    ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Anders via DHL/FVR.`],
+    ["Uit een voorstel gehaald", "Met het min-teken haal je een order uit een voorstel. Hij gaat dan met DHL/FVR en komt niet meer in een voorstel. Onder Orders zet Terug naar de planning hem terug."],
+    ["Al het andere", `Gaat via DHL/FVR, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit ${formatMinutes(CONFIG.packageDetourMinutes)} langer van worden. Zo'n pakket krijgt bij het inplannen in Shopify de tag 'eigen bezorging', zodat het niet ook met DHL meegaat.`],
     ["Net erover", v3
       ? `Zit een groep orders tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan staat hij als rit onder Controleren: met één klik inplannen, of eerst een order eruit halen.`
       : `Zit een rit tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan komen de orders bij Controleren te staan in plaats van dat ze afvallen.`],
@@ -1322,7 +1326,7 @@ function renderAllOrdersMap(holder) {
       <span><i class="map-dot planned"></i> Ingepland</span>
       <span><i class="map-dot concept"></i> In concept</span>
       <span><i class="map-dot review"></i> Controleren</span>
-      <span><i class="map-dot dhl"></i> DHL</span>
+      <span><i class="map-dot dhl"></i> DHL/FVR</span>
       <span><i class="map-dot far"></i> Te ver</span>
       <span><i class="map-dot exclude"></i> Niet meenemen</span>
     </div>`;
@@ -1447,6 +1451,10 @@ function renderOrders() {
     const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
     button.addEventListener("click", () => forceInclude(order));
   });
+  document.querySelectorAll(".clear-extern").forEach((button) => {
+    const order = state.allOrders.find((item) => orderKey(item) === button.dataset.orderKey);
+    button.addEventListener("click", () => setExternal(order, false, button));
+  });
   document.querySelectorAll(".clear-force-include").forEach((button) => {
     const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
     button.addEventListener("click", () => clearForceInclude(order));
@@ -1460,7 +1468,7 @@ function groupedOrderSections(items) {
     ["planned", "Ingepland", "Staan al in een rit in de agenda"],
     ["concept", "In concept", "Staan in een concept dat nog geen dag heeft"],
     ["review", "Controleren", "Betaling, afspraak, adres of net boven het budget: jij beslist"],
-    ["dhl", "DHL", "Niet in de vaste eigen-bezorgingslijst en geen XXL bak, of een XXL bak die te ver ligt"],
+    ["dhl", "DHL/FVR", "Niet in de vaste eigen-bezorgingslijst en geen XXL bak, een XXL bak die te ver ligt, of door de planner uit een voorstel gehaald"],
     ["far", "Te ver voor eigen vervoer", "Rijplaten buiten het bereik die op geen enkele rit passen"],
     ["exclude", "Niet meenemen", "Geannuleerd, terugbetaald, afgehaald of al verzonden"],
   ];
@@ -1524,6 +1532,7 @@ function selectedOrdersList() {
 function manualActionButton(item, key, isForced) {
   if (item.decision === "planned" || item.decision === "concept") return "";
   if (item.order.cancelled || item.order.fulfilled || item.order.refunded || item.order.deliveryMethod === "pickup") return "";
+  if (item.order.extern) return `<button class="button manual-action clear-extern" type="button" data-order-key="${key}">Terug naar de planning</button>`;
   if (isForced) return `<button class="button subtle-action clear-force-include" type="button" data-order-key="${key}">Automatisch advies</button>`;
   if (item.decision === "include") return "";
   return `<button class="button manual-action force-include" type="button" data-order-key="${key}">Toch zelf bezorgen</button>`;
@@ -1656,7 +1665,7 @@ function nearbySuggestions() {
 function suggestionCandidate(item, routeKeys) {
   const order = item.order;
   if (routeKeys.has(orderKey(order)) || state.manualRoute?.removed?.has(orderKey(order))) return false;
-  if (["exclude", "planned", "concept"].includes(item.decision)) return false;
+  if (["exclude", "planned", "concept"].includes(item.decision) || order.extern) return false;
   if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) return false;
   return hasKnownPoint(order);
 }
@@ -1833,6 +1842,32 @@ async function addOrderToRoute(order, routeIndex) {
   rebuildPlanning();
 }
 
+// The "−" on a proposal: this order does not go with the van but with DHL or
+// FVR. Saved in the Worker, so it holds after a refresh and on every screen,
+// and the order stays out of every proposal until put back under Orders. It
+// used to leave a proposal of its own behind, or come straight back.
+async function setExternal(order, extern, button = null) {
+  if (!order || !ensureOperatorKey()) return;
+  if (button) button.disabled = true;
+  let response = null;
+  try {
+    response = await backendFetch(`${CONFIG.apiBaseUrl}/orders/shipping`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ orderKey: orderKey(order), extern }),
+    });
+  } catch {
+    response = null;
+  }
+  if (!response?.ok) {
+    window.alert(response ? await errorText(response, "Opslaan is niet gelukt. Probeer het opnieuw.") : "Geen verbinding. Probeer het opnieuw.");
+    if (button) button.disabled = false;
+    return;
+  }
+  for (const item of state.allOrders) if (orderKey(item) === orderKey(order)) item.extern = extern;
+  rebuildPlanning();
+}
+
 // A change to a proposal is kept. Proposals are worked out afresh on every
 // refresh, so a stop taken out came straight back, and on another screen it
 // had never gone. The proposal becomes a concept with the change in it, saved
@@ -1889,7 +1924,7 @@ async function removeOrderFromRoute(key, routeIndex) {
     return;
   }
   if (!state.manualRoute) {
-    await keepProposal(route, keys);
+    await setExternal(stop, true);
     return;
   }
   // Remembered, so a parcel taken out is not slipped straight back in.
@@ -2175,7 +2210,7 @@ function addNearbyPackages() {
   for (const item of parcels) {
     const order = item.order;
     if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) continue;
-    if (onRoute.has(orderKey(order))) continue;
+    if (onRoute.has(orderKey(order)) || order.extern) continue;
     // Taken out of this route by the planner: it stays out.
     if (removed.has(orderKey(order))) continue;
     if (!hasKnownPoint(order)) continue;
@@ -2660,7 +2695,7 @@ function additionAllowed(item) {
   // Held by a concept, or by a route beyond the driver's week: the Worker
   // refuses it, so it is not offered.
   if (state.heldKeys.has(orderKey(order))) return false;
-  if (order.refunded || order.cancelled) return false;
+  if (order.refunded || order.cancelled || order.extern) return false;
   // Abroad the planning has no place for it, so no honest detour either.
   if (!hasKnownPoint(order)) return false;
   // The Worker weighs the driver's additions on the points it has on record
@@ -2954,7 +2989,7 @@ function markDropped(region, dropped, size) {
     item.decision = item.plan.overflow;
     const samen = size > 1 ? `, ook samen met de andere orders richting ${region}` : "";
     item.reason = item.plan.overflow === "dhl"
-      ? `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt; gaat als pakket via DHL`
+      ? `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt; gaat via DHL/FVR`
       : `${item.plan.label} kost meer omrijden dan de ${formatMinutes(item.plan.budgetMinutes)} die deze order meebrengt${samen}`;
     // Tagged "eigen bezorging" in Shopify, the DHL pile skips it: back under
     // DHL here, nobody would deliver it.

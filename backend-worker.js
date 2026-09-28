@@ -238,6 +238,10 @@ async function route(request, env) {
     return new Response(null, { status: 204, headers: corsHeaders(env) });
   }
 
+  if (request.method === "POST" && url.pathname === "/orders/shipping") {
+    return setOrderShipping(request, env);
+  }
+
   if (request.method === "GET" && url.pathname === "/orders") {
     return getOrders(request, env);
   }
@@ -417,7 +421,7 @@ function deliveredOn(record, day) {
 // What the driver's phone needs of an order that is not one of their stops: enough
 // to weigh "can it come along", nothing to identify the customer by. Name, street,
 // phone and note only reach the phone for stops of their own routes, via /plan.
-const DRIVER_ORDER_FIELDS = ["id", "shopifyOrderId", "shopDomain", "webshop", "city", "dueDate", "paid", "paymentStatus", "refunded", "cancelled", "fulfilled", "deliveryMethod", "addressComplete", "deliveryAppointmentLocked", "weightKg", "products", "announced", "ownDeliveryTagged"];
+const DRIVER_ORDER_FIELDS = ["extern", "id", "shopifyOrderId", "shopDomain", "webshop", "city", "dueDate", "paid", "paymentStatus", "refunded", "cancelled", "fulfilled", "deliveryMethod", "addressComplete", "deliveryAppointmentLocked", "weightKg", "products", "announced", "ownDeliveryTagged"];
 
 function orderCountry(order) {
   if (order.country) return String(order.country);
@@ -441,6 +445,9 @@ async function getOrders(request, env) {
     keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json"))
   )).filter(Boolean);
   orders.sort((a, b) => (a.dueDate || "9999-12-31").localeCompare(b.dueDate || "9999-12-31"));
+  // Taken out of a proposal by the planner: goes with DHL or FVR, not the van.
+  const extern = new Set((await listAll(env, SHIPPING_PREFIX)).map((key) => key.name.slice(SHIPPING_PREFIX.length)));
+  if (extern.size) orders = orders.map((order) => (extern.has(`${order.shopDomain}:${order.id}`) ? { ...order, extern: true } : order));
 
   if (role === "driver") {
     // Cancelled ones stay in (without anything personal), so a stop in the
@@ -605,7 +612,7 @@ async function forgetCustomerOrder(request, env) {
     const delivered = await env.PLANNING_ORDERS.get(`delivered:${key}`, "json");
     if (!order && !delivered) continue;
     found = true;
-    const keys = [`order:${key}`, `delivered:${key}`, `${ANNOUNCED_PREFIX}${key}`, `${REPORTING_PREFIX}${key}`, `${REPORT_SEEN_PREFIX}${key}`, `${REPORT_UNSURE_PREFIX}${key}`];
+    const keys = [`order:${key}`, `delivered:${key}`, `${ANNOUNCED_PREFIX}${key}`, `${REPORTING_PREFIX}${key}`, `${REPORT_SEEN_PREFIX}${key}`, `${REPORT_UNSURE_PREFIX}${key}`, `${SHIPPING_PREFIX}${key}`];
     for (const record of [order, delivered?.order]) if (record?.fullAddress || record?.city) keys.push(geoKeyForOrder(record));
     for (const store of [env.PLANNING_ORDERS, env.OLD_KV].filter(Boolean)) {
       for (const name of new Set(keys)) {
@@ -616,6 +623,29 @@ async function forgetCustomerOrder(request, env) {
     }
   }
   return json({ ok: true, found, removed: [...removed] }, 200, env);
+}
+
+// The planner taking an order out of a proposal with the "−": it goes with DHL
+// or FVR, not with the van, until the planner puts it back. Kept apart from the
+// order record, which every Shopify webhook writes anew, and never sent to
+// Shopify. Gone by itself after 120 days, long after the order has shipped.
+const SHIPPING_PREFIX = "shipping:";
+
+async function setOrderShipping(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const orderKey = String(payload.orderKey || "");
+  const split = orderKey.indexOf(":");
+  if (split < 0 || !KNOWN_SHOPS.includes(orderKey.slice(0, split)) || !/^#[\w-]+$/.test(orderKey.slice(split + 1))) {
+    return json({ error: "Onbekende order." }, 400, env);
+  }
+  if (payload.extern) {
+    await env.PLANNING_ORDERS.put(`${SHIPPING_PREFIX}${orderKey}`, JSON.stringify({ extern: true, at: new Date().toISOString() }), { expirationTtl: 120 * DAY_SECONDS });
+  } else {
+    await env.PLANNING_ORDERS.delete(`${SHIPPING_PREFIX}${orderKey}`);
+  }
+  return json({ ok: true, orderKey, extern: Boolean(payload.extern) }, 200, env);
 }
 
 // Until fourteen days after it was cancelled, counted the same way: a refund or a

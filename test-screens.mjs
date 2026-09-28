@@ -239,31 +239,35 @@ await test("de opmerking uit Shopify (Notities) staat bij de order, veilig ge-es
   assert.ok(kort.length < 200 && kort.includes("…"));
 });
 
-await test("een stop uit een voorstel halen bewaart het voorstel als concept, zonder die stop", async () => {
+await test("het min-teken in een voorstel zet de order op DHL/FVR, bewaard, en hij komt in geen voorstel meer", async () => {
   realClock();
   const doorn = order("Doorn", 52.03, 5.32);
   const zeist = order("Zeist", 52.09, 5.23);
   const leersum = order("Leersum", 52.01, 5.43);
   scene({ orders: [doorn, zeist, leersum] });
   assert.equal(fn.allRoutes().length, 1);
-  let stored = null;
-  const calls = worker({
-    "/concepts/save": async (body) => {
-      stored = { id: body.id, name: body.name, orderKeys: body.orderKeys, createdAt: new RealDate().toISOString() };
-      return [200, { ok: true, concept: stored }];
-    },
-    "/plan": () => [200, { routes: [], dayNotes: [], announcements: [], concepts: stored ? [stored] : [] }],
-  });
+  const calls = worker({ "/orders/shipping": (body) => [200, { ok: true, orderKey: body.orderKey, extern: body.extern }] });
   await fn.removeOrderFromRoute(key(zeist), 0);
-  const save = calls.find((call) => call.path === "/concepts/save").body;
-  assert.deepEqual([...save.orderKeys].sort(), [key(doorn), key(leersum)].sort());
-  assert.equal(state.openConcept?.id, save.id, "het concept staat open");
-  const decision = (item) => state.decisions.find((entry) => entry.order === item).decision;
-  assert.equal(decision(zeist), "include", "Zeist is terug in de planning");
-  assert.equal(decision(doorn), "concept");
-  state.openConcept = null;
-  state.manualRoute = null;
-  state.concepts = [];
+  assert.deepEqual(calls.find((call) => call.path === "/orders/shipping").body, { orderKey: key(zeist), extern: true });
+  assert.ok(!calls.some((call) => call.path === "/concepts/save"), "geen concept");
+  const decision = (item) => state.decisions.find((entry) => entry.order === item);
+  assert.equal(decision(zeist).decision, "dhl");
+  assert.equal(fn.allRoutes().length, 1, "geen aparte rit");
+  assert.ok(!fn.allRoutes()[0].orders.includes(zeist));
+  assert.equal(state.openConcept, null);
+  // Put back under Orders: in the proposal again.
+  await fn.setExternal(zeist, false);
+  assert.equal(decision(zeist).decision, "include");
+  assert.ok(fn.allRoutes()[0].orders.includes(zeist));
+});
+
+await test("een pakket dat op DHL/FVR is gezet, rijdt niet stiekem weer mee", async () => {
+  realClock();
+  const doorn = order("Doorn", 52.03, 5.32);
+  const pakket = order("Driebergen", 52.05, 5.28, { shopDomain: "slowfeeder-specialist.myshopify.com", webshop: "De Slowfeeder Specialist", products: ["1x Slowfeeder hooinet"], extern: true });
+  scene({ orders: [doorn, pakket] });
+  assert.ok(!fn.allRoutes().some((route) => route.orders.includes(pakket)));
+  assert.equal(state.decisions.find((entry) => entry.order === pakket).decision, "dhl");
 });
 
 await test("na Bezorgd staat de stop meteen als bezorgd, ook als verversen daarna mislukt", () => {
