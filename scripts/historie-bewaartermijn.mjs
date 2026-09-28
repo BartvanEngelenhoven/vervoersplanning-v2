@@ -7,7 +7,7 @@
 // Run it yourself, once, from this folder:  node scripts/historie-bewaartermijn.mjs
 // It asks for the planner's code, shows what it will do and asks before
 // changing anything. The work is done by the Worker (/store/tidy-history).
-import { ask, callWorker } from "./planner-vraag.mjs";
+import { ask, callWorker, stop } from "./planner-vraag.mjs";
 
 const code = await ask("Plannerscode: ", { hidden: true });
 const telling = await callWorker("/store/tidy-history", code, { apply: false });
@@ -17,11 +17,12 @@ console.log(`Ouder dan 60 dagen, en dus nu weg: ${telling.removed}.`);
 console.log(`Als eigen bezorging gemarkeerd, zodat ze onder Bezorgd blijven staan: ${telling.marked}.`);
 if (!telling.cleaned && !telling.removed && !telling.marked) {
   console.log("Er is niets te doen.");
-  process.exit(0);
+  stop(0);
 }
 if ((await ask("Doorgaan? Typ ja: ")).toLowerCase() !== "ja") {
   console.log("Niets veranderd.");
-  process.exit(0);
+  stop(0);
 }
 await callWorker("/store/tidy-history", code, { apply: true });
 console.log("Klaar.");
+stop(0);

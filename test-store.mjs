@@ -184,6 +184,114 @@ await test("een klant wissen haalt elke kopie van de order weg, met het kaartpun
   assert.equal((await forget({ shopDomain: DRS, id: "../plan" })).status, 400);
 });
 
+await test("een verzoek dat nog op KV loopt, houdt de kopie tegen tot het klaar is", async () => {
+  const kv = new SqlKV();
+  let release;
+  const slowWrite = new Promise((resolve) => { release = resolve; });
+  let broken = true;
+  const flaky = {
+    list: (options) => (broken ? Promise.reject(new Error("KV list() limit exceeded for the day.")) : kv.list(options)),
+    get: (key, type) => kv.get(key, type),
+    put: async (key, value, options) => {
+      if (key.startsWith("plan-day:")) await slowWrite;
+      return kv.put(key, value, options);
+    },
+    delete: (key) => kv.delete(key),
+  };
+  const { object, ctx } = objectFor({ PLANNING_ORDERS: flaky, OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" });
+  await ctx.waiting;
+  broken = false;
+  const date = "2026-10-05";
+  // Starts on KV (the copy failed a moment ago), and hangs on its write.
+  const note = object.fetch(new Request("https://worker.test/plan/day-note", { method: "POST", headers: { "x-operator-key": PLANNER, "content-type": "application/json" }, body: JSON.stringify({ date, note: "Bus naar de garage" }) }));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  object.copyTriedAt = 0;
+  const status = () => object.fetch(new Request("https://worker.test/store/status", { headers: { "x-operator-key": PLANNER } })).then((response) => response.json());
+  assert.match((await status()).store, /^kv/, "geen kopie zolang de notitie nog schrijft");
+  release();
+  assert.equal((await note).status, 200);
+  assert.equal((await status()).store, "durable-object");
+  assert.equal((await object.store.get(`plan-day:${date}`, "json")).note, "Bus naar de garage", "de notitie is mee");
+});
+
+await test("STORE_COPY_AFTER houdt de kopie even tegen; tot dan werkt alles op KV", async () => {
+  const kv = new SqlKV();
+  await kv.put(`order:${DRS}:#DRS40`, JSON.stringify(order("#DRS40", "Doorn")));
+  const env = { PLANNING_ORDERS: kv, OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test", STORE_COPY_AFTER: new Date(Date.now() + 60_000).toISOString() };
+  const { object, ctx, sql } = objectFor(env);
+  await ctx.waiting;
+  assert.equal(object.copied, null);
+  const orders = await (await object.fetch(new Request("https://worker.test/orders", { headers: { "x-operator-key": PLANNER } }))).json();
+  assert.deepEqual(orders.map((item) => item.id), ["#DRS40"]);
+  object.env = { ...env, STORE_COPY_AFTER: new Date(Date.now() - 1000).toISOString() };
+  await object.fetch(new Request("https://worker.test/orders", { headers: { "x-operator-key": PLANNER } }));
+  assert.ok(object.copied, "na het tijdstip gekopieerd");
+  // Woken again later, it knows the copy is done without asking KV.
+  const again = objectFor({ ...env, PLANNING_ORDERS: { list: () => Promise.reject(new Error("niet meer nodig")) } }, sql);
+  await again.ctx.waiting;
+  assert.ok(again.object.copied);
+});
+
+await test("kan de opslag niet antwoorden, dan zegt de Worker dat netjes, met CORS", async () => {
+  const env = { PLANNING_STORE: { idFromName: () => ({}), get: () => ({ fetch: () => Promise.reject(new Error("Durable Object reset because its code was updated.")) }) }, CORS_ORIGIN: "https://example.test" };
+  const response = await worker.fetch(new Request("https://worker.test/orders", { headers: { "x-operator-key": PLANNER } }), env);
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("access-control-allow-origin"), "https://example.test");
+  assert.match((await response.json()).error, /opslag reageert even niet/);
+  await worker.scheduled({ scheduledTime: Date.now(), cron: "0 14,15 * * *" }, env);
+});
+
+await test("klant wissen: kleine letters en de verkeerde winkel vinden de order toch, ook in de KV-kopie", async () => {
+  const kv = new SqlKV();
+  await kv.put(`order:${DRS}:#DRS50`, JSON.stringify(order("#DRS50", "Doorn")));
+  const { object, ctx } = objectFor({ PLANNING_ORDERS: kv, OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" });
+  await ctx.waiting;
+  assert.ok(await kv.get(`order:${DRS}:#DRS50`), "de KV-kopie heeft hem nog");
+  const forget = (body) => object.fetch(new Request("https://worker.test/store/forget", { method: "POST", headers: { "x-operator-key": PLANNER, "content-type": "application/json" }, body: JSON.stringify(body) })).then((response) => response.json());
+  const result = await forget({ shopDomain: "slowfeeder-specialist.myshopify.com", id: "drs50" });
+  assert.equal(result.found, true);
+  assert.equal(await object.store.get(`order:${DRS}:#DRS50`), null);
+  assert.equal(await kv.get(`order:${DRS}:#DRS50`), null, "ook uit de KV-kopie");
+  assert.equal((await forget({ shopDomain: DRS, id: "#DRS99" })).found, false);
+});
+
+await test("de scripts vragen de code zonder hem te tonen en praten met de Worker", async () => {
+  const { spawn } = await import("node:child_process");
+  const http = await import("node:http");
+  const kv = new SqlKV();
+  await kv.put(`order:${DRS}:#DRS60`, JSON.stringify(order("#DRS60", "Doorn")));
+  const env = { PLANNING_ORDERS: kv, OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" };
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const response = await worker.fetch(new Request(`https://worker.test${req.url}`, { method: req.method, headers: req.headers, body: chunks.length ? Buffer.concat(chunks) : undefined }), env);
+    res.writeHead(response.status, { "content-type": "application/json" });
+    res.end(await response.text());
+  });
+  await new Promise((resolve) => server.listen(0, resolve));
+  const run = (script, input) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [script], { env: { ...process.env, WORKER_URL: `http://localhost:${server.address().port}` } });
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += chunk; });
+    child.stderr.on("data", (chunk) => { output += chunk; });
+    child.on("close", (code) => resolve({ code, output }));
+    child.stdin.end(input);
+  });
+  try {
+    const wissen = await run("scripts/klant-wissen.mjs", `${PLANNER}\nr\n#DRS60\nja\n`);
+    assert.equal(wissen.code, 0, wissen.output);
+    assert.match(wissen.output, /Gewist: order/);
+    assert.ok(!wissen.output.includes(PLANNER), "de code staat niet op het scherm");
+    const fout = await run("scripts/klant-wissen.mjs", "verkeerd\nr\n#DRS60\nja\n");
+    assert.match(fout.output, /Die code klopt niet/);
+    const opruimen = await run("scripts/historie-bewaartermijn.mjs", `${PLANNER}\n`);
+    assert.equal(opruimen.code, 0, opruimen.output);
+    assert.match(opruimen.output, /0 bezorgd-records/);
+  } finally {
+    server.close();
+  }
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);

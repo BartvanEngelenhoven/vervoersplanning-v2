@@ -918,6 +918,22 @@ await test("opnieuw Bezorgd na 'Geen antwoord' voor de webhook er is: Terugdraai
   assert.equal(undo.status, 200, JSON.stringify(undo.data));
 });
 
+await test("een pakket dat Shopify verzendt, houdt geen adres en ook geen kaartpunt", async () => {
+  const env = makeEnv();
+  const kv = env.PLANNING_ORDERS;
+  const pakket = await seedPlaced(env, DSP, "#DSP870", { city: "Doorn", zip: "3941 BX", lat: 52.03, lon: 5.32 });
+  const punt = `geo:${pakket.order.fullAddress.toLowerCase()}`;
+  assert.ok(await kv.get(punt));
+  await webhook(env, DSP, { ...pakket.raw, fulfillment_status: "fulfilled", updated_at: new Date(Date.now() + 1000).toISOString(), fulfillments: [{ created_at: new Date().toISOString() }] });
+  const record = await kv.get(`delivered:${pakket.key}`, "json");
+  assert.equal(record.order.fullAddress, undefined);
+  assert.equal(await kv.get(punt), null);
+  // A van delivery keeps both for its 60 days.
+  const plaat = await seedPlaced(env, DRS, "#DRS871", { city: "Zeist", zip: "3701 AA", lat: 52.09, lon: 5.23 });
+  await webhook(env, DRS, { ...plaat.raw, fulfillment_status: "fulfilled", updated_at: new Date(Date.now() + 1000).toISOString(), fulfillments: [{ created_at: new Date().toISOString() }] });
+  assert.ok(await kv.get(`geo:${plaat.order.fullAddress.toLowerCase()}`));
+});
+
 await test("bezorger: zijn stops met punt, orders in ritten na zijn twee weken bezet, en wat vandaag al bezorgd is", async () => {
   const env = makeEnv();
   const a = await seedPlaced(env, DRS, "#DRS850", { city: "Doorn", zip: "3941 BX", lat: 52.031234, lon: 5.324567 });

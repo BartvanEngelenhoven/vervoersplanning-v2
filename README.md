@@ -136,7 +136,7 @@ Alles staat in één Durable Object met een eigen SQLite-database (`PlanningStor
 
 Tot 28 september 2026 stond alles in Cloudflare KV. Het gratis plan van KV staat maar 1.000 keer per dag een lijst opvragen toe, en twee schermen die de hele dag openstonden, gebruikten dat op. Het gratis plan van deze opslag staat per dag 5 miljoen gelezen rijen en 100.000 geschreven rijen toe, en 100.000 verzoeken. Dat is ruim honderd keer wat de planning gebruikt.
 
-- **De verhuizing.** Bij de eerste start kopieert het object alles uit KV, met vervaldatum en metadata, en daarna nooit meer. KV zelf blijft staan zoals het die dag was, als reservekopie.
+- **De verhuizing.** Het object kopieert alles uit KV, met vervaldatum en metadata, in één keer en daarna nooit meer. Tot dat gelukt is, werkt de site gewoon op KV; lukt het niet (KV geeft een fout), dan probeert het object het vijf minuten later opnieuw. Bij de verhuizing is gedeployd met `--var STORE_COPY_AFTER:<tijd>`, een paar minuten na de deploy: KV heeft tot een minuut nodig om een schrijfactie van elders te laten zien. KV zelf blijft staan zoals het die dag was, als reservekopie. *Klant wissen* wist ook daarin.
 - **De reservekopie weggooien.** Werkt de nieuwe opslag een week goed, gooi de KV-kopie dan weg: er staan klantgegevens in die anders nooit verlopen. `npx wrangler kv namespace delete --binding PLANNING_ORDERS`, en haal daarna het blok `[[kv_namespaces]]` uit `wrangler.toml`.
 - **Nakijken.** `GET /store/status` (met de plannerscode) geeft per soort het aantal sleutels en wanneer de kopie uit KV is gemaakt. Geen klantgegevens.
 - **Verlopen gegevens** zijn meteen onzichtbaar en worden elke dag na de run van 16:00 echt verwijderd.

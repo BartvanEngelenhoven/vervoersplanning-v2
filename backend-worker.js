@@ -85,16 +85,29 @@ const DAY_LIMIT_MINUTES = 345;
 export default {
   async scheduled(event, env) {
     if (!env.PLANNING_STORE) return runScheduled(event, env);
-    await storeStub(env).fetch(`https://${STORE_HOST}/scheduled`, {
-      method: "POST",
-      body: JSON.stringify({ scheduledTime: event.scheduledTime, cron: event.cron }),
-    });
+    try {
+      await storeStub(env).fetch(`https://${STORE_HOST}/scheduled`, {
+        method: "POST",
+        body: JSON.stringify({ scheduledTime: event.scheduledTime, cron: event.cron }),
+      });
+    } catch (error) {
+      // The 16:10 run tries again.
+      console.error("scheduled", error);
+    }
   },
 
   async fetch(request, env) {
     if (!env.PLANNING_STORE) return handleRequest(request, env);
     if (new URL(request.url).hostname === STORE_HOST) return new Response("Not found", { status: 404 });
-    return storeStub(env).fetch(request);
+    try {
+      return await storeStub(env).fetch(request);
+    } catch (error) {
+      // The object itself could not answer: restarted by a deploy, or the free
+      // tier's day spent. Said with CORS headers, or the screen reads nothing.
+      console.error(error);
+      if (kvLimitSpent(error)) return json({ error: KV_LIMIT_MESSAGE }, 503, env);
+      return json({ error: "De opslag reageert even niet. Probeer het zo opnieuw." }, 503, env);
+    }
   },
 };
 
@@ -113,8 +126,20 @@ export class PlanningStore {
     this.store = sqlStore(ctx.storage.sql);
     this.copied = null;
     this.copyTriedAt = 0;
+    this.onKv = 0;
     // The first time, KV's contents come over before anything is answered.
-    ctx.blockConcurrencyWhile(() => this.copyKv());
+    ctx.blockConcurrencyWhile(() => (this.copyDue() ? this.copyKv() : copyFromKv(null, ctx.storage.sql).then((done) => { this.copied = done; })));
+  }
+
+  // STORE_COPY_AFTER holds the copy back for a moment after the deploy: KV takes
+  // up to a minute to show a write from elsewhere, and the old Worker may still
+  // be writing. Until then the object works on KV itself.
+  copyDue() {
+    const kv = this.env.PLANNING_ORDERS;
+    const after = Date.parse(this.env.STORE_COPY_AFTER || "");
+    if (this.copied || !kv || this.onKv > 0) return false;
+    if (!Number.isNaN(after) && Date.now() < after) return false;
+    return !this.copyTriedAt || Date.now() - this.copyTriedAt > 5 * 60_000;
   }
 
   // When KV cannot be read (its day's budget spent, say), the site keeps running
@@ -124,6 +149,8 @@ export class PlanningStore {
     try {
       this.copied = await copyFromKv(this.env.PLANNING_ORDERS, this.ctx.storage.sql);
       this.copyError = null;
+      // Counts only, for wrangler tail on the day of the move.
+      console.log("store", JSON.stringify(this.copied));
     } catch (error) {
       this.copied = null;
       this.copyError = String(error?.message || error).slice(0, 200);
@@ -134,20 +161,30 @@ export class PlanningStore {
 
   async fetch(request) {
     const kv = this.env.PLANNING_ORDERS;
-    if (!this.copied && kv && Date.now() - this.copyTriedAt > 5 * 60_000) await this.ctx.blockConcurrencyWhile(() => this.copyKv());
+    // Never while a request is still working on KV: its writes would land in KV
+    // after the copy, and be lost.
+    if (this.copyDue()) await this.ctx.blockConcurrencyWhile(() => this.copyKv());
     const onStore = Boolean(this.copied) || !kv;
     const env = {
       ...this.env,
       PLANNING_ORDERS: onStore ? this.store : kv,
-      STORE_STATUS: () => ({ store: onStore ? "durable-object" : "kv, kopie nog niet gelukt", copiedFromKv: this.copied, copyError: this.copyError || undefined, keys: this.store.counts() }),
+      // The KV copy of the move day, as long as it exists: erasing a customer
+      // erases them there too.
+      OLD_KV: onStore ? kv : null,
+      STORE_STATUS: () => ({ store: onStore ? "durable-object" : this.copyError ? "kv, kopie mislukt, volgt opnieuw" : "kv, kopie volgt", copiedFromKv: this.copied, copyError: this.copyError || undefined, keys: this.store.counts() }),
     };
-    const url = new URL(request.url);
-    if (url.hostname === STORE_HOST && url.pathname === "/scheduled") {
-      await runScheduled(await request.json(), env);
-      if (onStore) this.store.purge();
-      return new Response("ok");
+    if (!onStore) this.onKv += 1;
+    try {
+      const url = new URL(request.url);
+      if (url.hostname === STORE_HOST && url.pathname === "/scheduled") {
+        await runScheduled(await request.json(), env);
+        if (onStore) this.store.purge();
+        return new Response("ok");
+      }
+      return await handleRequest(request, env);
+    } finally {
+      if (!onStore) this.onKv -= 1;
     }
-    return handleRequest(request, env);
   }
 }
 
@@ -551,21 +588,31 @@ async function forgetCustomerOrder(request, env) {
   const denied = plannerOnly(request, env);
   if (denied) return denied;
   const payload = await request.json().catch(() => ({}));
-  const shopDomain = normalizeShopDomain(payload.shopDomain);
-  const id = String(payload.id || "").trim();
-  if (!shopDomain || !/^#?[\w-]+$/.test(id)) return json({ error: "Winkel en ordernummer zijn nodig." }, 400, env);
-  const key = `${shopDomain}:${id.startsWith("#") ? id : `#${id}`}`;
-  const order = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
-  const delivered = await env.PLANNING_ORDERS.get(`delivered:${key}`, "json");
-  const keys = [`order:${key}`, `delivered:${key}`, `${ANNOUNCED_PREFIX}${key}`, `${REPORTING_PREFIX}${key}`, `${REPORT_SEEN_PREFIX}${key}`, `${REPORT_UNSURE_PREFIX}${key}`];
-  for (const record of [order, delivered?.order]) if (record?.fullAddress || record?.city) keys.push(geoKeyForOrder(record));
-  const removed = [];
-  for (const name of [...new Set(keys)]) {
-    if ((await env.PLANNING_ORDERS.get(name)) === null) continue;
-    await env.PLANNING_ORDERS.delete(name);
-    removed.push(name.slice(0, name.indexOf(":")));
+  const asked = normalizeShopDomain(payload.shopDomain);
+  const number = String(payload.id || "").trim().replace(/^#/, "").toUpperCase();
+  if (!asked || !/^[\w-]+$/.test(number)) return json({ error: "Winkel en ordernummer zijn nodig." }, 400, env);
+  // Order numbers are Shopify's, in capitals with a #. A number typed under the
+  // wrong shop is looked for under the other one too.
+  const shops = [asked, ...KNOWN_SHOPS.filter((shop) => shop !== asked)];
+  const removed = new Set();
+  let found = false;
+  for (const shopDomain of shops) {
+    const key = `${shopDomain}:#${number}`;
+    const order = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
+    const delivered = await env.PLANNING_ORDERS.get(`delivered:${key}`, "json");
+    if (!order && !delivered) continue;
+    found = true;
+    const keys = [`order:${key}`, `delivered:${key}`, `${ANNOUNCED_PREFIX}${key}`, `${REPORTING_PREFIX}${key}`, `${REPORT_SEEN_PREFIX}${key}`, `${REPORT_UNSURE_PREFIX}${key}`];
+    for (const record of [order, delivered?.order]) if (record?.fullAddress || record?.city) keys.push(geoKeyForOrder(record));
+    for (const store of [env.PLANNING_ORDERS, env.OLD_KV].filter(Boolean)) {
+      for (const name of new Set(keys)) {
+        if ((await store.get(name)) === null) continue;
+        await store.delete(name);
+        removed.add(name.slice(0, name.indexOf(":")));
+      }
+    }
   }
-  return json({ ok: true, removed }, 200, env);
+  return json({ ok: true, found, removed: [...removed] }, 200, env);
 }
 
 // Until fourteen days after it was cancelled, counted the same way: a refund or a
@@ -677,6 +724,8 @@ async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
       shopifyUpdatedAt: incoming,
     });
     if (storedOrder) await env.PLANNING_ORDERS.delete(storageKey);
+    // A parcel keeps no address here, and so no point of it either.
+    if (!ownDelivery && merged.fullAddress) await env.PLANNING_ORDERS.delete(geoKeyForOrder(merged)).catch(() => {});
     return planningOrder;
   }
 
