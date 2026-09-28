@@ -14,7 +14,7 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
     <!-- ?v= changes with each release, so phones and browsers fetch the new
          files instead of an old copy that no longer fits the backend. -->
-    <link rel="stylesheet" href="styles.css?v=20260925c" />
+    <link rel="stylesheet" href="styles.css?v=20260928a" />
   </head>
   <body>
     <div class="portal">
@@ -77,6 +77,9 @@
             <span class="slowfeeder"><img src="assets/slowfeeder-logo.png" alt="De Slowfeeder Specialist" /></span>
           </div>
           <button id="refreshMobile" class="button secondary" type="button">Ververs</button>
+          <!-- The sidebar's status line is hidden on a phone; this one says the
+               same, so a refresh that fails there does not go unnoticed. -->
+          <span id="syncMobile" class="mobile-sync" aria-live="polite">Gegevens laden…</span>
         </div>
 
         <section class="view" data-view="vandaag" aria-labelledby="dayLine">
@@ -198,6 +201,6 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
     <script src="config.js?v=20260925c" defer></script>
-    <script src="app.js?v=20260925c" defer></script>
+    <script src="app.js?v=20260928a" defer></script>
   </body>
 </html>
