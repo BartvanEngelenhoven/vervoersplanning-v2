@@ -70,6 +70,10 @@ const pickupOrder = {
 
 assert.equal(mapShopifyOrder(pickupOrder).deliveryMethod, "pickup");
 assert.equal(mapShopifyOrder(pickupOrder).requiresVanRoekelDelivery, false);
+// Pickup said another way: "ophalen" in the title, or Shopify's local pickup code.
+assert.equal(mapShopifyOrder({ ...pickupOrder, tags: "", shipping_lines: [{ title: "Ophalen in Ede" }] }).deliveryMethod, "pickup");
+assert.equal(mapShopifyOrder({ ...pickupOrder, tags: "", shipping_lines: [{ title: "De Rijplaten Specialist", code: "Local Pickup" }] }).deliveryMethod, "pickup");
+assert.equal(mapShopifyOrder({ ...pickupOrder, tags: "", shipping_lines: [{ title: "Bezorgen" }] }).deliveryMethod, "delivery");
 assert.equal(mapShopifyOrder(pickupOrder).paid, false);
 assert.equal(mapShopifyOrder(pickupOrder).addressComplete, false);
 

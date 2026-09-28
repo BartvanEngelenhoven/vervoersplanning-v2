@@ -169,6 +169,10 @@ input:focus, select:focus, button:focus-visible { outline: 3px solid rgba(243,18
 .order-group-heading p { margin: .1rem 0 0; color: var(--muted); font-size: .82rem; }
 .order-group-heading strong { display: grid; place-items: center; min-width: 2rem; height: 2rem; border-radius: 999px; background: #edf1ee; }
 .order-group-list { display: grid; gap: .65rem; }
+.shopify-import { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .5rem .75rem; margin: 0 0 1rem; padding: .75rem .9rem; border: 1px dashed var(--line); border-radius: 12px; background: #fbfcfa; }
+.shopify-import label { display: grid; flex: 1 1 18rem; gap: .25rem; font-size: .9rem; font-weight: 700; }
+.shopify-import input { min-height: 40px; padding: .4rem .6rem; border: 1px solid var(--line); border-radius: 10px; font: inherit; }
+.shopify-import small { flex-basis: 100%; color: var(--muted); }
 .selection-bar { display: flex; align-items: center; justify-content: space-between; gap: .8rem; padding: .75rem .85rem; border-bottom: 1px solid var(--line); background: #fff8e7; }
 .selection-bar div { display: flex; flex-wrap: wrap; gap: .45rem; }
 .selection-bar[hidden] { display: none; }

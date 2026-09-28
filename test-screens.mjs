@@ -296,9 +296,11 @@ await test("een stop die tussen 16:00 en 16:10 bij de rit kwam, gaat mee met de 
 });
 
 await test("een stop die na de aankondiging bij de rit kwam, wordt genoemd: bel de klant", () => {
+  // Evening, after both runs: whatever the time the test itself runs at.
+  clockAt("2026-09-28T17:30:00Z", "Europe/Amsterdam");
   const eerste = order("Doorn", 52.03, 5.32, { announced: true });
   const later = order("Zeist", 52.09, 5.23);
-  const rit = { id: "rit-doorn-7", number: 7, date: fn.daysFromToday(1), name: "Doorn en Zeist", orderKeys: [key(eerste), key(later)] };
+  const rit = { id: "rit-doorn-7", number: 7, date: "2026-09-29", name: "Doorn en Zeist", orderKeys: [key(eerste), key(later)] };
   scene({ orders: [eerste, later], plan: [rit] });
   const verslag = (mode) => [{ date: rit.date, mode, ranAt: new RealDate().toISOString(), routes: [{ id: rit.id, results: [{ key: key(eerste), id: eerste.id, status: "aangekondigd" }] }] }];
   state.announcements = verslag("echt");
@@ -310,6 +312,7 @@ await test("een stop die na de aankondiging bij de rit kwam, wordt genoemd: bel 
   // Everything in the report: nothing extra.
   state.announcements = verslag("echt");
   assert.doesNotMatch(fn.announceLine({ ...rit, orderKeys: [key(eerste)] }), /toegevoegd/);
+  realClock();
 });
 
 function conceptScene() {

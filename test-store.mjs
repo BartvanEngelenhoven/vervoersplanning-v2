@@ -119,10 +119,11 @@ await test("de Worker geeft elk verzoek aan de opslag, en zijn interne adres is 
 await test("de aankondiging van 16:00 loopt via de opslag en ruimt verlopen rijen op", async () => {
   const { object, ctx, sql } = objectFor({ PLANNING_ORDERS: oldKv([]), OPERATOR_KEY: PLANNER, CORS_ORIGIN: "https://example.test" });
   await ctx.waiting;
-  sql.exec("INSERT INTO kv (key, value, expiration) VALUES ('geo:verlopen', '{}', ?)", now - 5);
   const env = { PLANNING_STORE: namespaceFor(object) };
   // 14:00 UTC on a summer day is 16:00 in Amsterdam.
   const at = Date.parse("2026-09-28T14:00:05Z");
+  // Expired by the clock of the run, whatever the time the test runs at.
+  sql.exec("INSERT INTO kv (key, value, expiration) VALUES ('geo:verlopen', '{}', ?)", Math.floor(at / 1000) - 5);
   const realNow = Date.now;
   Date.now = () => at + 5_000;
   try {

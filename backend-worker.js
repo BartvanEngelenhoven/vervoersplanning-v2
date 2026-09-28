@@ -280,6 +280,10 @@ async function route(request, env) {
     return syncShopify(request, env);
   }
 
+  if (request.method === "POST" && url.pathname === "/actions/refresh-orders") {
+    return refreshFromShopify(request, env);
+  }
+
   if (request.method === "POST" && url.pathname === "/routes/estimate") {
     return estimateRoute(request, env);
   }
@@ -684,6 +688,15 @@ async function receiveShopifyOrder(request, env) {
 
 async function storeShopifyOrder(env, shopifyOrder, shopDomain) {
   const planningOrder = mapShopifyOrder(shopifyOrder, shopDomain);
+  // No address and no word of pickup in the order: Shopify's own delivery
+  // method says whether the customer collects it. A pickup order read as a
+  // delivery sat under Controleren as "Bezorgadres is onvolledig".
+  if (planningOrder.deliveryMethod === "delivery" && !planningOrder.addressComplete && !planningOrder.fulfilled && !planningOrder.cancelled) {
+    if ((await shopifyDeliveryMethod(env, shopDomain, planningOrder.shopifyOrderId)) === "PICK_UP") {
+      planningOrder.deliveryMethod = "pickup";
+      planningOrder.requiresVanRoekelDelivery = false;
+    }
+  }
   const storageKey = orderStorageKey(planningOrder);
   const key = `${shopDomain}:${planningOrder.id}`;
   const historyKey = `delivered:${key}`;
@@ -1182,6 +1195,84 @@ async function syncShopify(request, env) {
   }
 
   return json({ ok: true, days, results }, 200, env);
+}
+
+async function shopifyDeliveryMethod(env, shopDomain, shopifyOrderId) {
+  const token = shopifyOrderId ? await shopifyAdminToken(env, shopDomain) : "";
+  if (!token) return null;
+  try {
+    const result = await shopifyGraphql(shopDomain, token, `
+      query DeliveryMethod($id: ID!) {
+        order(id: $id) { fulfillmentOrders(first: 5) { nodes { deliveryMethod { methodType } } } }
+      }
+    `, { id: shopifyOrderId });
+    const types = (result.data?.order?.fulfillmentOrders?.nodes || []).map((node) => node.deliveryMethod?.methodType).filter(Boolean);
+    return types.includes("PICK_UP") ? "PICK_UP" : types[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+// "Ophalen uit Shopify" under Orders: orders read afresh from Shopify and put
+// through the same door as a webhook. With order numbers, those orders (for one
+// that never came in); without, every open order in the planning (for records
+// written by an older version). Only reads Shopify; writes nothing there.
+async function refreshFromShopify(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const names = [...new Set((Array.isArray(payload.names) ? payload.names : [])
+    .map((name) => String(name || "").trim().toUpperCase().replace(/^#?/, "#"))
+    .filter((name) => /^#[A-Z0-9-]{2,20}$/.test(name)))].slice(0, 20);
+  const found = [];
+
+  if (names.length) {
+    for (const name of names) {
+      const shops = name.startsWith("#DSP") ? ["slowfeeder-specialist.myshopify.com"] : name.startsWith("#DRS") ? ["de-rijplaten-specialist.myshopify.com"] : KNOWN_SHOPS;
+      let hit = null;
+      for (const shopDomain of shops) {
+        const orders = await shopifyRestOrders(env, shopDomain, { name, status: "any" });
+        const order = orders.find((item) => String(item.name || "").toUpperCase() === name);
+        if (order) {
+          hit = { shopDomain, order };
+          break;
+        }
+      }
+      if (!hit) {
+        found.push({ name, state: "niet gevonden" });
+        continue;
+      }
+      found.push({ name, ...describeStored(await storeShopifyOrder(env, hit.order, hit.shopDomain)) });
+    }
+  } else {
+    const open = (await Promise.all((await listAll(env, "order:")).map((key) => env.PLANNING_ORDERS.get(key.name, "json")))).filter(Boolean);
+    for (const shopDomain of KNOWN_SHOPS) {
+      const ids = open.filter((order) => order.shopDomain === shopDomain).map((order) => String(order.shopifyOrderId || "").split("/").pop()).filter((id) => /^\d+$/.test(id));
+      for (let start = 0; start < ids.length; start += 100) {
+        const orders = await shopifyRestOrders(env, shopDomain, { ids: ids.slice(start, start + 100).join(","), status: "any", limit: "250" });
+        for (const order of orders) found.push({ name: order.name, ...describeStored(await storeShopifyOrder(env, order, shopDomain)) });
+      }
+    }
+  }
+  return json({ ok: true, found }, 200, env);
+}
+
+function describeStored(order) {
+  if (order.cancelled) return { state: "geannuleerd" };
+  if (order.fulfilled) return { state: "al verzonden" };
+  if (order.deliveryMethod === "pickup") return { state: "afhalen" };
+  return { state: "open" };
+}
+
+async function shopifyRestOrders(env, shopDomain, params) {
+  const token = await shopifyAdminToken(env, shopDomain);
+  if (!token) return [];
+  const url = new URL(`https://${shopDomain}/admin/api/${SHOPIFY_API_VERSION}/orders.json`);
+  for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value);
+  const response = await fetch(url.toString(), { headers: { "content-type": "application/json", "x-shopify-access-token": token }, signal: AbortSignal.timeout(15000) });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`Shopify ${response.status}`);
+  return Array.isArray(data.orders) ? data.orders : [];
 }
 
 async function installedShopDomains(env) {
@@ -2665,8 +2756,9 @@ function deliveryMinutes(lineItems) {
 }
 
 function inferDeliveryMethod(order, tags) {
-  const shippingTitle = String(order.shipping_lines?.[0]?.title || "").toLowerCase();
-  if (tags.includes("afhalen") || shippingTitle.includes("afhalen") || shippingTitle.includes("pickup")) return "pickup";
+  const line = order.shipping_lines?.[0] || {};
+  const text = [line.title, line.code, line.delivery_category].map((value) => String(value || "").toLowerCase()).join(" ");
+  if (/afhalen|ophalen/.test(tags) || /afhalen|ophalen|pick-?\s?up/.test(text)) return "pickup";
   return "delivery";
 }
 

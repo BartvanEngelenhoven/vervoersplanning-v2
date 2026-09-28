@@ -1918,6 +1918,44 @@ async function addOrderToRoute(order, routeIndex) {
 // FVR. Saved in the Worker, so it holds after a refresh and on every screen,
 // and the order stays out of every proposal until put back under Orders. It
 // used to leave a proposal of its own behind, or come straight back.
+// Orders read afresh from Shopify by the Worker: the numbers typed in, or
+// every open order. For an order that never came in, and for one the planning
+// holds an old version of (an afhaal order read as a delivery).
+async function refreshFromShopify(form) {
+  if (!ensureOperatorKey()) return;
+  const input = form.querySelector("#shopifyImportNames");
+  const button = form.querySelector("button");
+  const names = String(input.value || "").split(/[\s,;]+/).map((name) => name.trim()).filter(Boolean);
+  button.disabled = true;
+  button.textContent = "Bezig…";
+  let response = null;
+  try {
+    response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/refresh-orders`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ names }),
+    });
+  } catch {
+    response = null;
+  }
+  button.disabled = false;
+  button.textContent = "Ophalen uit Shopify";
+  if (!response?.ok) {
+    window.alert(response ? await errorText(response, "Ophalen uit Shopify is niet gelukt. Probeer het opnieuw.") : "Geen verbinding. Probeer het opnieuw.");
+    return;
+  }
+  const { found = [] } = await response.json();
+  input.value = "";
+  await refreshData(true);
+  if (names.length) {
+    window.alert(found.map((entry) => `${entry.name}: ${entry.state}`).join("\n") || "Niets gevonden.");
+  } else {
+    const telling = {};
+    found.forEach((entry) => { telling[entry.state] = (telling[entry.state] || 0) + 1; });
+    window.alert(`${found.length} open orders opnieuw ingelezen${found.length ? `: ${Object.entries(telling).map(([state, count]) => `${count} ${state}`).join(", ")}` : ""}.`);
+  }
+}
+
 async function setExternal(order, extern, button = null) {
   if (!order || !ensureOperatorKey()) return;
   if (button) button.disabled = true;
@@ -3617,6 +3655,10 @@ document.querySelector("#refreshButton").addEventListener("click", () => {
 });
 document.querySelector("#searchInput").addEventListener("input", renderOrders);
 document.querySelector("#decisionFilter").addEventListener("change", renderOrders);
+document.querySelector("#shopifyImport")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  refreshFromShopify(event.target);
+});
 document.querySelector("#makeRouteButton")?.addEventListener("click", makeRouteFromSelection);
 document.querySelector("#markSelectedDeliveredButton")?.addEventListener("click", markSelectedDelivered);
 document.querySelector("#clearSelectionButton")?.addEventListener("click", clearSelection);

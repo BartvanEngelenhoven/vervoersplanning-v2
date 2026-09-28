@@ -84,9 +84,11 @@ const shop = {
     this.calls = 0;
     this.failNext = null;
   },
-  add(gid, lines = 1) {
-    this.orders.set(gid, { fulfilled: false, remaining: lines, tags: new Set(), note: "", fulfillments: [] });
+  add(gid, lines = 1, extra = {}) {
+    this.orders.set(gid, { fulfilled: false, remaining: lines, tags: new Set(), note: "", fulfillments: [], ...extra });
   },
+  // The orders as Shopify's REST API would hand them out, by gid.
+  rest: new Map(),
 };
 
 function queryCost(query) {
@@ -113,7 +115,7 @@ function fakeShopify(body) {
     return { data: { order: {
       displayFulfillmentStatus: order.fulfilled ? "FULFILLED" : "UNFULFILLED",
       fulfillments: order.fulfillments.map((id) => ({ id, createdAt: new Date().toISOString(), status: "SUCCESS" })),
-      fulfillmentOrders: { nodes: [{ id: `${variables.id}/fo`, status: order.fulfilled ? "CLOSED" : "OPEN", lineItems: { nodes: [{ id: `${variables.id}/li`, remainingQuantity: order.fulfilled ? 0 : order.remaining }] } }] },
+      fulfillmentOrders: { nodes: [{ id: `${variables.id}/fo`, status: order.fulfilled ? "CLOSED" : "OPEN", deliveryMethod: { methodType: order.methodType || "SHIPPING" }, lineItems: { nodes: [{ id: `${variables.id}/li`, remainingQuantity: order.fulfilled ? 0 : order.remaining }] } }] },
     } } };
   }
 
@@ -190,6 +192,15 @@ globalThis.fetch = async (input, init = {}) => {
     if (creates && shop.onFulfilled) await shop.onFulfilled();
     return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
   }
+  if (/\.myshopify\.com\/admin\/api\/[^/]+\/orders\.json/.test(url)) {
+    const query = new URL(url).searchParams;
+    const shopDomain = new URL(url).hostname;
+    const ids = (query.get("ids") || "").split(",").filter(Boolean);
+    const orders = [...shop.rest.values()].filter((raw) => raw.__shop === shopDomain)
+      .filter((raw) => (query.get("name") ? raw.name === query.get("name") : true) && (ids.length ? ids.includes(String(raw.id)) : true))
+      .map(({ __shop, ...raw }) => raw);
+    return new Response(JSON.stringify({ orders }), { status: 200, headers: { "content-type": "application/json" } });
+  }
   if (url.startsWith("https://api.pdok.nl/")) {
     return new Response(JSON.stringify({ response: { docs: [{ centroide_ll: "POINT(5.6 52.0)", type: "adres", postcode: new URL(url).searchParams.get("q").match(/\d{4}/)?.[0] + "AA" }] } }), { status: 200 });
   }
@@ -257,6 +268,7 @@ async function seedOrder(env, shopDomain, name, overrides = {}) {
   const order = mapShopifyOrder(raw, shopDomain);
   await env.PLANNING_ORDERS.put(`order:${shopDomain}:${order.id}`, JSON.stringify(order));
   shop.add(order.shopifyOrderId);
+  shop.rest.set(order.shopifyOrderId, { ...raw, __shop: shopDomain });
   return { raw, order, key: `${shopDomain}:${order.id}` };
 }
 
@@ -994,6 +1006,31 @@ await test("rem op codes: op IPv6 telt een /48 als één adres", async () => {
   for (let index = 0; index < 4; index += 1) assert.equal((await vanaf(adressen[index], `fout-${index}`)).status, 401);
   assert.equal((await vanaf(adressen[4], "fout-4")).status, 429, "65.536 netwerken in een /48 tellen als één");
   assert.equal((await vanaf("2001:db8:ab::1", PLANNER)).status, 200, "een ander blok niet");
+});
+
+await test("Ophalen uit Shopify: een order die nooit binnenkwam komt erbij, een afhaalorder wordt herkend", async () => {
+  const env = makeEnv();
+  const kv = env.PLANNING_ORDERS;
+  // Never came in: only Shopify has it.
+  const nieuw = shopifyOrder(DSP, "#DSP4846", { shipping_lines: [{ title: "Bezorgen" }] });
+  shop.add(nieuw.admin_graphql_api_id);
+  shop.rest.set(nieuw.admin_graphql_api_id, { ...nieuw, __shop: DSP });
+  // An old record of a pickup: no address, read as a delivery.
+  const afhaal = await seedOrder(env, DRS, "#DRS262615", { shipping_address: null, shipping_lines: [] });
+  shop.orders.get(afhaal.order.shopifyOrderId).methodType = "PICK_UP";
+  await kv.put(`order:${afhaal.key}`, JSON.stringify({ ...(await kv.get(`order:${afhaal.key}`, "json")), deliveryMethod: "delivery", shopifyUpdatedAt: undefined }));
+
+  assert.equal((await call(env, "POST", "/actions/refresh-orders", { key: DRIVER, body: { names: ["#DSP4846"] } })).status, 403);
+  const gericht = await call(env, "POST", "/actions/refresh-orders", { key: PLANNER, body: { names: ["dsp4846", "#DSP1"] } });
+  assert.equal(gericht.status, 200, JSON.stringify(gericht.data));
+  assert.deepEqual(gericht.data.found, [{ name: "#DSP4846", state: "open" }, { name: "#DSP1", state: "niet gevonden" }]);
+  assert.ok(await kv.get(`order:${DSP}:#DSP4846`), "staat nu in de planning");
+
+  const alles = await call(env, "POST", "/actions/refresh-orders", { key: PLANNER, body: {} });
+  assert.equal(alles.status, 200, JSON.stringify(alles.data));
+  assert.ok(alles.data.found.some((entry) => entry.name === "#DRS262615" && entry.state === "afhalen"));
+  assert.equal((await kv.get(`order:${afhaal.key}`, "json")).deliveryMethod, "pickup");
+  assert.equal(shop.orders.get(afhaal.order.shopifyOrderId).tags.size, 0, "niets veranderd in Shopify");
 });
 
 await test("bezorger: zijn stops met punt, orders in ritten na zijn twee weken bezet, en wat vandaag al bezorgd is", async () => {
