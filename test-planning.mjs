@@ -453,6 +453,20 @@ test("wat niet met de bus kan, gaat met FVR (rijplaten) of DHL (slowfeeders); Te
   assert.ok(!beide.routes.some((route) => route.orders.includes(groningen)));
 });
 
+test("voorstellen tonen de uiterste leverdatum, en wat het eerst moet is voorstel A", () => {
+  const { fn } = v2;
+  const doorn = order("Doorn", 52.03, 5.32, { dueDate: isoOffset(6) });
+  const apeldoorn = order("Apeldoorn", 52.21, 5.97, { dueDate: isoOffset(1) });
+  const uitkomst = plan(v2, [doorn, apeldoorn]);
+  assert.equal(uitkomst.routes.length, 2);
+  assert.ok(uitkomst.routes[0].orders.includes(apeldoorn), "morgen gaat voor volgende week");
+  assert.equal(fn.routeDue(uitkomst.routes[0]), isoOffset(1));
+  assert.match(fn.dueLabel(apeldoorn), /class="due soon">uiterlijk morgen/);
+  assert.match(fn.dueLabel({ dueDate: isoOffset(-2) }), /class="due late">te laat, uiterlijk/);
+  assert.match(fn.dueLabel({ dueDate: isoOffset(0) }), /uiterlijk vandaag/);
+  assert.equal(fn.dueLabel({}), "");
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);

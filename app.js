@@ -229,7 +229,9 @@ function buildRoutes(included) {
   for (const [region, seeds] of groups) {
     for (const trip of dayTrips([...seeds.values()])) routes.push(routeSummary(region, trip));
   }
-  return CONFIG.ritregelsV3 ? mergeNeighbourRoutes(routes) : routes;
+  const trips = CONFIG.ritregelsV3 ? mergeNeighbourRoutes(routes) : routes;
+  // What has to go first is proposal A.
+  return trips.sort((a, b) => (routeDue(a) || "9999-12-31").localeCompare(routeDue(b) || "9999-12-31"));
 }
 
 // Orders heading one way are cut into trips that each fit a working day and the
@@ -428,6 +430,26 @@ function formatDate(value) {
   const date = new Date(`${value}T12:00:00`);
   if (Number.isNaN(date.getTime())) return "Onbekend";
   return new Intl.DateTimeFormat("nl-NL", { day: "2-digit", month: "2-digit", year: "numeric" }).format(date);
+}
+
+// The latest day a stop may be delivered, as the planner reads it on a route:
+// the weekday and date, and how that stands against today.
+function dueLabel(order) {
+  const days = order.dueDate ? daysUntil(order.dueDate) : null;
+  if (days === null) return "";
+  const dag = shortDay(order.dueDate);
+  const text = days < 0 ? `te laat, uiterlijk ${dag}` : days === 0 ? `uiterlijk vandaag` : days === 1 ? `uiterlijk morgen (${dag})` : `uiterlijk ${dag}`;
+  return `<span class="due${days < 0 ? " late" : days <= 1 ? " soon" : ""}">${text}</span>`;
+}
+
+function shortDay(isoDate) {
+  const date = dateFromIso(isoDate);
+  return date ? new Intl.DateTimeFormat("nl-NL", { weekday: "short", day: "numeric", month: "short" }).format(date) : isoDate;
+}
+
+// The first due date on a route, which is the one it has to make.
+function routeDue(route) {
+  return route.orders.map((order) => order.dueDate).filter((date) => dateFromIso(date)).sort()[0] || null;
 }
 
 function dateFromIso(value) {
@@ -944,6 +966,11 @@ function renderRouteInHand() {
 async function placeRouteOnDay(date) {
   const route = state.routeInHand;
   if (!route || state.placing) return;
+  // Planned past a stop's last day: said before, not found out afterwards.
+  // A stop already late is late on any day, so it does not ask.
+  const vandaag = isoDay(new Date());
+  const tooLate = route.orders.filter((order) => order.dueDate && order.dueDate >= vandaag && order.dueDate < date);
+  if (tooLate.length && !window.confirm(`${tooLate.map((order) => `${order.id} (uiterlijk ${shortDay(order.dueDate)})`).join(", ")} ${tooLate.length === 1 ? "moet" : "moeten"} eerder bezorgd worden dan ${shortDay(date)}. Toch op deze dag inplannen?`)) return;
   state.placing = true;
   document.querySelectorAll(".place-here").forEach((button) => {
     button.disabled = true;
@@ -1214,6 +1241,13 @@ function renderManualRouteBar() {
   renderConceptBar();
 }
 
+function pickDue(route) {
+  const eerste = routeDue(route);
+  if (!eerste) return "";
+  const days = daysUntil(eerste);
+  return `<small class="route-pick-due${days < 0 ? " late" : days <= 1 ? " soon" : ""}">${days < 0 ? "te laat" : "uiterlijk"} ${shortDay(eerste)}</small>`;
+}
+
 function selectRoute(index) {
   activeMapRouteIndex = index;
   renderRoutes();
@@ -1257,7 +1291,7 @@ function renderPlanningMap() {
     <div>
       <b>${index + 1}. ${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}</b>
       <span>${productSummary(order)}</span>
-      <small>${addressSummary(order)}</small>${orderNote(order)}
+      <small>${addressSummary(order)}</small>${dueLabel(order)}${orderNote(order)}
     </div>
     <button class="button subtle-action remove-from-active-route" type="button" data-order-key="${orderKey(order)}">Uit rit halen</button>
   </li>`).join("");
@@ -1598,7 +1632,7 @@ function renderRoutes() {
     picker.setAttribute("aria-label", "Kies een voorstel");
     picker.innerHTML = routes.map((route, index) => `<button class="route-pick${index === activeMapRouteIndex ? " active" : ""}${route.review ? " review" : ""}" type="button" data-route-index="${index}" aria-pressed="${index === activeMapRouteIndex}">
       <span class="route-pick-letter">${escapeHtml(routeLetter(index))}</span>
-      <span class="route-pick-name">${escapeHtml(routeLabel(route))}${route.review ? " · controleren" : ""}</span>
+      <span class="route-pick-name">${escapeHtml(routeLabel(route))}${route.review ? " · controleren" : ""}${pickDue(route)}</span>
       <span class="route-pick-time">${formatMinutes(route.totalMinutes)}</span>
     </button>`).join("");
     picker.querySelectorAll(".route-pick").forEach((button) => {
@@ -1613,7 +1647,8 @@ function renderRoutes() {
     if (route.review) card.classList.add("review");
     fragment.querySelector(".route-number").textContent = state.openPlan ? String(state.openPlan.number || "?") : state.manualRoute ? "✓" : routeLetter(index);
     fragment.querySelector(".route-name").textContent = `${routeTitle(route, index)} · ${routeLabel(route)}`;
-    fragment.querySelector(".route-meta").textContent = `${CONFIG.depot} · ${route.orders.length} ${route.orders.length === 1 ? "stop" : "stops"} · rijtijd ${formatMinutes(route.driveMinutes)}`;
+    const eerste = routeDue(route);
+    fragment.querySelector(".route-meta").textContent = `${CONFIG.depot} · ${route.orders.length} ${route.orders.length === 1 ? "stop" : "stops"} · rijtijd ${formatMinutes(route.driveMinutes)}${eerste ? ` · eerste uiterlijk ${shortDay(eerste)}` : ""}`;
     fragment.querySelector(".route-load").textContent = [
       route.loadKnown ? `${route.load.toLocaleString("nl-NL")} kg` : "",
       `afleveren ${formatMinutes(route.deliveryMinutes)}`,
@@ -1641,7 +1676,7 @@ function renderRoutes() {
     // for as long as the two shops keep different prefixes.
     const proposal = !state.openPlan && !state.manualRoute && !state.openConcept;
     const canRemove = !proposal || route.orders.length > 1;
-    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li>${canRemove ? `<button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${escapeHtml(order.id)} uit deze rit halen">−</button>` : ""}<b>${escapeHtml(order.city)} · ${escapeHtml(order.id)}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span><span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-key="${orderKey(order)}">Bezorgd</button></span>${orderNote(order)}</li>`).join("");
+    fragment.querySelector(".route-stops").innerHTML = route.orders.map((order) => `<li>${canRemove ? `<button class="remove-route-stop" type="button" data-order-key="${orderKey(order)}" aria-label="${escapeHtml(order.id)} uit deze rit halen">−</button>` : ""}<b>${escapeHtml(order.city)} · ${escapeHtml(order.id)}</b><span>${productSummary(order)} · ${deliveryMinutes(order)} min lossen/laden</span>${dueLabel(order)}<span>${addressSummary(order)} · <a href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a> <button class="mark-delivered" type="button" data-order-key="${orderKey(order)}">Bezorgd</button></span>${orderNote(order)}</li>`).join("");
     fragment.querySelectorAll(".remove-route-stop").forEach((button) => {
       button.addEventListener("click", () => removeOrderFromRoute(button.dataset.orderKey, index));
     });
