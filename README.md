@@ -10,7 +10,7 @@ De planning voor eigen bezorging van De Rijplaten Specialist en De Slowfeeder Sp
 - Leest de open orders van beide winkels, die Shopify via webhooks doorgeeft.
 - Deelt elke order in: **Meenemen**, **Ingepland**, **In concept**, **Controleren**, **FVR** (rijplaten die niet met de bus gaan), **DHL** (slowfeeders die niet met de bus gaan) of **Niet meenemen**. Met het min-teken in een voorstel zet de planner een order op FVR of DHL; dat bewaart de Worker (`shipping:`), los van Shopify. De regels staan in de site onder *Regels* en worden rechtstreeks uit de code opgebouwd.
 - Maakt ritvoorstellen (A, B, C…). Een voorstel dat je inplant, krijgt een vast ritnummer dat nooit terugkomt.
-- Laat de bezorger op de telefoon zijn ritten zien, met per stop naam, adres, telefoon, producten en opmerking, en een knop *Bezorgd*.
+- Laat elke bezorger op de telefoon de eigen ritten zien, met per stop naam, adres, telefoon, producten en opmerking, en een knop *Bezorgd*. Bij het inplannen kiest de planner wie de rit rijdt.
 - Ververst elke 2 minuten zolang het scherm zichtbaar is; ritten en historie elke 10 minuten en na elke actie.
 
 Wat de site in Shopify verandert:
@@ -22,12 +22,15 @@ Wat de site in Shopify verandert:
 
 ## Codes en rollen
 
-Er zijn twee codes, allebei Worker-secrets:
+- **De planner** logt in met `OPERATOR_KEY`, een Worker-secret. Opent alles.
+- **Elke bezorger** logt in met een eigen code. De planner voegt bezorgers toe onder *Bezorgers* in het menu; de Worker maakt dan een code van twaalf tekens (zonder 0, o, 1, l en i) en laat die één keer zien. Bewaard wordt alleen een hash, in het record `drivers`. *Nieuwe code* maakt de oude meteen ongeldig; *Verwijderen* ook. Hoofdletters, spaties en streepjes maken bij het intypen niet uit.
+- Bij het inplannen kiest de planner wie de rit rijdt (of *Later kiezen*); in de agenda kan dat daarna nog veranderen. De rit krijgt dan `driverId`.
 
-- `OPERATOR_KEY`: de planner. Opent alles.
-- `DRIVER_KEY`: de bezorger. Ziet alleen de ritten van de week ervoor tot de week erna, mag daarvan bezorgd melden en een rit afbreken, en mag onderweg een order meenemen in de rit die hij nu rijdt, maar alleen een order die de planning zelf zou aanbieden (betaald, adres compleet, geen afspraak, de dag blijft binnen 5:45, waarbij wat vandaag al bezorgd is meetelt). Van andere orders krijgt de telefoon alleen plaats, postcodecijfers, product en een punt op ongeveer een kilometer nauwkeurig; geen naam, straat of telefoon.
+Een bezorger ziet alleen de eigen ritten van de week ervoor tot de week erna, mag daarvan bezorgd melden en een rit afbreken, en mag onderweg een order meenemen in de eigen rit die nu gereden wordt, maar alleen een order die de planning zelf zou aanbieden (betaald, adres compleet, geen afspraak, de dag blijft binnen 5:45, waarbij wat vandaag al bezorgd is meetelt). Van de ritten van anderen krijgt de telefoon alleen de ordernummers, zodat hij die orders niet aanbiedt; geen namen, adressen of notities. Van andere open orders krijgt de telefoon alleen plaats, postcodecijfers, product en een punt op ongeveer een kilometer nauwkeurig; geen naam, straat of telefoon. Wat een bezorger doet met een rit van een ander, weigert de Worker.
 
-Na vijf verschillende verkeerde codes vanaf één adres wacht dat adres vijf minuten, ook met de goede code (op IPv6 telt een blok van /48 als één adres). Alleen de plannerscode zet de teller op nul. Staan planner en bezorger achter hetzelfde internetadres, dan wachten ze samen. De rem remt raden af maar houdt het niet tegen, want wie veel adressen heeft, raadt verder: kies daarom lange codes, minstens twaalf tekens. De browser onthoudt de code; *Uitloggen* (in het menu, en onderaan het bezorgersscherm) vergeet hem op dat apparaat. Een code wijzigen doe je met `npx wrangler secret put OPERATOR_KEY` (of `DRIVER_KEY`); iedereen moet daarna de nieuwe code invullen.
+**De oude gezamenlijke code.** Tot 29 september 2026 hadden alle bezorgers één code, `DRIVER_KEY`. Die werkt nog, maar ziet alleen ritten zonder bezorger (de ritten van vóór die dag), zodat niemand halverwege een rit werd buitengesloten. Het scherm zegt erbij dat de bezorger om een eigen code moet vragen. Heeft iedereen een eigen code, gooi hem dan weg: `npx wrangler secret delete DRIVER_KEY`.
+
+Na vijf verschillende verkeerde codes vanaf één adres wacht dat adres vijf minuten, ook met de goede code (op IPv6 telt een blok van /48 als één adres). Alleen de plannerscode zet de teller op nul. Staan planner en bezorger achter hetzelfde internetadres, dan wachten ze samen. De rem remt raden af maar houdt het niet tegen, want wie veel adressen heeft, raadt verder: kies daarom een lange plannerscode, minstens twaalf tekens. De browser onthoudt de code; *Uitloggen* (in het menu, en onderaan het bezorgersscherm) vergeet hem op dat apparaat. De plannerscode wijzigen doe je met `npx wrangler secret put OPERATOR_KEY`; elke planner moet daarna de nieuwe code invullen.
 
 ## Privacy (AVG)
 
@@ -36,10 +39,11 @@ Wat de Worker bewaart (sinds 28 september 2026 in één Durable Object met een e
 | Wat | Inhoud | Bewaard |
 | --- | --- | --- |
 | `order:` | open order: naam, adres, telefoon, klantopmerking, producten | zolang de order open is; geannuleerd tot 14 dagen na de annulering |
-| `delivered:` | bezorgde order, **zonder** telefoon en klantopmerking; van een pakket dat niet met de bus ging alleen ordernummer, plaats en product | tot 60 dagen na de bezorging; een latere wijziging in Shopify (terugbetaling, tag) verlengt dat niet (voor records van vóór 25 september 2026 pas na het eenmalige opruimscript, zie hieronder) |
+| `delivered:` | bezorgde order, **zonder** telefoon en klantopmerking, met de voornaam van de bezorger die hem meldde; van een pakket dat niet met de bus ging alleen ordernummer, plaats en product | tot 60 dagen na de bezorging; een latere wijziging in Shopify (terugbetaling, tag) verlengt dat niet (voor records van vóór 25 september 2026 pas na het eenmalige opruimscript, zie hieronder) |
 | `plan:` | ingeplande rit: ordernummers, notities | tot 60 dagen na de ritdatum |
 | `plan-announce:` | verslag van de aankondiging | 60 dagen |
 | `geo:` | adres met coördinaat | 90 dagen (een adres dat niet gevonden werd: 7 dagen) |
+| `drivers` | voornaam van elke bezorger en een hash van de code | tot de planner de bezorger verwijdert |
 
 Wie gegevens te zien krijgt:
 
@@ -116,11 +120,12 @@ Secrets:
 
 ```bash
 npx wrangler secret put OPERATOR_KEY
-npx wrangler secret put DRIVER_KEY
 npx wrangler secret put SHOPIFY_WEBHOOK_SECRET
 npx wrangler secret put SHOPIFY_CLIENT_ID
 npx wrangler secret put SHOPIFY_CLIENT_SECRET
 ```
+
+De bezorgers en hun codes maak je daarna in de site zelf, onder *Bezorgers*.
 
 Deploy:
 

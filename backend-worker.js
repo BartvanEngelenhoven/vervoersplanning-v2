@@ -16,8 +16,9 @@
  * - CORS_ORIGIN: the site's address, or several comma-separated, for example
  *   https://specialistenplanning.pages.dev,https://bartvanengelenhoven.github.io
  * - OPERATOR_KEY: the planner's code; opens everything
- * - DRIVER_KEY: optional driver's code; opens the day's routes, reporting deliveries,
- *   taking a parcel along and breaking a route off, but no planning
+ * - DRIVER_KEY: optional, the one code all drivers shared before each got their own
+ *   (see "Drivers" below); it only opens routes that have no driver. Delete it once
+ *   every driver has their own code.
  * - SHOPIFY_CLIENT_ID: Shopify app client ID, required for OAuth install
  * - SHOPIFY_CLIENT_SECRET: Shopify app secret, required for OAuth install
  * - SHOPIFY_CLIENT_ID_<SHOP_DOMAIN>: optional per-shop Shopify app client ID
@@ -38,6 +39,8 @@
  *                          note, for undo and the driver's "bezorgd" ticks.
  * - plan:<date>:<id>       until 60 days after the route's date.
  * - geo:<address>          90 days (a point), 7 days (a miss).
+ * - drivers                the drivers' names and a hash of each one's code, until the
+ *                          planner removes them. The codes themselves are never kept.
  */
 
 import { copyFromKv, sqlStore } from "./planning-store.js";
@@ -220,6 +223,7 @@ async function runScheduled(event, env) {
 async function handleRequest(request, requestEnv) {
   const env = { ...requestEnv, REQUEST_ORIGIN: request.headers.get("origin") || "" };
   try {
+    env[CALLER] = await identify(request, env);
     const braked = await codeBrake(request, env);
     if (braked) return braked;
     return await route(request, env);
@@ -342,7 +346,24 @@ async function route(request, env) {
 
   if (request.method === "GET" && url.pathname === "/whoami") {
     const role = roleFor(request, env);
-    return role ? json({ role }, 200, env) : json({ error: "Unauthorized" }, 401, env);
+    if (!role) return json({ error: "Unauthorized" }, 401, env);
+    return json(role === "driver" ? { role, driver: callerDriver(env) } : { role }, 200, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/drivers/add") {
+    return addDriver(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/drivers/code") {
+    return renewDriverCode(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/drivers/remove") {
+    return removeDriver(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/plan/driver") {
+    return setPlanDriver(request, env);
   }
 
   if (request.method === "POST" && url.pathname === "/plan/add-stop") {
@@ -942,10 +963,10 @@ async function markDelivered(request, env) {
     const named = /^[A-Za-z0-9-]{1,64}$/.test(routeId) && isPlanDate(routeDate) && routeDate >= window.from && routeDate <= window.to
       ? await readPlanRecord(env, routeDate, routeId)
       : null;
-    const inNamedRoute = named && !named.abortedAt && (named.orderKeys || []).includes(key);
+    const inNamedRoute = named && !named.abortedAt && isCallersRoute(env, named) && (named.orderKeys || []).includes(key);
     if (!inNamedRoute) {
       const stops = await plannedStops(env, window.from, window.to);
-      if (!stops.has(key)) return json({ error: "Deze order staat niet in een van jouw ritten." }, 403, env);
+      if (!stops.has(key) || !isCallersRoute(env, stops.get(key))) return json({ error: NOT_YOUR_ROUTE }, 403, env);
     }
   }
 
@@ -1012,6 +1033,8 @@ async function markDelivered(request, env) {
     fulfillment,
     deliveredAt: now,
     source,
+    // Which driver, for the planner's history. Only a name the planner gave.
+    ...(callerDriver(env) ? { by: callerDriver(env).name } : {}),
     shopifyUpdatedAt: now,
   });
   await env.PLANNING_ORDERS.delete(`order:${key}`);
@@ -1681,20 +1704,35 @@ async function getPlan(request, env) {
     Promise.all(dayKeys.map((name) => env.PLANNING_ORDERS.get(name, "json"))),
     Promise.all(logKeys.map((name) => env.PLANNING_ORDERS.get(name, "json"))),
   ]);
+  // A driver gets their own routes and nobody else's. Another driver's routes
+  // only tell the phone which orders are taken (heldKeys below), so "kan er nog
+  // bij" leaves them alone; their stops, names and notes stay off this phone.
+  const inWindowRoutes = routes.filter(Boolean);
+  const own = role === "driver" ? inWindowRoutes.filter((route) => isCallersRoute(env, route)) : inWindowRoutes;
+  const othersKeys = role === "driver" ? inWindowRoutes.filter((route) => !isCallersRoute(env, route) && !route.abortedAt).flatMap((route) => route.orderKeys || []) : [];
   // A note saved on its own wins over one still inside an older route record.
-  const ids = new Set(routes.filter(Boolean).map((route) => route.id));
+  const ids = new Set(own.map((route) => route.id));
   const noteKeys = names.filter((name) => name.startsWith(PLAN_NOTE_PREFIX) && ids.has(name.slice(PLAN_NOTE_PREFIX.length)));
   const notes = new Map((await Promise.all(noteKeys.map((name) => env.PLANNING_ORDERS.get(name, "json")))).filter(Boolean).map((entry) => [entry.id, entry.note]));
-  const planned = routes.filter(Boolean).map((route) => (notes.has(route.id) ? { ...route, note: notes.get(route.id) } : route));
+  const planned = own.map((route) => (notes.has(route.id) ? { ...route, note: notes.get(route.id) } : route));
   planned.sort((a, b) => `${a.date}${String(a.number || 0).padStart(6, "0")}`.localeCompare(`${b.date}${String(b.number || 0).padStart(6, "0")}`));
 
-  const body = { routes: planned, dayNotes: dayNotes.filter(Boolean), announcements: announcements.filter(Boolean), announceLive: announceLive(env) };
+  // The announcement reports name every route of the day, so only the planner,
+  // whose agenda shows them, gets them.
+  const body = { routes: planned, dayNotes: dayNotes.filter(Boolean), announcements: role === "driver" ? [] : announcements.filter(Boolean), announceLive: announceLive(env) };
   // Concepts come along in the same listing. The planner gets them whole; the
   // driver only learns which orders they hold, so "kan er nog bij" leaves those
   // alone.
   const concepts = (await Promise.all(names.filter((name) => name.startsWith(CONCEPT_PREFIX)).map((name) => env.PLANNING_ORDERS.get(name, "json")))).filter(Boolean);
-  if (role === "driver") body.heldKeys = [...new Set(concepts.flatMap((concept) => concept.orderKeys || []))];
+  if (role === "driver") body.heldKeys = [...new Set([...concepts.flatMap((concept) => concept.orderKeys || []), ...othersKeys])];
   else body.concepts = concepts.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  // The planner picks a driver per route from these; the driver's phone says
+  // "Welkom" with its own name. The shared code's phone learns whether drivers
+  // have their own codes yet, and only then asks its holder to get one.
+  if (role === "driver") {
+    body.driver = callerDriver(env);
+    if (!body.driver) body.ownCodes = (await readDrivers(env)).length > 0;
+  } else body.drivers = publicDrivers(await readDrivers(env));
   if (role === "driver") {
     // Name, address, phone and note of the stops on the driver's own routes: the
     // only customers whose details the phone is given. Each with its point from
@@ -1744,6 +1782,10 @@ async function assignPlanRoute(request, env) {
   const id = /^[A-Za-z0-9-]{8,64}$/.test(String(payload.id || "")) ? String(payload.id) : crypto.randomUUID();
   let fromDate = isPlanDate(payload.fromDate) ? String(payload.fromDate) : null;
   let bestaand = await readPlanRecord(env, fromDate || date, id);
+  // The driver who gets the route: "" for none yet. Left out of the request (a
+  // route moved to another day, an older screen), the route keeps its driver.
+  const driverId = "driverId" in payload ? await knownDriverId(env, payload.driverId) : undefined;
+  if (driverId === null) return json({ error: DRIVER_GONE }, 404, env);
 
   // Sent twice for the same day (a double click, a retry after a lost answer):
   // the route that was made stands, and no second number is used up.
@@ -1806,6 +1848,8 @@ async function assignPlanRoute(request, env) {
     orderKeys,
     assignedAt: bestaand?.assignedAt || new Date().toISOString(),
   };
+  if (driverId) record.driverId = driverId;
+  else if (driverId === "") delete record.driverId;
 
   try {
     await writePlanRecord(env, record);
@@ -2019,6 +2063,7 @@ async function addPlanStop(request, env) {
   const id = String(payload.id || "");
   let record = await readPlanRecord(env, date, id);
   if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
+  if (!isCallersRoute(env, record)) return json({ error: NOT_YOUR_ROUTE }, 403, env);
   if (record.abortedAt) return json({ error: "Deze rit is afgebroken." }, 409, env);
   if ((record.orderKeys || []).includes(key)) return json({ route: record, already: true }, 200, env);
 
@@ -2052,9 +2097,9 @@ async function addPlanStop(request, env) {
   // Read again after the seconds Shopify took: a note, a removed stop or the
   // route being broken off in the meantime is not written over.
   record = await readPlanRecord(env, date, id);
-  if (!record || record.abortedAt) {
+  if (!record || record.abortedAt || !isCallersRoute(env, record)) {
     await untagOrders(env, tagged);
-    return json({ error: record ? "Deze rit is intussen afgebroken." : "Deze rit staat niet meer in de agenda." }, 409, env);
+    return json({ error: !record ? "Deze rit staat niet meer in de agenda." : record.abortedAt ? "Deze rit is intussen afgebroken." : NOT_YOUR_ROUTE }, 409, env);
   }
   const keys = [...(record.orderKeys || [])];
   const position = Number.isInteger(payload.position) ? Math.max(0, Math.min(keys.length, payload.position)) : keys.length;
@@ -2141,6 +2186,7 @@ async function abortPlanRoute(request, env) {
   const payload = await request.json().catch(() => ({}));
   const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
   if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
+  if (!isCallersRoute(env, record)) return json({ error: NOT_YOUR_ROUTE }, 403, env);
   if (record.abortedAt) return json({ route: record }, 200, env);
   if (role === "driver") {
     const window = driverWindow();
@@ -2155,7 +2201,7 @@ async function abortPlanRoute(request, env) {
   record.orderKeys = keys.filter((_, index) => delivered[index]);
   record.droppedKeys = keys.filter((_, index) => !delivered[index]);
   record.abortedAt = new Date().toISOString();
-  record.abortedBy = role === "driver" ? "bezorger" : "planner";
+  record.abortedBy = role === "driver" ? callerDriver(env)?.name || "bezorger" : "planner";
   record.abortReason = String(payload.reason || "").slice(0, 300);
   return json({ route: await writePlanRecord(env, record) }, 200, env);
 }
@@ -2331,18 +2377,184 @@ function plannerOnly(request, env) {
   return null;
 }
 
-// Two codes, two roles. The planner's code opens everything. The driver's code,
-// DRIVER_KEY, opens what is needed on the road: reading the day, reporting a
+// Two roles. The planner's code opens everything. A driver's code opens what is
+// needed on the road, for their own routes: reading the day, reporting a
 // delivery, taking a parcel along, breaking a route off. It cannot plan, delete
-// or undo. Without DRIVER_KEY set there is simply no driver role.
+// or undo. Who is asking is worked out once per request (identify, below).
 function roleFor(request, env) {
+  return env[CALLER]?.role || null;
+}
+
+// ---------------------------------------------------------------------------
+// Drivers. Each has a name and a code of their own. The Worker makes the code
+// and the planner sees it once, to pass on; only a hash of it is kept. A driver
+// sees and works on the routes the planner gave them, and on nobody else's.
+//
+// DRIVER_KEY, the one code every driver shared before, still opens the driver's
+// screen, but only for routes without a driver: the ones planned before drivers
+// had names. So the day this went live nobody was locked out halfway through a
+// route, and nobody could read another driver's new routes with the old code.
+// It goes once every driver has their own: wrangler secret delete DRIVER_KEY.
+// ---------------------------------------------------------------------------
+const CALLER = Symbol("caller");
+const DRIVERS_KEY = "drivers";
+// No 0 or o, no 1, l or i: read out over the phone, nothing can be mistaken.
+const DRIVER_CODE_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789";
+// Twelve of 31 signs: 59 bits. The brake lets one address try five codes in five
+// minutes, so a thousand addresses would guess for millions of years.
+const DRIVER_CODE_LENGTH = 12;
+const MAX_DRIVERS = 20;
+const DRIVER_GONE = "Deze bezorger bestaat niet meer. Ververs het scherm.";
+const NOT_YOUR_ROUTE = "Deze rit staat niet (meer) op jouw naam. Ververs het scherm, of bel de planner.";
+
+// The planner, a driver by name, or whoever holds the shared code from before
+// (a driver without a name). A driver's code is looked up by its hash; one of
+// another length is not even looked up.
+async function identify(request, env) {
   const provided = request.headers.get("x-operator-key") || "";
-  if (!provided) return null;
+  if (!provided) return { role: null };
   const planner = String(env.OPERATOR_KEY || "");
-  if (planner && timingSafeEqual(planner, provided)) return "planner";
-  const driver = String(env.DRIVER_KEY || "");
-  if (driver && timingSafeEqual(driver, provided)) return "driver";
-  return null;
+  if (planner && timingSafeEqual(planner, provided)) return { role: "planner" };
+  const shared = String(env.DRIVER_KEY || "");
+  if (shared && timingSafeEqual(shared, provided)) return { role: "driver", driver: null };
+  const code = normalizeDriverCode(provided);
+  if (code.length !== DRIVER_CODE_LENGTH) return { role: null };
+  const hash = await sha256Hex(code);
+  const driver = (await readDrivers(env)).find((entry) => typeof entry.codeHash === "string" && timingSafeEqual(entry.codeHash, hash));
+  return driver ? { role: "driver", driver: { id: driver.id, name: driver.name } } : { role: null };
+}
+
+// The driver asking, by id and name; null for the planner or the shared code.
+function callerDriver(env) {
+  return env[CALLER]?.driver || null;
+}
+
+// Whether whoever asks may see and work on this route. The planner may on every
+// route. A driver on their own; the shared code only on a route without a driver.
+function isCallersRoute(env, route) {
+  const caller = env[CALLER];
+  if (caller?.role === "planner") return true;
+  if (caller?.role !== "driver" || !route) return false;
+  return caller.driver ? route.driverId === caller.driver.id : !route.driverId;
+}
+
+// Read on every request with a code that is not the planner's. A failed read
+// throws, so the phone hears "try again" and keeps its code, and does not hear
+// "wrong code", which would make it forget it.
+async function readDrivers(env) {
+  const record = await env.PLANNING_ORDERS.get(DRIVERS_KEY, "json");
+  return Array.isArray(record?.drivers) ? record.drivers : [];
+}
+
+async function writeDrivers(env, drivers) {
+  await putWithRetry(env, DRIVERS_KEY, JSON.stringify({ drivers, updatedAt: new Date().toISOString() }));
+}
+
+// What the planner's screen may know of the drivers: never the hash.
+function publicDrivers(drivers) {
+  return drivers.map((driver) => ({ id: driver.id, name: driver.name, codeSetAt: driver.codeSetAt || null }));
+}
+
+// "" for no driver, the id of a driver who exists, or null for one who does not
+// (any more).
+async function knownDriverId(env, value) {
+  const id = String(value || "");
+  if (!id) return "";
+  return (await readDrivers(env)).some((driver) => driver.id === id) ? id : null;
+}
+
+// Every sign equally likely: bytes from 248 up are skipped, since 248 is the
+// largest multiple of 31 that fits in a byte.
+function newDriverCode() {
+  const limit = 256 - (256 % DRIVER_CODE_ALPHABET.length);
+  let code = "";
+  while (code.length < DRIVER_CODE_LENGTH) {
+    for (const byte of crypto.getRandomValues(new Uint8Array(32))) {
+      if (byte < limit && code.length < DRIVER_CODE_LENGTH) code += DRIVER_CODE_ALPHABET[byte % DRIVER_CODE_ALPHABET.length];
+    }
+  }
+  return code;
+}
+
+// As the planner passes it on: three groups of four, "abcd-efgh-jkmn".
+function formatDriverCode(code) {
+  return code.match(/.{1,4}/g).join("-");
+}
+
+// Typed on a phone: capitals, spaces and dashes make no difference.
+function normalizeDriverCode(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function cleanDriverName(value) {
+  return String(value || "").replace(/[<>"'`]/g, "").replace(/\s+/g, " ").trim().slice(0, 40);
+}
+
+// A new driver, with a code of their own, shown this once.
+async function addDriver(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const name = cleanDriverName(payload.name);
+  if (!name) return json({ error: "Vul een naam in." }, 400, env);
+  const drivers = await readDrivers(env);
+  if (drivers.some((driver) => driver.name.toLowerCase() === name.toLowerCase())) return json({ error: `Er is al een bezorger die ${name} heet.` }, 409, env);
+  if (drivers.length >= MAX_DRIVERS) return json({ error: `Meer dan ${MAX_DRIVERS} bezorgers kan niet.` }, 400, env);
+  const code = newDriverCode();
+  const now = new Date().toISOString();
+  const driver = { id: crypto.randomUUID(), name, codeHash: await sha256Hex(code), codeSetAt: now, createdAt: now };
+  const next = [...drivers, driver];
+  await writeDrivers(env, next);
+  return json({ driver: { id: driver.id, name }, code: formatDriverCode(code), drivers: publicDrivers(next) }, 200, env);
+}
+
+// A new code for a driver: a phone lost, a code passed on to the wrong person.
+// The old code stops working at once; their routes stay theirs.
+async function renewDriverCode(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const drivers = await readDrivers(env);
+  const driver = drivers.find((entry) => entry.id === String(payload.id || ""));
+  if (!driver) return json({ error: DRIVER_GONE }, 404, env);
+  const code = newDriverCode();
+  driver.codeHash = await sha256Hex(code);
+  driver.codeSetAt = new Date().toISOString();
+  await writeDrivers(env, drivers);
+  return json({ driver: { id: driver.id, name: driver.name }, code: formatDriverCode(code), drivers: publicDrivers(drivers) }, 200, env);
+}
+
+// Their code stops working at once. Routes they had keep their id and show
+// in the agenda as having no driver, until the planner gives them to someone.
+async function removeDriver(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const drivers = await readDrivers(env);
+  const next = drivers.filter((driver) => driver.id !== String(payload.id || ""));
+  if (next.length !== drivers.length) await writeDrivers(env, next);
+  return json({ drivers: publicDrivers(next) }, 200, env);
+}
+
+// The planner giving a planned route to a driver, or to nobody yet (""). The
+// driver who had it no longer sees it from their next refresh.
+async function setPlanDriver(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
+  if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
+  const driverId = await knownDriverId(env, payload.driverId);
+  if (driverId === null) return json({ error: DRIVER_GONE }, 404, env);
+  if ((record.driverId || "") === driverId) return json({ route: record }, 200, env);
+  if (driverId) record.driverId = driverId;
+  else delete record.driverId;
+  return json({ route: await writePlanRecord(env, record) }, 200, env);
 }
 
 // Five wrong codes from one address, and that address waits five minutes, the

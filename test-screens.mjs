@@ -457,6 +457,142 @@ await test("een scherm waar een kwartier niemand aan zit, ververst alleen elke t
   assert.equal(gevraagd.length, 5);
 });
 
+// ---------------------------------------------------------------------------
+// Drivers: a name on the phone, a driver picked when planning, and the list.
+// ---------------------------------------------------------------------------
+function driversOnRecord() {
+  return [{ id: "d-sanne", name: "Sanne", codeSetAt: "2026-09-29T10:00:00Z" }, { id: "d-joost", name: "Joost", codeSetAt: "2026-09-29T10:00:00Z" }];
+}
+
+await test("de telefoon zegt Welkom met de naam; wie nog de oude code heeft, hoort hoe het verder moet", async () => {
+  scene({ role: "driver" });
+  state.planLoaded = true;
+  state.driver = { id: "d-sanne", name: "Sanne" };
+  fn.renderDriver();
+  assert.match(element("#driverView").innerHTML, /<h1 class="driver-welcome">Welkom Sanne<\/h1>/);
+  assert.doesNotMatch(element("#driverView").innerHTML, /oude code/);
+  state.driver = null;
+  state.ownCodes = false;
+  fn.renderDriver();
+  assert.match(element("#driverView").innerHTML, /<h1 class="driver-welcome">Welkom<\/h1>/);
+  assert.doesNotMatch(element("#driverView").innerHTML, /oude code/, "zolang er geen eigen codes zijn, niets te vragen");
+  state.ownCodes = true;
+  fn.renderDriver();
+  assert.match(element("#driverView").innerHTML, /oude code voor alle bezorgers/);
+  state.driver = { id: "d-x", name: "<b>Joost</b>" };
+  fn.renderDriver();
+  assert.match(element("#driverView").innerHTML, /Welkom &lt;b&gt;Joost/, "een naam is tekst, geen opmaak");
+
+  // The name comes with the routes, and is kept for when the phone opens offline.
+  worker({ "/plan": [200, { routes: [], dayNotes: [], announcements: [], heldKeys: [], driver: { id: "d-daan", name: "Daan" } }] });
+  await fn.refreshData();
+  assert.equal(state.driver.name, "Daan");
+  assert.deepEqual(fn.storedDriver(), { id: "d-daan", name: "Daan" });
+  worker({ "/plan": [200, { routes: [], dayNotes: [], announcements: [], heldKeys: [], driver: null }] });
+  await fn.refreshData();
+  assert.equal(fn.storedDriver(), null, "de oude code heeft geen naam");
+  state.driver = undefined;
+});
+
+await test("inplannen: met bezorgers eerst kiezen wie de rit rijdt, en die gaat mee naar de Worker", async () => {
+  const stop = order("Doorn", 52.03, 5.32);
+  scene({ role: "planner", orders: [stop] });
+  state.drivers = driversOnRecord();
+  const calls = worker({ "/plan/assign": [200, { route: { id: "r", number: 1, date: fn.daysFromToday(1) } }] });
+  const assigns = () => calls.filter((call) => call.path === "/plan/assign");
+  const meldingen = [];
+  fn.window.alert = (tekst) => meldingen.push(tekst);
+
+  fn.putRouteInHand({ orders: [stop], region: "Doorn" });
+  assert.match(element("#routeInHand").innerHTML, /Kies wie hem rijdt en een dag/);
+  assert.match(element("#routeInHand").innerHTML, /data-driver="d-sanne" aria-pressed="false">Sanne</);
+  assert.match(element("#routeInHand").innerHTML, />Later kiezen</);
+  assert.doesNotMatch(element("#agendaDays").innerHTML, /place-here/, "de dagen gaan pas open als er iemand gekozen is");
+  await fn.placeRouteOnDay(fn.daysFromToday(1));
+  assert.equal(assigns().length, 0, "zonder keuze gaat er niets naar de Worker");
+  assert.match(meldingen[0], /Kies eerst wie de rit rijdt/);
+
+  state.routeInHandDriver = "d-joost";
+  fn.renderAgenda();
+  assert.match(element("#agendaDays").innerHTML, />Inplannen voor Joost</);
+  await fn.placeRouteOnDay(fn.daysFromToday(1));
+  assert.equal(assigns()[0].body.driverId, "d-joost");
+
+  fn.putRouteInHand({ orders: [stop], region: "Doorn" });
+  assert.equal(state.routeInHandDriver, undefined, "de keuze van de vorige rit gaat niet mee");
+  state.routeInHandDriver = "";
+  await fn.placeRouteOnDay(fn.daysFromToday(2));
+  assert.equal(assigns()[1].body.driverId, "", "later kiezen: nog niemand");
+
+  // A driver removed on another screen meanwhile is no choice any more.
+  fn.putRouteInHand({ orders: [stop], region: "Doorn" });
+  state.routeInHandDriver = "d-weg";
+  await fn.placeRouteOnDay(fn.daysFromToday(2));
+  assert.equal(assigns().length, 2);
+
+  // Without drivers on record there is nobody to choose, as before.
+  state.drivers = [];
+  fn.putRouteInHand({ orders: [stop], region: "Doorn" });
+  assert.doesNotMatch(element("#routeInHand").innerHTML, /driver-chip/);
+  assert.match(element("#agendaDays").innerHTML, />Rit hier inplannen</);
+  await fn.placeRouteOnDay(fn.daysFromToday(3));
+  assert.equal(assigns().length, 3);
+});
+
+await test("agenda: per rit wie hem rijdt, meteen te veranderen; zonder bezorger een waarschuwing", async () => {
+  const a = order("Doorn", 52.03, 5.32);
+  const b = order("Zeist", 52.09, 5.23);
+  const morgen = fn.daysFromToday(1);
+  const vanSanne = { id: "rit-a", number: 11, date: morgen, name: "Doorn", orderKeys: [key(a)], driverId: "d-sanne" };
+  const zonder = { id: "rit-b", number: 12, date: morgen, name: "Zeist", orderKeys: [key(b)] };
+  scene({ role: "planner", orders: [a, b], plan: [vanSanne, zonder] });
+  state.drivers = driversOnRecord();
+  fn.renderAgenda();
+  const html = element("#agendaDays").innerHTML;
+  assert.match(html, /<option value="d-sanne" selected>Sanne<\/option>/);
+  assert.equal((html.match(/Nog geen bezorger: kies wie deze rit rijdt/g) || []).length, 1);
+  const calls = worker({ "/plan/driver": [200, { route: { ...zonder, driverId: "d-joost" } }] });
+  await fn.setRouteDriver(zonder, { value: "d-joost", disabled: false });
+  assert.deepEqual(calls.find((call) => call.path === "/plan/driver").body, { id: "rit-b", date: morgen, driverId: "d-joost" });
+
+  state.plan = [vanSanne];
+  state.drivers = [];
+  fn.renderAgenda();
+  assert.doesNotMatch(element("#agendaDays").innerHTML, /route-driver|Nog geen bezorger/, "zonder bezorgers ziet de agenda eruit als voorheen");
+});
+
+await test("Bezorgers: elke bezorger met ritten, een nieuwe code één keer te zien, en wie bezorgde", async () => {
+  const a = order("Doorn", 52.03, 5.32);
+  scene({ role: "planner", orders: [a], plan: [{ id: "rit-a", number: 11, date: fn.daysFromToday(1), name: "Doorn", orderKeys: [key(a)], driverId: "d-sanne" }] });
+  state.drivers = [...driversOnRecord(), { id: "d-x", name: "<i>Kees</i>", codeSetAt: null }];
+  fn.renderDriversPage();
+  const html = element("#driverList").innerHTML;
+  assert.match(html, /Sanne<\/h2>\s*<p>1 rit in de agenda · code gemaakt/);
+  assert.match(html, /Joost<\/h2>\s*<p>Geen ritten in de agenda/);
+  assert.match(html, /&lt;i&gt;Kees/);
+
+  const calls = worker({ "/drivers/add": [200, { driver: { id: "d-daan", name: "Daan" }, code: "abcd-efgh-jkmn", drivers: [...driversOnRecord(), { id: "d-daan", name: "Daan", codeSetAt: "2026-09-29T11:00:00Z" }] }] });
+  const input = { value: " Daan ", focus() {} };
+  const button = { disabled: false };
+  await fn.addDriverFromForm({ querySelector: (selector) => (selector === "#driverAddName" ? input : button) });
+  assert.deepEqual(calls.find((call) => call.path === "/drivers/add").body, { name: "Daan" });
+  assert.equal(input.value, "", "het veld is weer leeg");
+  assert.equal(button.disabled, false);
+  assert.match(element("#driverCode").innerHTML, /De code voor <b>Daan<\/b>/);
+  assert.match(element("#driverCode").innerHTML, /abcd-efgh-jkmn/);
+  assert.equal(element("#driverCode").hidden, false);
+  assert.deepEqual(state.drivers.map((driver) => driver.name), ["Sanne", "Joost", "Daan"]);
+  fn.showView("agenda");
+  fn.showView("bezorgers");
+  assert.equal(element("#driverCode").hidden, true, "weg van de pagina, dan is de code weg");
+  assert.doesNotMatch(element("#driverCode").innerHTML, /abcd/);
+
+  assert.equal(fn.historySourceLabel({ source: "bezorger", by: "Sanne" }), "Bezorgd gemeld door Sanne");
+  assert.equal(fn.historySourceLabel({ source: "bezorger" }), "Bezorgd gemeld door de bezorger");
+  assert.equal(fn.historySourceLabel({ source: "bezorger", by: "<b>" }), "Bezorgd gemeld door &lt;b&gt;");
+  state.drivers = [];
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);

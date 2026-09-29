@@ -1367,6 +1367,185 @@ await test("16:10 gaat zoals 16:00 ging: AUTO_FULFILL tussendoor aangezet mailt 
   assert.equal(log.routes.find((route) => route.id === "r2").results[0].status, "zou aangekondigd worden");
 });
 
+// ---------------------------------------------------------------------------
+// Drivers, each with a code of their own, who see only the routes they are given.
+// ---------------------------------------------------------------------------
+async function addDriver(env, name) {
+  const answer = await call(env, "POST", "/drivers/add", { key: PLANNER, body: { name } });
+  assert.equal(answer.status, 200, JSON.stringify(answer.data));
+  return { ...answer.data.driver, code: answer.data.code };
+}
+
+await test("bezorgers: de planner maakt ze aan, elk met een eigen code, en alleen een hash blijft bewaard", async () => {
+  const env = makeEnv();
+  assert.equal((await call(env, "GET", "/plan", { key: DRIVER })).data.ownCodes, false, "voor er bezorgers zijn, hoeft de oude code nergens om te vragen");
+  const sanne = await addDriver(env, "Sanne");
+  assert.match(sanne.code, /^[a-hjkmnp-z2-9]{4}-[a-hjkmnp-z2-9]{4}-[a-hjkmnp-z2-9]{4}$/, "drie keer vier tekens, zonder 0, o, 1, l of i");
+  const joost = await addDriver(env, "  Joost ");
+  assert.equal(joost.name, "Joost");
+  await addDriver(env, "Daan");
+  assert.notEqual(sanne.code, joost.code);
+
+  assert.equal((await call(env, "POST", "/drivers/add", { key: PLANNER, body: { name: "sanne" } })).status, 409, "twee keer dezelfde naam");
+  assert.equal((await call(env, "POST", "/drivers/add", { key: PLANNER, body: { name: "   " } })).status, 400);
+  assert.equal((await call(env, "POST", "/drivers/add", { key: sanne.code, body: { name: "Stiekem" } })).status, 403, "alleen de planner");
+  assert.equal((await call(env, "POST", "/drivers/add", { key: DRIVER, body: { name: "Stiekem" } })).status, 403);
+  assert.equal((await call(env, "POST", "/drivers/code", { key: sanne.code, body: { id: joost.id } })).status, 403);
+  assert.equal((await call(env, "POST", "/drivers/remove", { key: sanne.code, body: { id: joost.id } })).status, 403);
+  assert.equal((await call(env, "POST", "/drivers/add", { body: { name: "Niemand" } })).status, 401);
+  const markup = await addDriver(env, `<img src=x onerror="alert(1)">Kees`);
+  assert.ok(!/[<>"]/.test(markup.name), markup.name);
+
+  const plan = (await call(env, "GET", "/plan", { key: PLANNER })).data;
+  assert.deepEqual(plan.drivers.map((driver) => driver.name), ["Sanne", "Joost", "Daan", markup.name]);
+  assert.ok(plan.drivers.every((driver) => driver.id && driver.codeSetAt && !("codeHash" in driver)), "geen hash naar het scherm");
+  const stored = JSON.stringify(await env.PLANNING_ORDERS.get("drivers", "json"));
+  assert.ok(!stored.includes(sanne.code) && !stored.includes(sanne.code.replaceAll("-", "")), "de code zelf wordt nergens bewaard");
+
+  const who = await call(env, "GET", "/whoami", { key: sanne.code });
+  assert.deepEqual(who.data, { role: "driver", driver: { id: sanne.id, name: "Sanne" } });
+  const getypt = ` ${sanne.code.toUpperCase().replaceAll("-", " ")} `;
+  assert.equal((await call(env, "GET", "/whoami", { key: getypt })).data.driver?.name, "Sanne", "hoofdletters en spaties maken niet uit");
+  assert.equal((await call(env, "GET", "/whoami", { key: "abcd-efgh-jkmn" })).status, 401);
+  assert.deepEqual((await call(env, "GET", "/whoami", { key: DRIVER })).data, { role: "driver", driver: null }, "de oude gedeelde code");
+  assert.deepEqual((await call(env, "GET", "/whoami", { key: PLANNER })).data, { role: "planner" });
+});
+
+await test("een bezorger ziet alleen de eigen ritten, en kan niets met die van een ander", async () => {
+  const env = makeEnv();
+  const sanne = await addDriver(env, "Sanne");
+  const joost = await addDriver(env, "Joost");
+  const a = await seedPlaced(env, DRS, "#DRS900", { city: "Doorn", zip: "3941 BX", lat: 52.03, lon: 5.32 });
+  const b = await seedPlaced(env, DRS, "#DRS901", { city: "Zeist", zip: "3701 AA", lat: 52.09, lon: 5.23 });
+  const c = await seedPlaced(env, DRS, "#DRS902", { city: "Leersum", zip: "3956 AA", lat: 52.01, lon: 5.43 });
+  const extra = await seedPlaced(env, DRS, "#DRS903", { city: "Driebergen", zip: "3971 AA", lat: 52.05, lon: 5.28 });
+  const plant = async (name, keys, driverId) => (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), name, orderKeys: keys, ...(driverId === undefined ? {} : { driverId }) } })).data.route;
+  const vanSanne = await plant("Doorn", [a.key], sanne.id);
+  const vanJoost = await plant("Zeist", [b.key], joost.id);
+  const vanNiemand = await plant("Leersum", [c.key]);
+  assert.equal(vanSanne.driverId, sanne.id);
+  assert.ok(!("driverId" in vanNiemand));
+  await call(env, "POST", "/plan/note", { key: PLANNER, body: { id: vanJoost.id, date: vanJoost.date, note: "Klant Zeist wil voor tien uur" } });
+
+  const zijn = (await call(env, "GET", "/plan", { key: sanne.code })).data;
+  assert.deepEqual(zijn.routes.map((route) => route.id), [vanSanne.id], "alleen de eigen rit");
+  assert.deepEqual(zijn.stops.map((stop) => stop.id), [a.order.id], "alleen de eigen klanten");
+  assert.deepEqual(zijn.driver, { id: sanne.id, name: "Sanne" });
+  assert.ok(zijn.heldKeys.includes(b.key) && zijn.heldKeys.includes(c.key), "de orders van een ander worden niet aangeboden");
+  assert.deepEqual(zijn.announcements, []);
+  assert.ok(!zijn.drivers, "de lijst met bezorgers is voor de planner");
+  assert.ok(!JSON.stringify(zijn).includes("tien uur"), "de notitie bij de rit van een ander blijft weg");
+  assert.ok(!JSON.stringify(zijn).includes("Zeist"), "ook de naam van die rit");
+  assert.deepEqual((await call(env, "GET", "/plan", { key: joost.code })).data.routes.map((route) => route.id), [vanJoost.id]);
+  const oud = (await call(env, "GET", "/plan", { key: DRIVER })).data;
+  assert.deepEqual(oud.routes.map((route) => route.id), [vanNiemand.id], "de oude code ziet alleen ritten zonder bezorger");
+  assert.equal(oud.driver, null);
+  assert.equal(oud.ownCodes, true, "en hoort dat er eigen codes zijn");
+  assert.ok(!("ownCodes" in zijn));
+
+  // Nothing done to another driver's route goes through, whichever way it is asked.
+  const bezorgd = (key, order, route) => call(env, "POST", "/actions/mark-delivered", { key, body: { id: order.order.id, shopDomain: DRS, ...(route ? { routeId: route.id, routeDate: route.date } : {}) } });
+  assert.equal((await bezorgd(sanne.code, b, vanJoost)).status, 403);
+  assert.equal((await bezorgd(sanne.code, b)).status, 403);
+  assert.equal((await bezorgd(sanne.code, b, vanSanne)).status, 403);
+  assert.equal((await bezorgd(DRIVER, a, vanSanne)).status, 403, "de oude code ook niet");
+  assert.equal(shop.orders.get(b.order.shopifyOrderId).fulfilled, false);
+  const erbij = await call(env, "POST", "/plan/add-stop", { key: sanne.code, body: { id: vanJoost.id, date: vanJoost.date, orderKey: extra.key } });
+  assert.equal(erbij.status, 403);
+  assert.ok(!erbij.data.route, "en geen rit terug");
+  assert.equal((await call(env, "POST", "/plan/add-stop", { key: sanne.code, body: { id: vanJoost.id, date: vanJoost.date, orderKey: b.key } })).status, 403, "ook niet met een stop die er al in zit");
+  assert.equal((await call(env, "POST", "/plan/abort", { key: sanne.code, body: { id: vanJoost.id, date: vanJoost.date } })).status, 403);
+  assert.equal((await call(env, "POST", "/plan/abort", { key: DRIVER, body: { id: vanJoost.id, date: vanJoost.date } })).status, 403);
+  assert.ok(!(await env.PLANNING_ORDERS.get(`plan:${vanJoost.date}:${vanJoost.id}`, "json")).abortedAt);
+
+  // The own route works as before, and says who did it.
+  const gedaan = await bezorgd(sanne.code, a, vanSanne);
+  assert.equal(gedaan.status, 200, JSON.stringify(gedaan.data));
+  assert.equal((await env.PLANNING_ORDERS.get(`delivered:${a.key}`, "json")).by, "Sanne");
+  assert.equal((await call(env, "POST", "/plan/add-stop", { key: sanne.code, body: { id: vanSanne.id, date: vanSanne.date, orderKey: extra.key } })).status, 200);
+  const af = await call(env, "POST", "/plan/abort", { key: joost.code, body: { id: vanJoost.id, date: vanJoost.date, reason: "bus kapot" } });
+  assert.equal(af.status, 200);
+  assert.equal(af.data.route.abortedBy, "Joost");
+  assert.equal((await call(env, "POST", "/plan/abort", { key: DRIVER, body: { id: vanNiemand.id, date: vanNiemand.date } })).data.route.abortedBy, "bezorger");
+});
+
+await test("de planner geeft een rit aan een ander: wie hem had, ziet hem niet meer; verplaatsen houdt de bezorger", async () => {
+  const env = makeEnv();
+  const sanne = await addDriver(env, "Sanne");
+  const joost = await addDriver(env, "Joost");
+  const a = await seedOrder(env, DRS, "#DRS910");
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(1), name: "Doorn", orderKeys: [a.key], driverId: sanne.id } })).data.route;
+  const ziet = async (key) => (await call(env, "GET", "/plan", { key })).data.routes.map((entry) => entry.id);
+  assert.deepEqual(await ziet(sanne.code), [route.id]);
+
+  const geef = (driverId, key = PLANNER) => call(env, "POST", "/plan/driver", { key, body: { id: route.id, date: route.date, driverId } });
+  assert.equal((await geef(joost.id, sanne.code)).status, 403, "alleen de planner");
+  assert.equal((await geef(joost.id)).status, 200);
+  assert.deepEqual(await ziet(sanne.code), []);
+  assert.deepEqual(await ziet(joost.code), [route.id]);
+  assert.equal((await geef("bestaat-niet")).status, 404);
+  assert.deepEqual(await ziet(joost.code), [route.id], "een onbekende bezorger verandert niets");
+  assert.equal((await geef("")).status, 200);
+  assert.deepEqual(await ziet(joost.code), []);
+  assert.deepEqual(await ziet(DRIVER), [route.id], "zonder bezorger: alleen de oude code");
+
+  await geef(sanne.id);
+  const verplaatst = await call(env, "POST", "/plan/assign", { key: PLANNER, body: { id: route.id, fromDate: route.date, date: amsterdamDay(2), name: "Doorn", orderKeys: [a.key] } });
+  assert.equal(verplaatst.status, 200, JSON.stringify(verplaatst.data));
+  assert.equal(verplaatst.data.route.driverId, sanne.id, "zonder driverId blijft de bezorger");
+  assert.equal(verplaatst.data.route.number, route.number);
+  assert.equal((await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(3), orderKeys: [(await seedOrder(env, DRS, "#DRS911")).key], driverId: "weg" } })).status, 404, "inplannen voor een bezorger die niet bestaat");
+});
+
+await test("nieuwe code: de oude werkt meteen niet meer; verwijderd: de code werkt niet meer en de rit heeft niemand", async () => {
+  const env = makeEnv();
+  const sanne = await addDriver(env, "Sanne");
+  const joost = await addDriver(env, "Joost");
+  const a = await seedOrder(env, DRS, "#DRS920");
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(1), orderKeys: [a.key], driverId: joost.id } })).data.route;
+
+  const nieuw = await call(env, "POST", "/drivers/code", { key: PLANNER, body: { id: sanne.id } });
+  assert.equal(nieuw.status, 200);
+  assert.notEqual(nieuw.data.code, sanne.code);
+  assert.equal((await call(env, "GET", "/whoami", { key: sanne.code })).status, 401, "de oude code is dood");
+  assert.equal((await call(env, "GET", "/whoami", { key: nieuw.data.code })).data.driver.id, sanne.id, "zelfde bezorger, zelfde ritten");
+  assert.equal((await call(env, "POST", "/drivers/code", { key: PLANNER, body: { id: "weg" } })).status, 404);
+
+  const weg = await call(env, "POST", "/drivers/remove", { key: PLANNER, body: { id: joost.id } });
+  assert.deepEqual(weg.data.drivers.map((driver) => driver.name), ["Sanne"]);
+  assert.equal((await call(env, "GET", "/whoami", { key: joost.code })).status, 401);
+  assert.deepEqual((await call(env, "GET", "/plan", { key: nieuw.data.code })).data.routes, []);
+  assert.deepEqual((await call(env, "GET", "/plan", { key: DRIVER })).data.routes, [], "ook de oude code niet: de rit had een bezorger");
+  const planner = (await call(env, "GET", "/plan", { key: PLANNER })).data;
+  assert.equal(planner.routes.find((entry) => entry.id === route.id).driverId, joost.id, "de planner ziet hem, en geeft hem aan iemand anders");
+  assert.equal((await call(env, "POST", "/drivers/remove", { key: PLANNER, body: { id: joost.id } })).status, 200, "twee keer verwijderen kan geen kwaad");
+});
+
+await test("rem op codes: een bezorgerscode zet de teller niet op nul, en een haperende opslag is geen verkeerde code", async () => {
+  const env = makeEnv();
+  const sanne = await addDriver(env, "Sanne");
+  const vanaf = (key) => call(env, "GET", "/whoami", { key, headers: { "cf-connecting-ip": "203.0.113.50" } });
+  for (let poging = 1; poging <= 4; poging += 1) assert.equal((await vanaf(`raad-${poging}-abcdefgh`)).status, 401);
+  assert.equal((await vanaf(sanne.code)).status, 200);
+  assert.equal((await vanaf("raad-5-abcdefgh")).status, 429, "de bezorgerscode wiste de teller niet");
+
+  // The drivers could not be read: the phone must hear "try again", not "wrong
+  // code", or it forgets the code it has.
+  const kv = env.PLANNING_ORDERS;
+  const realGet = kv.get.bind(kv);
+  kv.get = async (key, type) => {
+    if (key === "drivers") throw new Error("storage hiccup");
+    return realGet(key, type);
+  };
+  try {
+    const hapert = await quietly(() => call(env, "GET", "/orders", { key: sanne.code }));
+    assert.ok(hapert.status >= 500, `status ${hapert.status}`);
+    assert.equal((await call(env, "GET", "/orders", { key: PLANNER })).status, 200, "de planner merkt er niets van");
+  } finally {
+    kv.get = realGet;
+  }
+});
+
 globalThis.fetch = realFetch;
 let failed = 0;
 for (const [status, name, error] of results) {

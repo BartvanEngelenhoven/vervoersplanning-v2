@@ -27,7 +27,7 @@ const CONFIG = {
   ritregelsV3: false,
 };
 
-const state = { concepts: [], heldKeys: new Set(), openConcept: null, routeInHandConcept: null, orders: [], decisions: [], routes: [], reviewRoutes: [], history: [], deliveredKeys: new Map(), historyLoaded: false, selected: new Set(), manualRoute: null, suggestions: [], plan: [], planStops: [], dayNotes: [], announcements: [], announceLive: false, allOrders: [], geo: {}, role: null, driverRouteId: null, openPlan: null, routeInHand: null, placing: false, lastFetchOk: false, driveMinutes: null, driveDepot: "", driveEstimateUnavailable: false };
+const state = { concepts: [], heldKeys: new Set(), openConcept: null, routeInHandConcept: null, orders: [], decisions: [], routes: [], reviewRoutes: [], history: [], deliveredKeys: new Map(), historyLoaded: false, selected: new Set(), manualRoute: null, suggestions: [], plan: [], planStops: [], dayNotes: [], announcements: [], announceLive: false, allOrders: [], geo: {}, role: null, driver: undefined, drivers: [], driverRouteId: null, openPlan: null, routeInHand: null, routeInHandDriver: undefined, driverCode: null, placing: false, lastFetchOk: false, driveMinutes: null, driveDepot: "", driveEstimateUnavailable: false };
 const decisionLabels = { include: "Meenemen", planned: "Ingepland", concept: "In concept", review: "Controleren", dhl: "DHL", fvr: "FVR", exclude: "Niet meenemen" };
 
 // What does not go with the van goes with a carrier, by shop: rijplaten with
@@ -74,6 +74,9 @@ const operatorKeyStorageKey = "vervoersplanning.operatorKey.v1";
 // The role that code opened last time, so a phone that loses its signal before
 // asking again keeps showing the driver's screen and not the planner's portal.
 const roleStorageKey = "vervoersplanning.role.v1";
+// Which driver the code belongs to, so the phone says "Welkom Sanne" before, or
+// without, a connection. null: the shared code from before drivers had names.
+const driverStorageKey = "vervoersplanning.driver.v1";
 // One-off clean-up of leftovers from before the planning went live: orders due
 // before this date stay out of sight here. Shopify is untouched and the records
 // are still in the store, so this is undone by removing the date. An order due
@@ -561,9 +564,31 @@ async function fetchRole() {
   try {
     const response = await backendFetch(`${CONFIG.apiBaseUrl}/whoami`, { cache: "no-store" });
     if (!response.ok) return null;
-    return (await response.json()).role || null;
+    const who = await response.json();
+    if (who.role === "driver") rememberDriver(who.driver || null);
+    return who.role || null;
   } catch {
     return null;
+  }
+}
+
+function storedDriver() {
+  try {
+    const known = JSON.parse(localStorage.getItem(driverStorageKey) ?? "false");
+    return known === null || typeof known?.name === "string" ? known : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// The driver this phone belongs to: { id, name }, or null for the shared code
+// from before drivers had names. Kept for the next time the phone opens.
+function rememberDriver(driver) {
+  state.driver = driver && driver.name ? { id: String(driver.id || ""), name: String(driver.name) } : null;
+  try {
+    localStorage.setItem(driverStorageKey, JSON.stringify(state.driver));
+  } catch {
+    // Not remembered; the next refresh says it again.
   }
 }
 
@@ -618,9 +643,14 @@ function renderDriverList(holder) {
   const perDag = [...new Set(ritten.map((planned) => planned.date))];
 
   const geladen = state.planLoaded || !usesBackend;
+  // The shared code from before drivers had names only shows routes that have
+  // no driver yet, so once the planner has made codes, its holder is told to
+  // ask for one.
+  const oudeCode = state.driver === null && state.ownCodes;
   holder.innerHTML = `
-    <div class="view-head"><h1>Jouw ritten</h1>
-      <p>${!geladen ? "De ritten zijn nog niet geladen." : ritten.length ? "Tik op een rit om de stops te zien." : "Er staat deze week nog geen rit voor je klaar."}</p></div>
+    <div class="view-head"><h1 class="driver-welcome">${state.driver?.name ? `Welkom ${escapeHtml(state.driver.name)}` : "Welkom"}</h1>
+      <p>${!geladen ? "De ritten zijn nog niet geladen." : ritten.length ? "Dit zijn jouw ritten. Tik op een rit om de stops te zien." : "Er staat deze week nog geen rit voor je klaar."}</p></div>
+    ${oudeCode ? `<p class="note-box">Je bent ingelogd met de oude code voor alle bezorgers. Daarmee zie je alleen ritten die nog geen bezorger hebben. Vraag de planner om je eigen code, tik onderaan op <b>Uitloggen op deze telefoon</b> en vul je eigen code in.</p>` : ""}
     ${state.lastFetchOk ? "" : `<p class="plan-offline">${offlineReason()} Je ziet de ritten zoals ze bij het laatste verversen waren; ververs als je bereik hebt.</p>`}
     ${perDag.map((dag) => {
       const naam = capitalize(new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag)));
@@ -924,6 +954,8 @@ function showView(name) {
   if (name === "vandaag") planningView = "map";
   if (name === "vandaag" || name === "kaart") renderPlanningOverview();
   if (name === "agenda") renderAgenda();
+  if (name !== "bezorgers" && state.driverCode) state.driverCode = null;
+  if (name === "bezorgers") renderDriversPage();
   if (name !== "agenda" && state.routeInHand) {
     state.routeInHand = null;
     renderRouteInHand();
@@ -940,6 +972,9 @@ function putRouteInHand(route, conceptId = null) {
   // One id for this route from the moment it is picked up: sent twice (a double
   // click, a retry), the backend knows it is the same route.
   state.routeInHandId = newId("rit");
+  // Who drives it is chosen each time, never carried over from the route before:
+  // a route given to the wrong driver shows that driver its customers.
+  state.routeInHandDriver = undefined;
   showView("agenda");
   renderRouteInHand();
   renderAgenda();
@@ -954,8 +989,25 @@ function renderRouteInHand() {
     bar.innerHTML = "";
     return;
   }
-  bar.innerHTML = `<p><strong>Kies een dag</strong> voor de rit naar ${escapeHtml(routeLabel(route))} (${route.orders.length} stops).</p>
+  // Without drivers on record there is nobody to choose: the route goes to
+  // nobody, as every route did before drivers had names.
+  const drivers = state.drivers || [];
+  const gekozen = routeInHandDriver();
+  bar.innerHTML = `<div class="in-hand">
+      <p>${drivers.length ? "<strong>Kies wie hem rijdt en een dag</strong>" : "<strong>Kies een dag</strong>"} voor de rit naar ${escapeHtml(routeLabel(route))} (${route.orders.length} ${route.orders.length === 1 ? "stop" : "stops"}).</p>
+      ${drivers.length ? `<div class="driver-pick" role="group" aria-label="Bezorger">
+        ${drivers.map((driver) => `<button class="driver-chip${gekozen === driver.id ? " active" : ""}" type="button" data-driver="${escapeHtml(driver.id)}" aria-pressed="${gekozen === driver.id}">${escapeHtml(driver.name)}</button>`).join("")}
+        <button class="driver-chip later${gekozen === "" ? " active" : ""}" type="button" data-driver="" aria-pressed="${gekozen === ""}">Later kiezen</button>
+      </div>` : ""}
+    </div>
     <button id="dropRouteInHand" class="button subtle-action" type="button">Annuleren</button>`;
+  bar.querySelectorAll(".driver-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      state.routeInHandDriver = chip.dataset.driver;
+      renderRouteInHand();
+      renderAgenda();
+    });
+  });
   bar.querySelector("#dropRouteInHand").addEventListener("click", () => {
     state.routeInHand = null;
     renderRouteInHand();
@@ -963,9 +1015,27 @@ function renderRouteInHand() {
   });
 }
 
+// The driver picked for the route in hand: an id, "" for nobody yet, or
+// undefined while there are drivers and none was picked.
+function routeInHandDriver() {
+  if (!(state.drivers || []).length) return "";
+  const gekozen = state.routeInHandDriver;
+  if (gekozen === "" || (state.drivers || []).some((driver) => driver.id === gekozen)) return gekozen;
+  return undefined;
+}
+
+function driverName(id) {
+  return (state.drivers || []).find((driver) => driver.id === id)?.name || "";
+}
+
 async function placeRouteOnDay(date) {
   const route = state.routeInHand;
   if (!route || state.placing) return;
+  const driverId = routeInHandDriver();
+  if (driverId === undefined) {
+    window.alert("Kies eerst wie de rit rijdt, bovenaan bij de rit.");
+    return;
+  }
   // Planned past a stop's last day: said before, not found out afterwards.
   // A stop already late is late on any day, so it does not ask.
   const vandaag = isoDay(new Date());
@@ -984,6 +1054,7 @@ async function placeRouteOnDay(date) {
     keys: route.orders.map(orderKey),
     tagKeys: route.orders.filter(needsOwnDeliveryTag).map(orderKey),
     conceptId,
+    driverId,
   });
   state.placing = false;
   // A note left open in the agenda would keep it from being drawn again, and
@@ -1100,18 +1171,23 @@ function renderAgenda() {
   const openVanEerder = (planned) => !planned.abortedAt && plannedRouteStatus(planned).open.length > 0;
   const achterstallig = [...new Set(state.plan.filter((planned) => planned.date < vandaag && openVanEerder(planned)).map((planned) => planned.date))].sort();
   const inHand = Boolean(state.routeInHand);
+  // The days open up once someone is picked, and their button says who: the
+  // click that plans is also the last look at who gets it.
+  const inHandDriver = inHand ? routeInHandDriver() : "";
+  const placeLabel = inHandDriver ? `Inplannen voor ${escapeHtml(driverName(inHandDriver))}` : "Rit hier inplannen";
+  const drivers = state.drivers || [];
 
   holder.innerHTML = [...achterstallig, ...dagen].map((dag) => {
     const verleden = dag < vandaag;
     const ritten = state.plan.filter((planned) => planned.date === dag && (!verleden || openVanEerder(planned)));
     const naam = capitalize(new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag)));
     const label = dag === vandaag ? `${naam} · vandaag` : verleden ? `${naam} · niet (helemaal) gereden` : naam;
-    const kiesbaar = inHand && !verleden;
+    const kiesbaar = inHand && !verleden && inHandDriver !== undefined;
     return `<article class="agenda-day${dag === vandaag ? " vandaag" : ""}${verleden ? " achterstallig" : ""}${ritten.length ? "" : " leeg"}${kiesbaar ? " kiesbaar" : ""}" data-day="${dag}">
       <h3>${label}</h3>
       ${dayNoteFor(dag) ? `<p class="agenda-day-note">${escapeHtml(dayNoteFor(dag))}</p>` : ""}
       ${verleden ? "" : `<div class="day-note-slot" data-day="${dag}"></div>`}
-      ${kiesbaar ? `<button class="button primary place-here" type="button" data-day="${dag}"${state.placing ? " disabled" : ""}>Rit hier inplannen</button>` : ""}
+      ${kiesbaar ? `<button class="button primary place-here" type="button" data-day="${dag}"${state.placing ? " disabled" : ""}>${placeLabel}</button>` : ""}
       ${ritten.map((planned) => {
         const status = plannedRouteStatus(planned);
         const bezorgd = status.stops.filter((stop) => stop.status === "bezorgd").length;
@@ -1123,9 +1199,21 @@ function renderAgenda() {
         const telling = planned.abortedAt
           ? `${bezorgd} bezorgd`
           : [`${status.open.length} ${status.open.length === 1 ? "stop" : "stops"} te gaan`, bezorgd ? `${bezorgd} bezorgd` : "", anders ? `${anders} geannuleerd of onbekend` : ""].filter(Boolean).join(" · ");
+        // Who drives it, and a way to change that. A route whose driver was
+        // removed has nobody, the same as one planned before drivers had names.
+        const bestuurder = driverName(planned.driverId);
+        const wie = !drivers.length ? ""
+          : planned.abortedAt ? (bestuurder ? `<span class="agenda-driver">Bezorger: ${escapeHtml(bestuurder)}</span>` : "")
+            : `<label class="agenda-driver-pick${bestuurder ? "" : " leeg"}"><span>Bezorger</span>
+              <select class="route-driver" data-planned="${escapeHtml(planned.id)}">
+                <option value=""${bestuurder ? "" : " selected"}>Nog niemand</option>
+                ${drivers.map((driver) => `<option value="${escapeHtml(driver.id)}"${driver.id === planned.driverId ? " selected" : ""}>${escapeHtml(driver.name)}</option>`).join("")}
+              </select></label>
+              ${bestuurder ? "" : '<em class="agenda-no-driver">Nog geen bezorger: kies wie deze rit rijdt.</em>'}`;
         return `<div class="agenda-route${planned.abortedAt ? " afgebroken" : ""}">
           <b><span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span> ${escapeHtml(planned.name)}</b>
           <span>${telling}</span>
+          ${wie}
           ${planned.note ? `<p class="agenda-note">${escapeHtml(planned.note)}</p>` : ""}
           ${announceLine(planned)}
           ${afgebroken}
@@ -1148,6 +1236,9 @@ function renderAgenda() {
   });
   holder.querySelectorAll(".drop-planned").forEach((button) => {
     button.addEventListener("click", () => removePlannedRoute(state.plan.find((planned) => planned.id === button.dataset.planned)));
+  });
+  holder.querySelectorAll(".route-driver").forEach((select) => {
+    select.addEventListener("change", () => setRouteDriver(state.plan.find((planned) => planned.id === select.dataset.planned), select));
   });
   holder.querySelectorAll(".note-slot").forEach((slot) => {
     const planned = state.plan.find((entry) => entry.id === slot.dataset.planned);
@@ -1206,7 +1297,7 @@ function renderOpenPlan() {
     <div class="panel-heading compact">
       <div>
         <h2><span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span> ${escapeHtml(planned.name)}</h2>
-        <p class="open-plan-meta">${formatDate(planned.date)} · ${status.open.length} ${status.open.length === 1 ? "stop" : "stops"}${huidig ? ` · ongeveer ${formatMinutes(huidig.totalMinutes)} onderweg` : ""}</p>
+        <p class="open-plan-meta">${formatDate(planned.date)} · ${status.open.length} ${status.open.length === 1 ? "stop" : "stops"}${huidig ? ` · ongeveer ${formatMinutes(huidig.totalMinutes)} onderweg` : ""}${(state.drivers || []).length ? ` · ${driverName(planned.driverId) ? escapeHtml(driverName(planned.driverId)) : "nog geen bezorger"}` : ""}</p>
       </div>
       <button id="closeOpenPlan" class="button subtle-action" type="button">Sluiten</button>
     </div>
@@ -2129,7 +2220,7 @@ function renderHistory() {
 
 function historySourceLabel(item) {
   if (item.source === "shopify") return "In Shopify verzonden";
-  if (item.source === "bezorger") return "Bezorgd gemeld door de bezorger";
+  if (item.source === "bezorger") return `Bezorgd gemeld door ${item.by ? escapeHtml(item.by) : "de bezorger"}`;
   return "Bezorgd gemeld";
 }
 
@@ -2381,6 +2472,7 @@ function rebuildPlanning() {
   renderSummary();
   renderConcepts();
   renderAgenda();
+  renderDriversPage();
   renderOpenPlan();
   renderDriver();
   renderRules();
@@ -2528,10 +2620,12 @@ async function backendFetch(url, options = {}) {
     try {
       localStorage.removeItem(operatorKeyStorageKey);
       localStorage.removeItem(roleStorageKey);
+      localStorage.removeItem(driverStorageKey);
     } catch {
       // Nothing stored to forget.
     }
     state.role = null;
+    state.driver = undefined;
     if (!askOperatorKey("Die code klopt niet. Probeer het opnieuw:")) return response;
     response = await send();
   }
@@ -2737,6 +2831,11 @@ async function fetchPlan() {
     // Stops of today's routes delivered today, with their point, so a day's
     // 5:45 counts what the van already drove. null from an older Worker.
     state.doneToday = Array.isArray(payload.doneToday) ? payload.doneToday : null;
+    // The planner gets every driver, to give routes to; the driver's phone its
+    // own name. An older Worker sends neither.
+    if (Array.isArray(payload.drivers)) state.drivers = payload.drivers;
+    if ("driver" in payload) rememberDriver(payload.driver);
+    state.ownCodes = Boolean(payload.ownCodes);
     state.planLoaded = true;
     return payload.routes || [];
   } catch {
@@ -2754,13 +2853,14 @@ function planKeys(planned) {
   });
 }
 
-async function savePlan({ id, date, fromDate, name, keys, tagKeys = [], conceptId = null }) {
+async function savePlan({ id, date, fromDate, name, keys, tagKeys = [], conceptId = null, driverId }) {
   let response = null;
   try {
     response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/assign`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id, date, fromDate, name, orderKeys: keys, tagKeys, conceptId }),
+      // Without a driverId the route keeps the driver it has.
+      body: JSON.stringify({ id, date, fromDate, name, orderKeys: keys, tagKeys, conceptId, ...(driverId === undefined ? {} : { driverId }) }),
     });
   } catch {
     return { error: "Inplannen is niet gelukt: geen verbinding. Probeer het opnieuw." };
@@ -2768,6 +2868,23 @@ async function savePlan({ id, date, fromDate, name, keys, tagKeys = [], conceptI
   if (!response.ok) return { error: await errorText(response, "Inplannen is niet gelukt. Probeer het opnieuw.") };
   const payload = await response.json();
   return { route: payload.route || null, conceptLeft: payload.conceptLeft || [] };
+}
+
+// Giving a planned route to another driver (or to nobody yet), saved at once.
+// The driver who had it no longer sees it from their next refresh.
+async function setRouteDriver(planned, select) {
+  if (!planned) return;
+  const driverId = select.value;
+  select.disabled = true;
+  const response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/driver`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: planned.id, date: planned.date, driverId }),
+  }).catch(() => null);
+  // Failed, the list goes back to who has it on record.
+  if (!response?.ok) window.alert(response ? await errorText(response, "Opslaan is niet gelukt.") : "Geen verbinding. Probeer het opnieuw.");
+  state.plan = (await fetchPlan()) || state.plan;
+  rebuildPlanning();
 }
 
 async function removePlannedRoute(planned) {
@@ -3274,10 +3391,127 @@ function logout() {
   try {
     localStorage.removeItem(operatorKeyStorageKey);
     localStorage.removeItem(roleStorageKey);
+    localStorage.removeItem(driverStorageKey);
   } catch {
     // Nothing stored to forget.
   }
   window.location.reload();
+}
+
+// ---------------------------------------------------------------------------
+// Bezorgers: the planner's list of drivers. Each has a code of their own, which
+// the Worker makes and shows once, to pass on; a new one stops the old one.
+// ---------------------------------------------------------------------------
+function renderDriversPage() {
+  const holder = document.querySelector("#driverList");
+  if (!holder || state.role === "driver") return;
+  const drivers = state.drivers || [];
+  holder.innerHTML = drivers.length ? drivers.map((driver) => {
+    const ritten = upcomingRoutesOf(driver.id);
+    return `<article class="driver-card">
+      <div><h2>${escapeHtml(driver.name)}</h2>
+        <p>${ritten ? `${ritten} ${ritten === 1 ? "rit" : "ritten"} in de agenda` : "Geen ritten in de agenda"}${driver.codeSetAt ? ` · code gemaakt ${formatDateTime(driver.codeSetAt)}` : ""}</p></div>
+      <div class="driver-card-actions">
+        <button class="button subtle-action driver-renew" type="button" data-driver="${escapeHtml(driver.id)}">Nieuwe code</button>
+        <button class="button subtle-action driver-remove" type="button" data-driver="${escapeHtml(driver.id)}">Verwijderen</button>
+      </div>
+    </article>`;
+  }).join("") : '<p class="empty">Nog geen bezorgers. Voeg ze hieronder toe; elke bezorger krijgt meteen een eigen code.</p>';
+  const find = (button) => drivers.find((driver) => driver.id === button.dataset.driver);
+  holder.querySelectorAll(".driver-renew").forEach((button) => button.addEventListener("click", () => renewDriverCode(find(button), button)));
+  holder.querySelectorAll(".driver-remove").forEach((button) => button.addEventListener("click", () => removeDriver(find(button), button)));
+  renderDriverCode();
+}
+
+function upcomingRoutesOf(driverId) {
+  const vandaag = isoDay(new Date());
+  return state.plan.filter((planned) => planned.driverId === driverId && planned.date >= vandaag && !planned.abortedAt).length;
+}
+
+// A code just made, until Klaar or leaving the page: it is never shown again.
+function renderDriverCode() {
+  const box = document.querySelector("#driverCode");
+  if (!box) return;
+  const shown = state.driverCode;
+  box.hidden = !shown;
+  if (!shown) {
+    box.innerHTML = "";
+    return;
+  }
+  const naam = escapeHtml(shown.name);
+  box.innerHTML = `<p>De code voor <b>${naam}</b>:</p>
+    <p class="driver-code-value">${escapeHtml(shown.code)}</p>
+    <p>Geef deze code door aan ${naam}. Open op de telefoon <b>specialistenplanning.pages.dev</b> en vul de code één keer in; de telefoon onthoudt hem. Hoofdletters, spaties en streepjes maken niet uit.</p>
+    <p class="driver-code-once">Je ziet deze code alleen nu. Kwijt? Maak dan een nieuwe.</p>
+    <div class="driver-code-actions">
+      <button class="button primary driver-code-copy" type="button">Kopieer code</button>
+      <button class="button subtle-action driver-code-done" type="button">Klaar</button>
+    </div>`;
+  box.querySelector(".driver-code-copy").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    try {
+      await window.navigator.clipboard.writeText(shown.code);
+      button.textContent = "Gekopieerd";
+    } catch {
+      button.textContent = "Kopiëren lukt hier niet: neem hem over";
+    }
+  });
+  box.querySelector(".driver-code-done").addEventListener("click", () => {
+    state.driverCode = null;
+    renderDriverCode();
+  });
+}
+
+// One of the three changes to the list, as the Worker answers it: the list as
+// it is now, and a new code when one was made.
+async function driverAction(path, body) {
+  const response = await backendFetch(`${CONFIG.apiBaseUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => null);
+  if (!response?.ok) {
+    window.alert(response ? await errorText(response, "Dat is niet gelukt. Probeer het opnieuw.") : "Geen verbinding. Probeer het opnieuw.");
+    return null;
+  }
+  const payload = await response.json();
+  if (Array.isArray(payload.drivers)) state.drivers = payload.drivers;
+  state.driverCode = payload.code && payload.driver ? { name: payload.driver.name, code: payload.code } : null;
+  renderDriversPage();
+  renderRouteInHand();
+  renderAgenda();
+  return payload;
+}
+
+async function addDriverFromForm(form) {
+  const input = form.querySelector("#driverAddName");
+  const naam = String(input.value || "").trim();
+  if (!naam) {
+    input.focus();
+    return;
+  }
+  const button = form.querySelector("button[type='submit']");
+  button.disabled = true;
+  const result = await driverAction("/drivers/add", { name: naam });
+  button.disabled = false;
+  if (result) input.value = "";
+  document.querySelector("#driverCode")?.scrollIntoView?.({ block: "nearest" });
+}
+
+async function renewDriverCode(driver, button) {
+  if (!driver) return;
+  if (!window.confirm(`Een nieuwe code maken voor ${driver.name}? De oude code werkt dan meteen niet meer; op de telefoon moet de nieuwe worden ingevuld.`)) return;
+  button.disabled = true;
+  await driverAction("/drivers/code", { id: driver.id });
+  document.querySelector("#driverCode")?.scrollIntoView?.({ block: "nearest" });
+}
+
+async function removeDriver(driver, button) {
+  if (!driver) return;
+  const ritten = upcomingRoutesOf(driver.id);
+  if (!window.confirm(`${driver.name} verwijderen? De code werkt dan meteen niet meer.${ritten ? ` ${ritten} ${ritten === 1 ? "rit staat" : "ritten staan"} dan zonder bezorger in de agenda.` : ""}`)) return;
+  button.disabled = true;
+  await driverAction("/drivers/remove", { id: driver.id });
 }
 
 // Taking a stop out of an opened planned route, saved at once. The stop comes
@@ -3659,6 +3893,10 @@ document.querySelector("#shopifyImport")?.addEventListener("submit", (event) => 
   event.preventDefault();
   refreshFromShopify(event.target);
 });
+document.querySelector("#driverAdd")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  addDriverFromForm(event.target);
+});
 document.querySelector("#makeRouteButton")?.addEventListener("click", makeRouteFromSelection);
 document.querySelector("#markSelectedDeliveredButton")?.addEventListener("click", markSelectedDelivered);
 document.querySelector("#clearSelectionButton")?.addEventListener("click", clearSelection);
@@ -3699,6 +3937,7 @@ renderRules();
 // driver's screen even before, or without, a connection to ask again.
 try {
   const knownRole = storedOperatorKey() ? localStorage.getItem(roleStorageKey) : null;
+  if (knownRole === "driver") state.driver = storedDriver();
   if (knownRole === "driver" || knownRole === "planner") applyRole(knownRole);
 } catch {
   // Asked on the first refresh instead.
