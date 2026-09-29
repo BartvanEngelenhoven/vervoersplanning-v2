@@ -599,21 +599,24 @@ await test("Bezorgers: elke bezorger met ritten, een nieuwe code één keer te z
 function opDag(stad, lat, lon, dag, extra = {}) {
   return order(stad, lat, lon, { earliestDate: dag, dueDate: dag, noteDates: { earliest: dag, latest: dag, avoid: [] }, customerNote: `Bezorging ${dag}`, ...extra });
 }
+function vanafDag(stad, lat, lon, dag, extra = {}) {
+  return order(stad, lat, lon, { earliestDate: dag, dueDate: dag, noteDates: { earliest: dag, latest: null, avoid: [] }, customerNote: `Vanaf ${dag}`, ...extra });
+}
 const besluit = (item) => state.decisions.find((entry) => entry.order.id === item.id);
 
-await test("een order die volgens de opmerking pas later mag, wacht, en komt de werkdag ervoor in de voorstellen", () => {
+await test("een order die volgens de opmerking pas vanaf een dag mag, wacht, en komt de werkdag ervoor in de voorstellen", () => {
   clockAt("2026-09-29T08:00:00Z", "Europe/Amsterdam"); // dinsdag 29 september
-  const woensdag = opDag("Doorn", 52.03, 5.32, "2026-10-07");
-  const maandag = opDag("Leersum", 52.01, 5.43, "2026-10-12");
+  const woensdag = vanafDag("Doorn", 52.03, 5.32, "2026-10-07");
+  const maandag = vanafDag("Leersum", 52.01, 5.43, "2026-10-12");
   const nu = order("Zeist", 52.09, 5.23);
   scene({ role: "planner", orders: [woensdag, maandag, nu] });
   assert.equal(besluit(woensdag).decision, "wait");
-  assert.match(besluit(woensdag).reason, /Volgens de opmerking op wo 7 okt; komt di 6 okt in de voorstellen/);
+  assert.match(besluit(woensdag).reason, /Volgens de opmerking vanaf wo 7 okt; komt di 6 okt in de voorstellen/);
   assert.equal(besluit(maandag).decision, "wait");
   assert.match(besluit(maandag).reason, /komt vr 9 okt in de voorstellen/, "voor een maandag de vrijdag ervoor");
   assert.notEqual(besluit(nu).decision, "wait");
   assert.ok(!state.routes.some((route) => route.orders.some((item) => item.id === woensdag.id)), "niet in een voorstel");
-  assert.match(fn.dueLabel(woensdag), /op wo 7 okt \(opmerking\)/);
+  assert.match(fn.dueLabel(woensdag), /vanaf wo 7 okt \(opmerking\)/);
 
   clockAt("2026-10-06T08:00:00Z", "Europe/Amsterdam"); // dinsdag 6 oktober
   scene({ role: "planner", orders: [woensdag, maandag, nu] });
@@ -656,20 +659,84 @@ await test("een dag in de opmerking die de planning niet zeker kan plaatsen: Con
   assert.equal(fn.additionAllowed(besluit(vaag), "2026-09-29"), false);
 });
 
-await test("Kan er nog bij: een order die wacht, alleen voor een rit op een dag die de opmerking toestaat", () => {
+await test("Kan er nog bij: een order met een dag uit de opmerking, alleen voor een rit op een dag die mag", () => {
   clockAt("2026-09-29T08:00:00Z", "Europe/Amsterdam");
-  const woensdag = opDag("Doorn", 52.03, 5.32, "2026-10-07");
-  scene({ role: "planner", orders: [woensdag] });
-  const item = besluit(woensdag);
-  assert.equal(fn.additionAllowed(item, "2026-10-07"), true, "een rit op die dag");
-  assert.equal(fn.additionAllowed(item, "2026-10-06"), false, "een dag te vroeg");
-  assert.equal(fn.additionAllowed(item, null), false, "een voorstel zonder dag");
-  // A route already planned on that day gets it pointed out.
+  const vast = opDag("Doorn", 52.03, 5.32, "2026-10-07");
+  const vanaf = vanafDag("Driebergen", 52.05, 5.28, "2026-10-07");
+  scene({ role: "planner", orders: [vast, vanaf] });
+  for (const item of [besluit(vast), besluit(vanaf)]) {
+    assert.equal(fn.additionAllowed(item, "2026-10-07"), true, `${item.order.customerNote}: een rit op die dag`);
+    assert.equal(fn.additionAllowed(item, "2026-10-06"), false, `${item.order.customerNote}: een dag te vroeg`);
+    assert.equal(fn.additionAllowed(item, null), false, `${item.order.customerNote}: een voorstel zonder dag`);
+  }
+  // A route already planned on that day: the concept, and the waiting order, say which.
   const leersum = order("Leersum", 52.01, 5.43);
   const rit = { id: "rit-wo", number: 4, date: "2026-10-07", name: "Leersum", orderKeys: [key(leersum)] };
-  scene({ role: "planner", orders: [woensdag, leersum], plan: [rit] });
-  assert.equal(besluit(woensdag).decision, "wait");
-  assert.match(besluit(woensdag).reason, /Past bij rit 4 op 07-10-2026/);
+  scene({ role: "planner", orders: [vast, vanaf, leersum], plan: [rit] });
+  assert.equal(besluit(vast).decision, "concept");
+  assert.equal(besluit(vast).concept.fits[0].planned.number, 4);
+  fn.renderAgenda();
+  assert.match(element("#agendaDays").innerHTML, new RegExp(`${vast.id} past bij rit 4 \\(\\+`));
+  assert.equal(besluit(vanaf).decision, "wait");
+  assert.match(besluit(vanaf).reason, /Past bij rit 4 op 07-10-2026/);
+});
+
+await test("een vaste dag in de opmerking staat meteen als concept op die dag in de agenda, per richting", () => {
+  clockAt("2026-09-29T08:00:00Z", "Europe/Amsterdam");
+  const doorn = opDag("Doorn", 52.03, 5.32, "2026-10-07");
+  const leersum = opDag("Leersum", 52.01, 5.43, "2026-10-07");
+  const zwolle = opDag("Zwolle", 52.51, 6.08, "2026-10-07", { paid: false });
+  const periode = vanafDag("Zeist", 52.09, 5.23, "2026-10-05");
+  const gewoon = order("Utrecht", 52.09, 5.12);
+  scene({ role: "planner", orders: [doorn, leersum, zwolle, periode, gewoon] });
+  assert.equal(state.noteConcepts.length, 2, "twee richtingen, twee concepten");
+  const west = state.noteConcepts.find((concept) => concept.orders.includes(doorn));
+  assert.ok(west.orders.includes(leersum), "dezelfde dag en richting samen");
+  assert.equal(west.date, "2026-10-07");
+  for (const item of [doorn, leersum, zwolle]) {
+    assert.equal(besluit(item).decision, "concept");
+    assert.match(besluit(item).reason, /op wo 7 okt: staat als concept op die dag in de agenda/);
+  }
+  assert.equal(besluit(periode).decision, "wait", "een periode wacht, zoals voorheen");
+  assert.ok(!state.routes.some((route) => route.orders.some((item) => [doorn, leersum, zwolle].includes(item))), "niet ook nog in een voorstel");
+
+  fn.renderAgenda();
+  const agenda = element("#agendaDays").innerHTML;
+  const woensdag = agenda.slice(agenda.indexOf('data-day="2026-10-07"'));
+  assert.match(woensdag, /<span class="concept-tag">Concept<\/span>/);
+  assert.match(woensdag, /de dag uit de opmerking/);
+  assert.match(woensdag, /Nog geen ritnummer; de bezorger ziet dit niet/);
+  assert.match(woensdag, new RegExp(`Zwolle · ${zwolle.id} <em>nog niet betaald</em>`));
+
+  fn.putRouteInHand(west.route, null, west.date);
+  assert.equal(state.routeInHandDay, "2026-10-07");
+  assert.match(element("#routeInHand").innerHTML, /volgens de opmerking op wo 7 okt/);
+  assert.equal(state.routeInHand.orders.length, 2);
+
+  // The Concepten page lists them too, and counts them.
+  fn.renderConcepts();
+  assert.match(element("#conceptList").innerHTML, /Uit de opmerkingen/);
+  assert.equal(element("#conceptCount").textContent, 2);
+
+  // The driver's phone makes none: it gets no notes, and weighs by the days.
+  scene({ role: "driver", orders: [doorn] });
+  assert.equal(state.noteConcepts.length, 0);
+});
+
+await test("een concept uit de opmerking op een voorbije dag blijft in de agenda, en bewaarde concepten staan bovenaan", () => {
+  clockAt("2026-10-08T08:00:00Z", "Europe/Amsterdam"); // donderdag 8 oktober
+  const gemist = opDag("Doorn", 52.03, 5.32, "2026-10-07");
+  const bewaard = order("Utrecht", 52.09, 5.12);
+  scene({ role: "planner", orders: [gemist, bewaard] });
+  state.concepts = [{ id: "concept-1", name: "Utrecht", orderKeys: [key(bewaard)], createdAt: "2026-10-06T10:00:00Z" }];
+  fn.rebuildPlanning();
+  const agenda = element("#agendaDays").innerHTML;
+  assert.match(agenda, /Woensdag 7 oktober · niet ingepland/);
+  assert.ok(agenda.indexOf('data-day="2026-10-07"') < agenda.indexOf('data-day="2026-10-08"'), "bovenaan, voor vandaag");
+  assert.equal(element("#agendaConcepts").hidden, false);
+  assert.match(element("#agendaConcepts").innerHTML, /Concepten, nog zonder dag/);
+  assert.match(element("#agendaConcepts").innerHTML, /<span class="concept-tag">Concept<\/span> Utrecht/);
+  state.concepts = [];
 });
 
 let failed = 0;

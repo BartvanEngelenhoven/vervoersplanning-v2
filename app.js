@@ -27,7 +27,7 @@ const CONFIG = {
   ritregelsV3: false,
 };
 
-const state = { concepts: [], heldKeys: new Set(), openConcept: null, routeInHandConcept: null, orders: [], decisions: [], routes: [], reviewRoutes: [], history: [], deliveredKeys: new Map(), historyLoaded: false, selected: new Set(), manualRoute: null, suggestions: [], plan: [], planStops: [], dayNotes: [], announcements: [], announceLive: false, allOrders: [], geo: {}, role: null, driver: undefined, drivers: [], driverRouteId: null, openPlan: null, routeInHand: null, routeInHandDriver: undefined, driverCode: null, placing: false, lastFetchOk: false, driveMinutes: null, driveDepot: "", driveEstimateUnavailable: false };
+const state = { concepts: [], heldKeys: new Set(), openConcept: null, routeInHandConcept: null, orders: [], decisions: [], routes: [], reviewRoutes: [], history: [], deliveredKeys: new Map(), historyLoaded: false, selected: new Set(), manualRoute: null, suggestions: [], plan: [], planStops: [], dayNotes: [], announcements: [], announceLive: false, allOrders: [], geo: {}, role: null, driver: undefined, drivers: [], driverRouteId: null, openPlan: null, routeInHand: null, routeInHandDriver: undefined, routeInHandDay: null, noteConcepts: [], driverCode: null, placing: false, lastFetchOk: false, driveMinutes: null, driveDepot: "", driveEstimateUnavailable: false };
 const decisionLabels = { include: "Meenemen", planned: "Ingepland", concept: "In concept", review: "Controleren", wait: "Wacht op datum", dhl: "DHL", fvr: "FVR", exclude: "Niet meenemen" };
 
 // What does not go with the van goes with a carrier, by shop: rijplaten with
@@ -597,7 +597,7 @@ function renderRules() {
     ["Grote slowfeeders", `${alwaysOwnTransportProducts.length} producttitels uit de vaste lijst gaan altijd zelf, ${budget(transportRules.alwaysOwn)}.${v3 ? " Rijplaten en XXL bakken dezelfde kant op rijden mee als de extra rijtijd binnen hun eigen budget past; het hooihuisje maakt hun budget niet groter." : ""}`],
     ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Anders via DHL.`],
     ["Niet met de bus", "Wat niet met de bus kan, gaat met een vervoerder: rijplaten met FVR, slowfeeders met DHL. Rijdt er een rit vlak langs, dan gaat hij toch mee als de rit er hooguit een uur langer van wordt."],
-    ["Datums in de opmerking", "Staat er in de opmerking van een order een dag, dan gaat die voor de dag van de webshop. 'Bezorging 7 oktober' is op die dag; 'uiterlijk' of 'voor' een laatste dag; 'vanaf', 'na' of 'niet voor' een eerste; 'tussen 5 en 9 oktober' of 'week 41' een periode; 'niet op' of 'niet thuis' een dag die niet kan. Een order die pas later mag, wacht en komt de werkdag ervoor in de voorstellen. Wat de planning niet zeker kan plaatsen ('dinsdag', 'volgende week', twee dagen die botsen), staat onder Controleren."],
+    ["Datums in de opmerking", "Staat er in de opmerking van een order een dag, dan gaat die voor de dag van de webshop. 'Bezorging 7 oktober' is op die dag; 'uiterlijk' of 'voor' een laatste dag; 'vanaf', 'na' of 'niet voor' een eerste; 'tussen 5 en 9 oktober' of 'week 41' een periode; 'niet op' of 'niet thuis' een dag die niet kan. Een order met één vaste dag staat meteen als concept op die dag in de agenda; Inplannen maakt er een rit van. Een order die pas vanaf een dag mag, of binnen een periode, wacht en komt de werkdag ervoor in de voorstellen. Wat de planning niet zeker kan plaatsen ('dinsdag', 'volgende week', twee dagen die botsen), staat onder Controleren."],
     ["Uit een voorstel gehaald", "Met het min-teken haal je een order uit een voorstel. Hij gaat dan met FVR (rijplaten) of DHL (slowfeeders) en komt niet meer in een voorstel. Onder Orders zet Terug naar de planning hem terug."],
     ["Al het andere", `Gaat via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit ${formatMinutes(CONFIG.packageDetourMinutes)} langer van worden. Zo'n pakket krijgt bij het inplannen in Shopify de tag 'eigen bezorging', zodat het niet ook met DHL meegaat.`],
     ["Net erover", v3
@@ -1023,12 +1023,14 @@ function showView(name) {
   window.scrollTo({ top: 0 });
 }
 
-function putRouteInHand(route, conceptId = null) {
+function putRouteInHand(route, conceptId = null, day = null) {
   // The route on screen is the one from before the concept change on its way:
   // planned now, a stop just taken out would ride along after all.
   if (state.conceptSaving) return;
   state.routeInHand = route;
   state.routeInHandConcept = conceptId;
+  // The day the notes of its orders name, for a concept made from them.
+  state.routeInHandDay = day;
   // One id for this route from the moment it is picked up: sent twice (a double
   // click, a retry), the backend knows it is the same route.
   state.routeInHandId = newId("rit");
@@ -1054,7 +1056,7 @@ function renderRouteInHand() {
   const drivers = state.drivers || [];
   const gekozen = routeInHandDriver();
   bar.innerHTML = `<div class="in-hand">
-      <p>${drivers.length ? "<strong>Kies wie hem rijdt en een dag</strong>" : "<strong>Kies een dag</strong>"} voor de rit naar ${escapeHtml(routeLabel(route))} (${route.orders.length} ${route.orders.length === 1 ? "stop" : "stops"}).</p>
+      <p>${drivers.length ? "<strong>Kies wie hem rijdt en een dag</strong>" : "<strong>Kies een dag</strong>"} voor de rit naar ${escapeHtml(routeLabel(route))} (${route.orders.length} ${route.orders.length === 1 ? "stop" : "stops"})${state.routeInHandDay ? `, volgens de opmerking op ${escapeHtml(shortDay(state.routeInHandDay))}` : ""}.</p>
       ${drivers.length ? `<div class="driver-pick" role="group" aria-label="Bezorger">
         ${drivers.map((driver) => `<button class="driver-chip${gekozen === driver.id ? " active" : ""}" type="button" data-driver="${escapeHtml(driver.id)}" aria-pressed="${gekozen === driver.id}">${escapeHtml(driver.name)}</button>`).join("")}
         <button class="driver-chip later${gekozen === "" ? " active" : ""}" type="button" data-driver="" aria-pressed="${gekozen === ""}">Later kiezen</button>
@@ -1135,6 +1137,7 @@ async function placeRouteOnDay(date) {
   }
   state.routeInHand = null;
   state.routeInHandConcept = null;
+  state.routeInHandDay = null;
   // A concept that is planned is a route now; an opened one closes. Orders
   // added to it meanwhile on another screen stay behind in the concept.
   if (conceptId && state.openConcept?.id === conceptId) {
@@ -1237,7 +1240,14 @@ function renderAgenda() {
   // until someone deals with it. Routes that were driven, or broken off with
   // their stops handed back, have nothing left to do here.
   const openVanEerder = (planned) => !planned.abortedAt && plannedRouteStatus(planned).open.length > 0;
-  const achterstallig = [...new Set(state.plan.filter((planned) => planned.date < vandaag && openVanEerder(planned)).map((planned) => planned.date))].sort();
+  const noteConcepts = state.noteConcepts || [];
+  // A concept from a note on a day gone by was not planned: it stays in sight.
+  const achterstallig = [...new Set([
+    ...state.plan.filter((planned) => planned.date < vandaag && openVanEerder(planned)).map((planned) => planned.date),
+    ...noteConcepts.filter((concept) => concept.date < vandaag).map((concept) => concept.date),
+  ])].sort();
+  // And one further ahead than the fortnight gets its day at the end.
+  const verderOp = [...new Set(noteConcepts.filter((concept) => concept.date > dagen[dagen.length - 1]).map((concept) => concept.date))].sort();
   const inHand = Boolean(state.routeInHand);
   // The days open up once someone is picked, and their button says who: the
   // click that plans is also the last look at who gets it.
@@ -1245,13 +1255,15 @@ function renderAgenda() {
   const placeLabel = inHandDriver ? `Inplannen voor ${escapeHtml(driverName(inHandDriver))}` : "Rit hier inplannen";
   const drivers = state.drivers || [];
 
-  holder.innerHTML = [...achterstallig, ...dagen].map((dag) => {
+  renderAgendaConcepts();
+  holder.innerHTML = [...achterstallig, ...dagen, ...verderOp].map((dag) => {
     const verleden = dag < vandaag;
     const ritten = state.plan.filter((planned) => planned.date === dag && (!verleden || openVanEerder(planned)));
+    const concepten = noteConcepts.filter((concept) => concept.date === dag);
     const naam = capitalize(new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag)));
-    const label = dag === vandaag ? `${naam} · vandaag` : verleden ? `${naam} · niet (helemaal) gereden` : naam;
+    const label = dag === vandaag ? `${naam} · vandaag` : verleden ? `${naam} · ${ritten.length ? "niet (helemaal) gereden" : "niet ingepland"}` : naam;
     const kiesbaar = inHand && !verleden && inHandDriver !== undefined;
-    return `<article class="agenda-day${dag === vandaag ? " vandaag" : ""}${verleden ? " achterstallig" : ""}${ritten.length ? "" : " leeg"}${kiesbaar ? " kiesbaar" : ""}" data-day="${dag}">
+    return `<article class="agenda-day${dag === vandaag ? " vandaag" : ""}${verleden ? " achterstallig" : ""}${ritten.length || concepten.length ? "" : " leeg"}${kiesbaar ? " kiesbaar" : ""}" data-day="${dag}">
       <h3>${label}</h3>
       ${dayNoteFor(dag) ? `<p class="agenda-day-note">${escapeHtml(dayNoteFor(dag))}</p>` : ""}
       ${verleden ? "" : `<div class="day-note-slot" data-day="${dag}"></div>`}
@@ -1292,9 +1304,15 @@ function renderAgenda() {
           </div>`}
         </div>`;
       }).join("")}
-      ${!ritten.length && !kiesbaar ? '<p class="empty">Niets ingepland.</p>' : ""}
+      ${concepten.map(noteConceptCard).join("")}
+      ${!ritten.length && !concepten.length && !kiesbaar ? '<p class="empty">Niets ingepland.</p>' : ""}
     </article>`;
   }).join("");
+
+  holder.querySelectorAll(".plan-note-concept").forEach((button) => {
+    const concept = noteConcepts.find((entry) => entry.id === button.dataset.concept);
+    button.addEventListener("click", () => concept && putRouteInHand(concept.route, null, concept.date));
+  });
 
   holder.querySelectorAll(".place-here").forEach((button) => {
     button.addEventListener("click", () => placeRouteOnDay(button.dataset.day));
@@ -1316,6 +1334,64 @@ function renderAgenda() {
     const dag = slot.dataset.day;
     slot.appendChild(noteEditor({ label: "Opmerking bij deze dag", value: dayNoteFor(dag), onSave: (note) => saveDayNote(dag, note) }));
   });
+}
+
+// A concept from the notes on its day: dashed, and saying what it is not yet.
+function noteConceptCard(concept) {
+  const aantal = concept.orders.length;
+  return `<div class="agenda-concept">
+    <b><span class="concept-tag">Concept</span> ${escapeHtml(concept.name)}</b>
+    <span>${aantal} ${aantal === 1 ? "stop" : "stops"} · ongeveer ${formatMinutes(concept.route.totalMinutes)} · de dag uit de opmerking</span>
+    <ul class="agenda-concept-stops">${concept.orders.map((order) => `<li>${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}${order.paid ? "" : " <em>nog niet betaald</em>"}</li>`).join("")}</ul>
+    ${concept.fits.map((fit) => `<p class="agenda-concept-fit">${escapeHtml(fit.order.id)} past bij rit ${escapeHtml(fit.planned.number || "?")} (+${formatMinutes(fit.extra)}): open die rit en kies Meenemen.</p>`).join("")}
+    <p class="agenda-concept-hint">Nog geen ritnummer; de bezorger ziet dit niet.</p>
+    <div class="agenda-route-actions"><button class="button primary plan-note-concept" type="button" data-concept="${escapeHtml(concept.id)}">Inplannen</button></div>
+  </div>`;
+}
+
+// On the Concepten page: the concepts made from notes, below the saved ones.
+function noteConceptsSection(concepten) {
+  if (!concepten.length) return "";
+  return `<h2 class="concept-section">Uit de opmerkingen</h2>
+    <p class="concept-section-sub">Orders waarvan de opmerking één vaste dag noemt. Ze staan op die dag in de agenda; Inplannen maakt er een rit van.</p>
+    ${concepten.map((concept) => `<article class="concept-card uit-opmerking">
+      <div class="concept-head"><div><h2>${escapeHtml(concept.name)}</h2>
+        <p>${concept.orders.length} ${concept.orders.length === 1 ? "stop" : "stops"} · ongeveer ${formatMinutes(concept.route.totalMinutes)} · volgens de opmerking op ${escapeHtml(shortDay(concept.date))}</p></div></div>
+      <ol class="concept-stops">${concept.orders.map((order) => `<li><b>${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}</b><span>${productSummary(order)}</span>${orderNote(order, { short: true })}</li>`).join("")}</ol>
+      <div class="concept-actions"><button class="button manual-action note-concept-plan" type="button" data-concept="${escapeHtml(concept.id)}">Inplannen</button></div>
+    </article>`).join("")}`;
+}
+
+// Saved concepts have no day yet: they stand above the days, as concepts.
+function renderAgendaConcepts() {
+  const holder = document.querySelector("#agendaConcepts");
+  if (!holder) return;
+  const concepten = state.role === "driver" ? [] : state.concepts;
+  holder.hidden = !concepten.length;
+  if (!concepten.length) {
+    holder.innerHTML = "";
+    return;
+  }
+  holder.innerHTML = `<h2>Concepten, nog zonder dag</h2>
+    <div class="agenda-concept-list">${concepten.map((concept) => {
+      const { route } = conceptRoute(concept);
+      return `<div class="agenda-concept">
+        <b><span class="concept-tag">Concept</span> ${escapeHtml(concept.name)}</b>
+        <span>${route ? `${route.orders.length} ${route.orders.length === 1 ? "stop" : "stops"} · ongeveer ${formatMinutes(route.totalMinutes)}` : "Geen open stops meer"}</span>
+        <p class="agenda-concept-hint">Nog geen dag en geen ritnummer; de bezorger ziet dit niet.</p>
+        <div class="agenda-route-actions">
+          ${route ? `<button class="button primary plan-stored-concept" type="button" data-concept="${escapeHtml(concept.id)}">Inplannen</button>
+          <button class="button subtle-action open-stored-concept" type="button" data-concept="${escapeHtml(concept.id)}">Openen</button>` : ""}
+        </div>
+      </div>`;
+    }).join("")}</div>`;
+  const find = (button) => state.concepts.find((concept) => concept.id === button.dataset.concept);
+  holder.querySelectorAll(".plan-stored-concept").forEach((button) => button.addEventListener("click", () => {
+    const concept = find(button);
+    const { route } = concept ? conceptRoute(concept) : {};
+    if (route) putRouteInHand(route, concept.id);
+  }));
+  holder.querySelectorAll(".open-stored-concept").forEach((button) => button.addEventListener("click", () => openConcept(find(button))));
 }
 
 // Opening a planned route is the moment it is checked: fetch first, so what is
@@ -2514,10 +2590,49 @@ function addNearbyPackages() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Concepts from the note. An order whose note names one day ("levering 7 okt")
+// stands in the agenda on that day as a concept straight away, together with
+// the other orders for that day that go the same way. Not saved: made afresh
+// from the orders every time, so a note changed in Shopify moves it along by
+// itself. It holds its orders as a concept does; Inplannen makes it a route.
+// ---------------------------------------------------------------------------
+function noteDayOf(order) {
+  const note = order.noteDates;
+  return note && !note.conflict && note.earliest && note.earliest === note.latest ? note.earliest : null;
+}
+
+function buildNoteConcepts() {
+  if (state.role === "driver") return [];
+  const groups = new Map();
+  for (const order of state.orders) {
+    const dag = noteDayOf(order);
+    if (!dag || order.dateUnclear) continue;
+    if (order.cancelled || order.fulfilled || order.refunded || order.deliveryMethod === "pickup" || order.extern) continue;
+    // Only what goes with the van, to an address the planning can place, and
+    // not what the planner already took in hand.
+    if (!transportPlan(order) && !order.ownDeliveryTagged) continue;
+    if (!order.addressComplete || !hasKnownPoint(order)) continue;
+    if (forcedIncludes.has(orderKey(order)) || plannedFor(order) || conceptFor(order) || state.heldKeys.has(orderKey(order))) continue;
+    const region = regionFor(order);
+    const key = `${dag}|${region}`;
+    if (!groups.has(key)) groups.set(key, { id: `opmerking-${dag}-${region.toLowerCase().replace(/[^a-z]+/g, "-")}`, date: dag, region, orders: [] });
+    groups.get(key).orders.push(order);
+  }
+  return [...groups.values()]
+    .map((group) => {
+      const route = routeSummary(group.region, optimizedStopOrder(group.orders));
+      return { ...group, route, name: routeLabel(route), fits: [] };
+    })
+    .sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name));
+}
+
 function rebuildPlanning() {
   stopOrderCache = new Map();
   syncOpenPlan();
   syncOpenConcept();
+  state.noteConcepts = buildNoteConcepts();
+  const inNoteConcept = new Map(state.noteConcepts.flatMap((concept) => concept.orders.map((order) => [orderKey(order), concept])));
   state.decisions = state.orders.map((order) => {
     // Already in a route: planned, and out of the weighing, so it is neither
     // offered as a new route nor lends its budget to one.
@@ -2527,6 +2642,8 @@ function rebuildPlanning() {
     const concept = conceptFor(order);
     if (concept) return { order, decision: "concept", concept, reason: `In het concept ${concept.name}` };
     if (state.heldKeys.has(orderKey(order))) return { order, decision: "concept", reason: "In een concept van de planner" };
+    const opDag = inNoteConcept.get(orderKey(order));
+    if (opDag) return { order, decision: "concept", concept: opDag, noteConcept: true, reason: `Volgens de opmerking op ${shortDay(opDag.date)}: staat als concept op die dag in de agenda` };
     return { order, ...applyManualDecision(order, decide(order)) };
   });
   qualifyCandidates();
@@ -3008,7 +3125,7 @@ function plannedRouteStatus(planned) {
 // a route or a concept, or it would end up in two.
 function additionAllowed(item, date = null) {
   const order = item.order;
-  if (["exclude", "planned", "concept"].includes(item.decision)) return false;
+  if (["exclude", "planned", "concept"].includes(item.decision) && !(item.noteConcept && date && date === item.concept?.date)) return false;
   // The note's day: never when it is unclear; for a route of a known day, only
   // when the note allows that day; without one, not while it still waits.
   if (order.dateUnclear) return false;
@@ -3669,11 +3786,13 @@ function offerPlannedRoutes() {
   for (const item of state.decisions) {
     const tooFar = item.decision === "far" || (item.decision === "dhl" && item.plan);
     const waiting = item.decision === "wait";
-    if (!tooFar && !waiting) continue;
+    const opDag = item.noteConcept ? item.concept : null;
+    if (!tooFar && !waiting && !opDag) continue;
     let best = null;
     for (const planned of komend) {
       // Only a route on a day the order's note allows, and not past its last day.
-      if (!additionAllowed({ ...item, decision: "review" }, planned.date)) continue;
+      if (opDag && planned.date !== opDag.date) continue;
+      if (!additionAllowed(opDag ? item : { ...item, decision: "review" }, planned.date)) continue;
       if (waiting && item.order.dueDate && planned.date > item.order.dueDate) continue;
       const status = plannedRouteStatus(planned);
       if (!status.open.length || status.open.some((order) => !hasKnownPoint(order))) continue;
@@ -3685,6 +3804,10 @@ function offerPlannedRoutes() {
     }
     if (!best) continue;
     item.fitsPlanned = best.planned;
+    if (opDag) {
+      opDag.fits.push({ order: item.order, planned: best.planned, extra: best.fit.extra });
+      continue;
+    }
     if (waiting) {
       item.reason = `${item.reason}. Past bij rit ${best.planned.number || "?"} op ${formatDate(best.planned.date)} (+${formatMinutes(best.fit.extra)}): open die rit in de Agenda en kies Meenemen`;
       continue;
@@ -3897,13 +4020,14 @@ function conceptRoute(concept) {
 function renderConcepts() {
   const holder = document.querySelector("#conceptList");
   const teller = document.querySelector("#conceptCount");
+  const uitOpmerking = state.noteConcepts || [];
   if (teller) {
-    teller.textContent = state.concepts.length;
-    teller.hidden = !state.concepts.length;
+    teller.textContent = state.concepts.length + uitOpmerking.length;
+    teller.hidden = !(state.concepts.length + uitOpmerking.length);
   }
   if (!holder) return;
-  if (!state.concepts.length) {
-    holder.innerHTML = '<p class="empty">Nog geen concepten. Kies bij een rit op Vandaag <b>Opslaan als concept</b>.</p>';
+  if (!state.concepts.length && !uitOpmerking.length) {
+    holder.innerHTML = '<p class="empty">Nog geen concepten. Kies bij een rit op Vandaag <b>Opslaan als concept</b>. Orders waarvan de opmerking een vaste dag noemt, komen hier vanzelf.</p>';
     return;
   }
   const vandaag = dateFromIso(isoDay(new Date()));
@@ -3931,7 +4055,11 @@ function renderConcepts() {
         <button class="button subtle-action concept-remove" type="button" data-concept="${escapeHtml(concept.id)}">Verwijderen</button>
       </div>
     </article>`;
-  }).join("");
+  }).join("") + noteConceptsSection(uitOpmerking);
+  holder.querySelectorAll(".note-concept-plan").forEach((button) => button.addEventListener("click", () => {
+    const concept = uitOpmerking.find((entry) => entry.id === button.dataset.concept);
+    if (concept) putRouteInHand(concept.route, null, concept.date);
+  }));
   const find = (button) => state.concepts.find((concept) => concept.id === button.dataset.concept);
   holder.querySelectorAll(".concept-open").forEach((button) => button.addEventListener("click", () => openConcept(find(button))));
   holder.querySelectorAll(".concept-plan").forEach((button) => button.addEventListener("click", () => {

@@ -675,3 +675,25 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
 .driver-code-once { color: var(--warn); font-weight: 700; font-size: .9rem; }
 .driver-code-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 .driver-code-actions .button { min-height: 44px; }
+
+/* --- Concepten in de agenda ------------------------------------------------
+   Not a route yet: dashed, in the concept colour, and saying so. */
+.agenda-concept { display: grid; gap: .25rem; margin: .5rem 0 .2rem; padding: .6rem .7rem; border: 2px dashed #b89a6a;
+  border-radius: 10px; background: #fbf7ef; }
+.agenda-concept b { font-size: .95rem; }
+.agenda-concept > span { color: var(--muted); font-size: .82rem; }
+.concept-tag { display: inline-block; margin-right: .25rem; padding: .05rem .45rem; border-radius: 6px; background: #7a5c2e;
+  color: #fff; font-size: .72rem; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; vertical-align: .1em; }
+.concept-tag::before { content: "✎ "; }
+.agenda-concept-stops { margin: .1rem 0; padding-left: 1.1rem; font-size: .82rem; }
+.agenda-concept-stops em { color: var(--warn); font-style: normal; font-weight: 700; }
+.agenda-concept-hint { margin: 0; color: #6b5433; font-size: .78rem; }
+.agenda-concept-fit { margin: 0; padding: .3rem .45rem; border-radius: 8px; background: #e3f3ea; color: #0f5a37; font-size: .8rem; }
+.agenda-concepts { margin: 0 0 1rem; }
+.agenda-concepts[hidden] { display: none; }
+.agenda-concepts h2 { margin: 0 0 .5rem; font-size: 1rem; }
+.agenda-concept-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .7rem; }
+.agenda-concept-list .agenda-concept { margin: 0; }
+.concept-section { margin: 1.4rem 0 .2rem; font-size: 1.1rem; }
+.concept-section-sub { margin: 0 0 .6rem; color: var(--muted); font-size: .9rem; }
+.concept-card.uit-opmerking { border-left-style: dashed; }
