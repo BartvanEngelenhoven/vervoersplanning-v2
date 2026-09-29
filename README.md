@@ -71,6 +71,20 @@ Het script vraagt de plannerscode, de winkel en het ordernummer, en eerst om "ja
 
 Oude versies van de Worker zijn niet bereikbaar: `preview_urls = false` staat bovenaan `wrangler.toml`. Die regel moet boven de eerste `[sectie]` staan; eronder is het een gewone variabele en doet hij niets.
 
+## Datums in de opmerking
+
+De Worker leest de opmerking van elke order (Shopify: *Notities*) op een dag (`readNoteDates` in `backend-worker.js`), en die gaat voor de dag van de webshop (de bezorgdatum uit de checkout, of vijf werkdagen voor rijplaten):
+
+- *bezorging 7 oktober*, *op 7-10*, *7/10*, *07-10-2026*: op die dag (`earliestDate` en `dueDate`);
+- *uiterlijk 7 oktober*: de laatste dag (`dueDate`); *voor 7 oktober*: de dag ervoor;
+- *vanaf*, *niet voor 7 oktober*: de eerste dag (`earliestDate`); *na 7 oktober*: de dag erna;
+- *tussen 5 en 9 oktober*, *5 t/m 9 oktober*, *week 41*, *week van 12 oktober*: een periode;
+- *niet op 7 oktober*, *7 oktober niet thuis*, *niet thuis van 5 t/m 9 oktober*: dagen die niet kunnen (`avoidDates`); *op vakantie tot 7 oktober*: vanaf de dag erna.
+
+Een dag zonder jaar valt in het jaar dat hem het dichtst bij een maand na de orderdatum legt. Getallen die geen dag zijn (*huisnummer 3-5*, *9-12 uur*, *2-3 dagen*, een telefoonnummer) laat hij liggen. Wat hij niet zeker kan plaatsen (*dinsdag*, *morgen*, *volgende week*, *begin oktober*), een weekdag die niet bij de datum hoort, een dag die niet bestaat of dagen die botsen: dan zet hij `dateUnclear` en staat de order onder Controleren. Oude orders krijgen de dagen bij het uitlezen, zodat niets opnieuw uit Shopify hoeft.
+
+In de planning wacht een order die pas later mag (*Wacht op datum*) tot de werkdag vóór zijn eerste dag, en komt dan in de voorstellen. Inplannen op een dag die de opmerking niet toestaat, vraagt eerst. De telefoon van de bezorger krijgt alleen de dagen, niet de opmerking, en de Worker weigert onderweg een order mee te nemen op een dag die niet mag.
+
 ## Rijtijden
 
 Gratis, zonder Google: PDOK zoekt de coördinaten van elk adres op, en de rijtijd wordt geschat als 20,2 minuten op- en afrijden per rit, 5 minuten per extra stop en 0,975 minuut per kilometer hemelsbreed (gemeten op 25 echte adressen, gemiddeld 3,7 minuten mis per enkele reis). Lossen: 20 minuten per stop, 90 voor een hooihuisje.

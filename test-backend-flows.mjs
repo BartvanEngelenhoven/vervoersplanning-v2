@@ -1546,6 +1546,51 @@ await test("rem op codes: een bezorgerscode zet de teller niet op nul, en een ha
   }
 });
 
+// ---------------------------------------------------------------------------
+// The day in the note ("Opmerking"), read by the Worker.
+// ---------------------------------------------------------------------------
+const MAANDEN = ["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"];
+const inWoorden = (isoDate) => { const [y, m, d] = isoDate.split("-").map(Number); return `${d} ${MAANDEN[m - 1]} ${y}`; };
+
+await test("opmerking met een dag: ook een oude order krijgt hem, de bezorger krijgt de dag zonder de opmerking en neemt hem niet te vroeg mee", async () => {
+  const env = makeEnv();
+  const a = await seedPlaced(env, DRS, "#DRS930", { city: "Doorn", zip: "3941 BX", lat: 52.03, lon: 5.32 });
+  const later = await seedPlaced(env, DRS, "#DRS931", { city: "Leersum", zip: "3956 AA", lat: 52.01, lon: 5.43 });
+  const nietVandaag = await seedPlaced(env, DRS, "#DRS932", { city: "Driebergen", zip: "3971 AA", lat: 52.05, lon: 5.28 });
+  const vaag = await seedPlaced(env, DRS, "#DRS933", { city: "Zeist", zip: "3701 AA", lat: 52.09, lon: 5.23 });
+  // Stored as they were before notes were read: the note, but no days from it.
+  const opslaan = (seeded, customerNote) => env.PLANNING_ORDERS.put(`order:${seeded.key}`, JSON.stringify({ ...seeded.order, customerNote }));
+  const dag = amsterdamDay(5);
+  await opslaan(later, `Bezorging ${inWoorden(dag)}, graag achterom`);
+  await opslaan(nietVandaag, `${inWoorden(amsterdamDay(0))} niet thuis`);
+  await opslaan(vaag, "Graag op dinsdag bezorgen");
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), name: "Doorn", orderKeys: [a.key] } })).data.route;
+
+  const planner = (await call(env, "GET", "/orders", { key: PLANNER })).data;
+  const gelezen = planner.find((order) => order.id === later.order.id);
+  assert.equal(gelezen.earliestDate, dag);
+  assert.equal(gelezen.dueDate, dag, "de dag uit de opmerking gaat voor");
+  assert.equal(gelezen.noteDates.latest, dag);
+  assert.equal(planner.find((order) => order.id === vaag.order.id).dateUnclear, true);
+
+  const telefoon = (await call(env, "GET", "/orders", { key: DRIVER })).data;
+  const slank = telefoon.find((order) => order.id === later.order.id);
+  assert.equal(slank.earliestDate, dag);
+  assert.ok(!("customerNote" in slank) && !("noteDates" in slank), "de opmerking zelf blijft van de telefoon af");
+  assert.deepEqual(telefoon.find((order) => order.id === nietVandaag.order.id).avoidDates, [amsterdamDay(0)]);
+
+  const meenemen = (seeded) => call(env, "POST", "/plan/add-stop", { key: DRIVER, body: { id: route.id, date: route.date, orderKey: seeded.key } });
+  const teVroeg = await meenemen(later);
+  assert.equal(teVroeg.status, 403);
+  assert.match(teVroeg.data.error, /pas vanaf/);
+  const nietDan = await meenemen(nietVandaag);
+  assert.equal(nietDan.status, 403);
+  assert.match(nietDan.data.error, /niet op/);
+  assert.equal((await meenemen(vaag)).status, 403, "een onduidelijke dag: bel de planner");
+  // The planner may: it is theirs to decide, the screen asks first.
+  assert.equal((await call(env, "POST", "/plan/add-stop", { key: PLANNER, body: { id: route.id, date: route.date, orderKey: later.key } })).status, 200);
+});
+
 globalThis.fetch = realFetch;
 let failed = 0;
 for (const [status, name, error] of results) {

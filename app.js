@@ -28,7 +28,7 @@ const CONFIG = {
 };
 
 const state = { concepts: [], heldKeys: new Set(), openConcept: null, routeInHandConcept: null, orders: [], decisions: [], routes: [], reviewRoutes: [], history: [], deliveredKeys: new Map(), historyLoaded: false, selected: new Set(), manualRoute: null, suggestions: [], plan: [], planStops: [], dayNotes: [], announcements: [], announceLive: false, allOrders: [], geo: {}, role: null, driver: undefined, drivers: [], driverRouteId: null, openPlan: null, routeInHand: null, routeInHandDriver: undefined, driverCode: null, placing: false, lastFetchOk: false, driveMinutes: null, driveDepot: "", driveEstimateUnavailable: false };
-const decisionLabels = { include: "Meenemen", planned: "Ingepland", concept: "In concept", review: "Controleren", dhl: "DHL", fvr: "FVR", exclude: "Niet meenemen" };
+const decisionLabels = { include: "Meenemen", planned: "Ingepland", concept: "In concept", review: "Controleren", wait: "Wacht op datum", dhl: "DHL", fvr: "FVR", exclude: "Niet meenemen" };
 
 // What does not go with the van goes with a carrier, by shop: rijplaten with
 // FVR, slowfeeders with DHL. Inside the planning both are the one decision
@@ -173,8 +173,13 @@ function decide(order) {
   if (!hasKnownPoint(order)) {
     return { decision: "review", reason: "Adres buiten Nederland en België of zonder geldige postcode: de rijtijd is niet te schatten, zelf beoordelen" };
   }
-  if (order.deliveryAppointmentLocked) return { decision: "review", reason: "Aflevermoment is afgestemd; niet verplaatsen zonder toestemming" };
+  if (order.deliveryAppointmentLocked) return { decision: "review", reason: `Aflevermoment is afgestemd${windowText(order) ? ` (${windowText(order)})` : ""}; niet verplaatsen zonder toestemming` };
   if (!order.paid) return { decision: "review", reason: "Betaling nog niet binnen; alleen optioneel meenemen als dit logisch op de route ligt" };
+  // The note says something about the day that is not certain: the planner looks.
+  if (order.dateUnclear) return { decision: "review", noteDate: true, reason: noteDateReason(order) };
+  // The note says a later day: out of the proposals until the working day before.
+  const wacht = waitsUntil(order);
+  if (wacht) return { decision: "wait", reason: `Volgens de opmerking ${windowText(order)}; komt ${shortDay(wacht)} in de voorstellen` };
 
   // Settled in qualifyCandidates, which weighs the whole region's trip at once.
   return { decision: "candidate", plan, reason: `${plan.label}, wacht op ritberekening` };
@@ -188,7 +193,57 @@ function applyManualDecision(order, automatic) {
   return { decision: "include", forced: true, reason: "Handmatig meegenomen (Toch zelf bezorgen)" };
 }
 
+// ---------------------------------------------------------------------------
+// The day from the order's note, as the Worker reads it (readNoteDates):
+// earliestDate is the first day it may go, dueDate the last, avoidDates the
+// days it may not. noteDates holds what was read; the driver's phone only gets
+// the days, not the note.
+// ---------------------------------------------------------------------------
+// The working day before a date: the day a route for that date gets planned.
+function releaseDay(isoDate) {
+  let day = shiftDay(isoDate, -1);
+  while ([0, 6].includes(dateFromIso(day)?.getDay())) day = shiftDay(day, -1);
+  return day;
+}
+
+// The day an order the note holds back comes into the proposals, while that
+// day is still to come; else null.
+function waitsUntil(order) {
+  if (!order.earliestDate) return null;
+  const vanaf = releaseDay(order.earliestDate);
+  return isoDay(new Date()) < vanaf ? vanaf : null;
+}
+
+// "op wo 7 okt", "tussen ma 5 okt en vr 9 okt", "vanaf wo 7 okt", "uiterlijk
+// di 6 okt", and "niet op …". Empty when the note says nothing it could place.
+function windowText(order) {
+  const note = order.noteDates || {};
+  if (note.conflict) return "";
+  const van = note.earliest || order.earliestDate || null;
+  const tot = note.latest || null;
+  const delen = [];
+  if (van && tot && van === tot) delen.push(`op ${shortDay(van)}`);
+  else if (van && tot) delen.push(`tussen ${shortDay(van)} en ${shortDay(tot)}`);
+  else if (van) delen.push(`vanaf ${shortDay(van)}`);
+  else if (tot) delen.push(`uiterlijk ${shortDay(tot)}`);
+  const niet = note.avoid || order.avoidDates || [];
+  if (niet.length) delen.push(`niet op ${niet.slice(0, 3).map(shortDay).join(", ")}${niet.length > 3 ? " en later" : ""}`);
+  return delen.join(", ");
+}
+
+function noteDateReason(order) {
+  const note = order.noteDates || {};
+  if (note.conflict) return `${note.conflict}: kijk zelf wanneer hij kan`;
+  if (note.unclear) return `De opmerking noemt een moment dat de planning niet zeker kan plaatsen ("${note.unclear}"): kijk zelf wanneer hij kan`;
+  return "In de opmerking staat iets over de dag: kijk zelf wanneer hij kan";
+}
+
 function dueDateReason(order) {
+  const uitOpmerking = windowText(order);
+  if (uitOpmerking) {
+    const dagen = order.dueDate ? daysUntil(order.dueDate) : null;
+    return `Volgens de opmerking ${uitOpmerking}${dagen !== null && dagen < 0 ? ", en dat is voorbij" : dagen !== null && dagen <= 2 ? " (urgent)" : ""}`;
+  }
   if (!order.dueDate) return "Geldige bezorgorder; uiterste leverdatum ontbreekt";
   const days = daysUntil(order.dueDate);
   if (days === null) return "Uiterste leverdatum is onleesbaar";
@@ -439,6 +494,9 @@ function formatDate(value) {
 // the weekday and date, and how that stands against today.
 function dueLabel(order) {
   const days = order.dueDate ? daysUntil(order.dueDate) : null;
+  // A day from the note says so, and how it came about.
+  const uitOpmerking = windowText(order);
+  if (uitOpmerking) return `<span class="due${days !== null && days < 0 ? " late" : days !== null && days <= 1 ? " soon" : ""}">${days !== null && days < 0 ? "te laat: " : ""}${escapeHtml(uitOpmerking)} (opmerking)</span>`;
   if (days === null) return "";
   const dag = shortDay(order.dueDate);
   const text = days < 0 ? `te laat, uiterlijk ${dag}` : days === 0 ? `uiterlijk vandaag` : days === 1 ? `uiterlijk morgen (${dag})` : `uiterlijk ${dag}`;
@@ -516,6 +574,7 @@ function renderSummary() {
     const delen = [
       count("planned") ? `${count("planned")} ingepland` : "",
       count("concept") ? `${count("concept")} in een concept` : "",
+      count("wait") ? `${count("wait")} ${count("wait") === 1 ? "wacht" : "wachten"} op de dag uit de opmerking` : "",
       count("dhl") ? `${count("dhl")} via DHL` : "",
       count("fvr") ? `${count("fvr")} via FVR` : "",
       count("exclude") ? `${count("exclude")} vervallen of opgehaald` : "",
@@ -538,6 +597,7 @@ function renderRules() {
     ["Grote slowfeeders", `${alwaysOwnTransportProducts.length} producttitels uit de vaste lijst gaan altijd zelf, ${budget(transportRules.alwaysOwn)}.${v3 ? " Rijplaten en XXL bakken dezelfde kant op rijden mee als de extra rijtijd binnen hun eigen budget past; het hooihuisje maakt hun budget niet groter." : ""}`],
     ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Anders via DHL.`],
     ["Niet met de bus", "Wat niet met de bus kan, gaat met een vervoerder: rijplaten met FVR, slowfeeders met DHL. Rijdt er een rit vlak langs, dan gaat hij toch mee als de rit er hooguit een uur langer van wordt."],
+    ["Datums in de opmerking", "Staat er in de opmerking van een order een dag, dan gaat die voor de dag van de webshop. 'Bezorging 7 oktober' is op die dag; 'uiterlijk' of 'voor' een laatste dag; 'vanaf', 'na' of 'niet voor' een eerste; 'tussen 5 en 9 oktober' of 'week 41' een periode; 'niet op' of 'niet thuis' een dag die niet kan. Een order die pas later mag, wacht en komt de werkdag ervoor in de voorstellen. Wat de planning niet zeker kan plaatsen ('dinsdag', 'volgende week', twee dagen die botsen), staat onder Controleren."],
     ["Uit een voorstel gehaald", "Met het min-teken haal je een order uit een voorstel. Hij gaat dan met FVR (rijplaten) of DHL (slowfeeders) en komt niet meer in een voorstel. Onder Orders zet Terug naar de planning hem terug."],
     ["Al het andere", `Gaat via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit ${formatMinutes(CONFIG.packageDetourMinutes)} langer van worden. Zo'n pakket krijgt bij het inplannen in Shopify de tag 'eigen bezorging', zodat het niet ook met DHL meegaat.`],
     ["Net erover", v3
@@ -698,7 +758,7 @@ function renderDriverRoute(holder, planned) {
   // Taking something along is for the route being driven, not one for later in
   // the week: that is the planner's to change.
   const rijdtNu = planned.date <= isoDay(new Date());
-  const erbij = state.lastFetchOk && !planned.abortedAt && rijdtNu ? nearbyAdditions(status.open, routeDayStops(planned, status)) : [];
+  const erbij = state.lastFetchOk && !planned.abortedAt && rijdtNu ? nearbyAdditions(status.open, routeDayStops(planned, status), planned.date) : [];
   const dagnotitie = dayNoteFor(planned.date);
 
   holder.innerHTML = `
@@ -1040,7 +1100,15 @@ async function placeRouteOnDay(date) {
   // A stop already late is late on any day, so it does not ask.
   const vandaag = isoDay(new Date());
   const tooLate = route.orders.filter((order) => order.dueDate && order.dueDate >= vandaag && order.dueDate < date);
-  if (tooLate.length && !window.confirm(`${tooLate.map((order) => `${order.id} (uiterlijk ${shortDay(order.dueDate)})`).join(", ")} ${tooLate.length === 1 ? "moet" : "moeten"} eerder bezorgd worden dan ${shortDay(date)}. Toch op deze dag inplannen?`)) return;
+  // What the notes say against this day, all in one question.
+  const tooEarly = route.orders.filter((order) => order.earliestDate && order.earliestDate > date);
+  const notThen = route.orders.filter((order) => (order.avoidDates || []).includes(date));
+  const bezwaren = [
+    tooLate.length ? `${tooLate.map((order) => `${order.id} (uiterlijk ${shortDay(order.dueDate)})`).join(", ")} ${tooLate.length === 1 ? "moet" : "moeten"} eerder bezorgd worden dan ${shortDay(date)}.` : "",
+    ...tooEarly.map((order) => `${order.id} mag volgens de opmerking pas vanaf ${shortDay(order.earliestDate)}.`),
+    ...notThen.map((order) => `${order.id} kan volgens de opmerking niet op ${shortDay(date)}.`),
+  ].filter(Boolean);
+  if (bezwaren.length && !window.confirm(`${bezwaren.join("\n")}\n\nToch op ${shortDay(date)} inplannen?`)) return;
   state.placing = true;
   document.querySelectorAll(".place-here").forEach((button) => {
     button.disabled = true;
@@ -1289,7 +1357,7 @@ function renderOpenPlan() {
 
   const status = plannedRouteStatus(planned);
   const bijzonder = status.stops.filter((stop) => stop.status !== "open");
-  const erbij = state.lastFetchOk ? nearbyAdditions(status.open, routeDayStops(planned, status)) : [];
+  const erbij = state.lastFetchOk ? nearbyAdditions(status.open, routeDayStops(planned, status), planned.date) : [];
   const huidig = status.open.length ? routeSummary("Rit", status.open) : null;
 
   holder.hidden = false;
@@ -1390,8 +1458,10 @@ function renderPlanningMap() {
   // planned route that would change the screen and not the saved route, so
   // there the panel above, which saves, is the way to add.
   const routeKeys = new Set(route.orders.map(orderKey));
+  // Not an order whose note holds it back, or names a day it cannot place: those
+  // wait for their day, or for the planner to look (Toch zelf bezorgen).
   const addableOrders = state.openPlan ? [] : state.decisions
-    .filter((item) => !routeKeys.has(orderKey(item.order)) && !["exclude", "planned", "concept"].includes(item.decision))
+    .filter((item) => !routeKeys.has(orderKey(item.order)) && !["exclude", "planned", "concept", "wait"].includes(item.decision) && !item.order.dateUnclear)
     .filter((item) => hasKnownPoint(item.order))
     .map((item) => item.order)
     .map((order) => {
@@ -1480,6 +1550,7 @@ function renderAllOrdersMap(holder) {
       <span><i class="map-dot planned"></i> Ingepland</span>
       <span><i class="map-dot concept"></i> In concept</span>
       <span><i class="map-dot review"></i> Controleren</span>
+      <span><i class="map-dot wait"></i> Wacht op datum</span>
       <span><i class="map-dot dhl"></i> DHL</span>
       <span><i class="map-dot fvr"></i> FVR</span>
     </div>`;
@@ -1556,6 +1627,7 @@ function markerColor(decision) {
   if (decision === "planned") return "#1f6f78";
   if (decision === "concept") return "#7a5c2e";
   if (decision === "review") return "#c7810c";
+  if (decision === "wait") return "#5f7f8c";
   if (decision === "dhl") return "#2f6fb3";
   if (decision === "fvr") return "#6b5b95";
   return "#b94a3f";
@@ -1566,7 +1638,7 @@ function orderTooltip(order) {
     <b>${escapeHtml(order.id)} · ${escapeHtml(order.customer || "Onbekende klant")}</b>
     <span>${productSummary(order)}</span>
     <span>${addressSummary(order)}</span>${orderNote(order, { short: true })}
-    <small>${escapeHtml(order.paymentStatus || (order.paid ? "Betaald" : "In afwachting"))} · uiterlijk ${formatDate(order.dueDate)}</small>
+    <small>${escapeHtml(order.paymentStatus || (order.paid ? "Betaald" : "In afwachting"))} · ${windowText(order) ? escapeHtml(windowText(order)) : `uiterlijk ${formatDate(order.dueDate)}`}</small>
   </div>`;
 }
 
@@ -1629,7 +1701,8 @@ function groupedOrderSections(items) {
     ["include", "Meenemen", "Gaan met de bus en staan nog niet in de agenda"],
     ["planned", "Ingepland", "Staan al in een rit in de agenda"],
     ["concept", "In concept", "Staan in een concept dat nog geen dag heeft"],
-    ["review", "Controleren", "Betaling, afspraak, adres of net boven het budget: jij beslist"],
+    ["review", "Controleren", "Betaling, afspraak, adres, een onduidelijke dag in de opmerking, of net boven het budget: jij beslist"],
+    ["wait", "Wacht op datum", "Volgens de opmerking pas later: ze komen de werkdag ervoor in de voorstellen"],
     ["fvr", "FVR", "Rijplaten die niet met de bus kunnen: buiten het budget, of door de planner uit een voorstel gehaald"],
     ["dhl", "DHL", "Slowfeeders die niet met de bus gaan: niet op de vaste lijst, een XXL bak buiten zijn budget, of door de planner uit een voorstel gehaald"],
     ["exclude", "Niet meenemen", "Geannuleerd, terugbetaald, afgehaald of al verzonden"],
@@ -1670,7 +1743,7 @@ function orderCard(item) {
       <p class="reason">${escapeHtml(item.reason)}</p>
     </div>
     <div class="order-side">
-      <span><b>Uiterlijk</b>${formatDate(order.dueDate)}</span>
+      ${windowText(order) ? `<span><b>Volgens opmerking</b>${escapeHtml(windowText(order))}</span>` : `<span><b>Uiterlijk</b>${formatDate(order.dueDate)}</span>`}
       <span><b>Betaling</b>${escapeHtml(order.paymentStatus || (order.paid ? "Betaald" : "In afwachting"))}</span>
       <a class="button ghost" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a>
       ${manualActionButton(item, key, isForced)}
@@ -1828,8 +1901,8 @@ function nearbySuggestions() {
 function suggestionCandidate(item, routeKeys) {
   const order = item.order;
   if (routeKeys.has(orderKey(order)) || state.manualRoute?.removed?.has(orderKey(order))) return false;
-  if (["exclude", "planned", "concept"].includes(item.decision) || order.extern) return false;
-  if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) return false;
+  if (["exclude", "planned", "concept", "wait"].includes(item.decision) || order.extern) return false;
+  if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked || order.dateUnclear) return false;
   return hasKnownPoint(order);
 }
 
@@ -2413,6 +2486,8 @@ function addNearbyPackages() {
   for (const item of parcels) {
     const order = item.order;
     if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) continue;
+    // A parcel whose note holds it back does not ride along yet.
+    if (order.dateUnclear || waitsUntil(order)) continue;
     if (onRoute.has(orderKey(order)) || order.extern) continue;
     // Taken out of this route by the planner: it stays out.
     if (removed.has(orderKey(order))) continue;
@@ -2931,9 +3006,14 @@ function plannedRouteStatus(planned) {
 // The same bar the planning applies before a parcel rides along: paid, fully
 // addressed, no slot agreed with the customer. Never an order that is already in
 // a route or a concept, or it would end up in two.
-function additionAllowed(item) {
+function additionAllowed(item, date = null) {
   const order = item.order;
   if (["exclude", "planned", "concept"].includes(item.decision)) return false;
+  // The note's day: never when it is unclear; for a route of a known day, only
+  // when the note allows that day; without one, not while it still waits.
+  if (order.dateUnclear) return false;
+  if (date ? order.earliestDate && date < order.earliestDate : waitsUntil(order)) return false;
+  if (date && (order.avoidDates || []).includes(date)) return false;
   // Held by a concept, or by a route beyond the driver's week: the Worker
   // refuses it, so it is not offered.
   if (state.heldKeys.has(orderKey(order))) return false;
@@ -3003,7 +3083,7 @@ function weighableDay(day) {
 // list is rebuilt against the grown route, so five offers of "+25 min" can never
 // add up to two hours unnoticed. `day` is the whole day to weigh against, the
 // stops delivered today included (routeDayStops); left out, the open stops.
-function nearbyAdditions(orders, day = orders) {
+function nearbyAdditions(orders, day = orders, date = null) {
   if (!orders.length) return [];
   // The Worker refuses every addition to a route with a stop it cannot place,
   // and would name the order offered as the one without a location.
@@ -3014,7 +3094,7 @@ function nearbyAdditions(orders, day = orders) {
   const { route, from } = weighableDay(day);
   const inRoute = new Set(orders.map(orderKey));
   return state.decisions
-    .filter((item) => !inRoute.has(orderKey(item.order)) && additionAllowed(item))
+    .filter((item) => !inRoute.has(orderKey(item.order)) && additionAllowed(item, date))
     .map((item) => ({ item, ...additionFor(route, item.order, from) }))
     .filter((kandidaat) => fitsAsAddition(kandidaat, kandidaat.item.order, kandidaat.item.decision))
     // The stop it goes before, by key: the position counts the delivered
@@ -3588,9 +3668,13 @@ function offerPlannedRoutes() {
   if (!komend.length) return;
   for (const item of state.decisions) {
     const tooFar = item.decision === "far" || (item.decision === "dhl" && item.plan);
-    if (!tooFar || !additionAllowed({ ...item, decision: "review" })) continue;
+    const waiting = item.decision === "wait";
+    if (!tooFar && !waiting) continue;
     let best = null;
     for (const planned of komend) {
+      // Only a route on a day the order's note allows, and not past its last day.
+      if (!additionAllowed({ ...item, decision: "review" }, planned.date)) continue;
+      if (waiting && item.order.dueDate && planned.date > item.order.dueDate) continue;
       const status = plannedRouteStatus(planned);
       if (!status.open.length || status.open.some((order) => !hasKnownPoint(order))) continue;
       // Today's route is weighed with what it already delivered, as when opened.
@@ -3600,8 +3684,12 @@ function offerPlannedRoutes() {
       if (!best || fit.extra < best.fit.extra) best = { planned, fit };
     }
     if (!best) continue;
-    item.decision = "review";
     item.fitsPlanned = best.planned;
+    if (waiting) {
+      item.reason = `${item.reason}. Past bij rit ${best.planned.number || "?"} op ${formatDate(best.planned.date)} (+${formatMinutes(best.fit.extra)}): open die rit in de Agenda en kies Meenemen`;
+      continue;
+    }
+    item.decision = "review";
     item.reason = `Past bij rit ${best.planned.number || "?"} op ${formatDate(best.planned.date)} (+${formatMinutes(best.fit.extra)}): open die rit in de Agenda en kies Meenemen`;
   }
 }

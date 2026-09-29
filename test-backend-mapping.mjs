@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mapShopifyOrder } from "./backend-worker.js";
+import { mapShopifyOrder, readNoteDates, withNoteDates } from "./backend-worker.js";
 
 const deliveryOrder = {
   id: 123,
@@ -123,5 +123,76 @@ assert.deepEqual(mapShopifyOrder(editedOrder, "slowfeeder-specialist.myshopify.c
 // The planning's own block in the note is not the customer's.
 const notedOrder = { ...deliveryOrder, note: "Bel even aan\n\n[Vervoersplanning]\nBezorgd gemeld via Vervoersplanning" };
 assert.equal(mapShopifyOrder(notedOrder, "slowfeeder-specialist.myshopify.com").customerNote, "Bel even aan");
+
+// The day in the note: what it says wins over the shop's date, and what it
+// cannot place for certain goes to the planner. Orders of 20 September 2026;
+// 7 October 2026 is a Wednesday.
+const noteCases = [
+  ["Bezorging 7 oktober", { earliest: "2026-10-07", latest: "2026-10-07", avoid: [] }],
+  ["bezorging 7 okt.", { earliest: "2026-10-07", latest: "2026-10-07", avoid: [] }],
+  ["Graag leveren op woensdag 7 oktober", { earliest: "2026-10-07", latest: "2026-10-07", avoid: [] }],
+  ["Bezorging 7/10", { earliest: "2026-10-07", latest: "2026-10-07", avoid: [] }],
+  ["bezorgdatum 7-10-26", { earliest: "2026-10-07", latest: "2026-10-07", avoid: [] }],
+  ["Klant belde: bezorging verzet naar 9 oktober", { earliest: "2026-10-09", latest: "2026-10-09", avoid: [] }],
+  ["Levering gepland voor 7 oktober", { earliest: "2026-10-07", latest: "2026-10-07", avoid: [] }],
+  ["Uiterlijk 7 oktober", { earliest: null, latest: "2026-10-07", avoid: [] }],
+  ["Graag voor 7 oktober bezorgen", { earliest: null, latest: "2026-10-06", avoid: [] }],
+  ["Niet leveren na 9 oktober", { earliest: null, latest: "2026-10-09", avoid: [] }],
+  ["Niet voor 7 oktober bezorgen", { earliest: "2026-10-07", latest: null, avoid: [] }],
+  ["Niet bezorgen voor 7 oktober", { earliest: "2026-10-07", latest: null, avoid: [] }],
+  ["Vanaf 7-10", { earliest: "2026-10-07", latest: null, avoid: [] }],
+  ["Na 7 oktober", { earliest: "2026-10-08", latest: null, avoid: [] }],
+  ["Tussen 5 en 9 oktober", { earliest: "2026-10-05", latest: "2026-10-09", avoid: [] }],
+  ["5 t/m 9 oktober", { earliest: "2026-10-05", latest: "2026-10-09", avoid: [] }],
+  ["van 5 oktober tot 9 oktober", { earliest: "2026-10-05", latest: "2026-10-08", avoid: [] }],
+  ["Levering in week 41", { earliest: "2026-10-05", latest: "2026-10-11", avoid: [] }],
+  ["Graag in de week van 12 oktober", { earliest: "2026-10-12", latest: "2026-10-18", avoid: [] }],
+  ["7 oktober niet thuis", { earliest: null, latest: null, avoid: ["2026-10-07"] }],
+  ["Niet leveren op 7 oktober", { earliest: null, latest: null, avoid: ["2026-10-07"] }],
+  ["7 oktober kan niet", { earliest: null, latest: null, avoid: ["2026-10-07"] }],
+  ["niet op 7 en 9 oktober", { earliest: null, latest: null, avoid: ["2026-10-07", "2026-10-09"] }],
+  ["Niet thuis van 5 t/m 7 oktober", { earliest: null, latest: null, avoid: ["2026-10-05", "2026-10-06", "2026-10-07"] }],
+  ["Wij zijn tot 7 oktober op vakantie", { earliest: "2026-10-08", latest: null, avoid: [] }],
+  ["Voor 7 oktober niet thuis", { earliest: "2026-10-07", latest: null, avoid: [] }],
+  ["Graag bezorgen op 7 oktober om 10:00", { earliest: "2026-10-07", latest: "2026-10-07", avoid: [] }],
+  // Not a day at all: a house number, a time, a count, a phone number.
+  ["Huisnummer 3-5, achterom", null],
+  ["Tussen 9-12 uur leveren", null],
+  ["Levering 2-3 dagen", null],
+  ["Bel 06-12345678 voor levering", null],
+  ["Graag vóór 12.00 uur", null],
+  ["Goedemorgen, graag achterom", null],
+  ["Achterom, de hond loopt los", null],
+  ["Fijn weekend!", null],
+  // Said, but not placed for certain: the planner looks.
+  ["Graag op dinsdag bezorgen", { earliest: null, latest: null, avoid: [], unclear: "dinsdag" }],
+  ["Volgende week graag", { earliest: null, latest: null, avoid: [], unclear: "volgende week" }],
+  ["Begin oktober", { earliest: null, latest: null, avoid: [], unclear: "begin oktober" }],
+  ["Morgen bezorgen graag", { earliest: null, latest: null, avoid: [], unclear: "morgen" }],
+  ["In het weekend niet thuis", { earliest: null, latest: null, avoid: [], unclear: "in het weekend" }],
+  ["Graag leveren op dinsdag 7 oktober", { earliest: "2026-10-07", latest: "2026-10-07", avoid: [], conflict: "De opmerking zegt dinsdag 7 oktober, maar dat is een woensdag" }],
+  ["Bezorging 7 oktober, anders 9 oktober", { earliest: "2026-10-09", latest: "2026-10-07", avoid: [], conflict: "De opmerking noemt dagen die niet samengaan" }],
+  ["7 of 8 oktober", { earliest: "2026-10-08", latest: "2026-10-07", avoid: [], conflict: "De opmerking noemt dagen die niet samengaan" }],
+  ["Bezorging 31 september", { earliest: null, latest: null, avoid: [], conflict: "De opmerking noemt 31 september, een dag die niet bestaat" }],
+];
+for (const [note, expected] of noteCases) assert.deepEqual(readNoteDates(note, "2026-09-20"), expected, note);
+// Around the turn of the year the nearer year is meant.
+assert.equal(readNoteDates("Bezorging 5 januari", "2026-12-15").earliest, "2027-01-05");
+assert.equal(readNoteDates("Bezorging 28 december", "2027-01-03").earliest, "2026-12-28");
+
+// Mapped from Shopify, the note's day beats the checkout date; read again, it
+// stays the same; and without a date nothing is added.
+const datedOrder = mapShopifyOrder({ ...deliveryOrder, note: "Graag bezorgen op 7 oktober" }, "slowfeeder-specialist.myshopify.com");
+assert.equal(datedOrder.dueDate, "2026-10-07", "was 2026-09-24 from the checkout");
+assert.equal(datedOrder.earliestDate, "2026-10-07");
+assert.deepEqual(withNoteDates(datedOrder), datedOrder);
+const fromOrder = withNoteDates({ customerNote: "vanaf 7 oktober", orderDate: "2026-09-20", dueDate: "2026-09-25" });
+assert.equal(fromOrder.dueDate, "2026-10-07", "a first day after the shop's last one moves the last one along");
+assert.deepEqual(withNoteDates(fromOrder), fromOrder);
+const unclearOrder = withNoteDates({ customerNote: "Graag op 7 okt of 8 okt", orderDate: "2026-09-20", dueDate: "2026-09-25" });
+assert.equal(unclearOrder.dateUnclear, true);
+assert.equal(unclearOrder.dueDate, "2026-09-25", "days that do not go together change nothing but the flag");
+assert.ok(!("earliestDate" in unclearOrder));
+assert.ok(!("noteDates" in mapShopifyOrder(deliveryOrder, "slowfeeder-specialist.myshopify.com")));
 
 console.log("backend mapping tests passed");

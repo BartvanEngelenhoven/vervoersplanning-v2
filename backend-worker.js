@@ -448,7 +448,8 @@ function deliveredOn(record, day) {
 // What the driver's phone needs of an order that is not one of their stops: enough
 // to weigh "can it come along", nothing to identify the customer by. Name, street,
 // phone and note only reach the phone for stops of their own routes, via /plan.
-const DRIVER_ORDER_FIELDS = ["extern", "id", "shopifyOrderId", "shopDomain", "webshop", "city", "dueDate", "paid", "paymentStatus", "refunded", "cancelled", "fulfilled", "deliveryMethod", "addressComplete", "deliveryAppointmentLocked", "weightKg", "products", "announced", "ownDeliveryTagged"];
+// The days from the note go along, without the note itself.
+const DRIVER_ORDER_FIELDS = ["extern", "id", "shopifyOrderId", "shopDomain", "webshop", "city", "dueDate", "earliestDate", "avoidDates", "dateUnclear", "paid", "paymentStatus", "refunded", "cancelled", "fulfilled", "deliveryMethod", "addressComplete", "deliveryAppointmentLocked", "weightKg", "products", "announced", "ownDeliveryTagged"];
 
 function orderCountry(order) {
   if (order.country) return String(order.country);
@@ -468,9 +469,10 @@ async function getOrders(request, env) {
   // A key listed a moment ago can be gone by the time it is read, when a
   // webhook deletes a delivered order in between. That reads as null, and one
   // null used to take the whole list down with it.
+  // Orders stored before notes were read get their days from the note here.
   let orders = (await Promise.all(
     keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json"))
-  )).filter(Boolean);
+  )).filter(Boolean).map(withNoteDates);
   orders.sort((a, b) => (a.dueDate || "9999-12-31").localeCompare(b.dueDate || "9999-12-31"));
   // Taken out of a proposal by the planner: goes with DHL or FVR, not the van.
   const extern = new Set((await listAll(env, SHIPPING_PREFIX)).map((key) => key.name.slice(SHIPPING_PREFIX.length)));
@@ -1740,7 +1742,7 @@ async function getPlan(request, env) {
     // and not by a guess from the postcode. Not rounded: the phone has these
     // addresses anyway.
     const stopKeys = [...new Set(planned.filter((route) => !route.abortedAt).flatMap((route) => route.orderKeys || []))];
-    const stops = (await Promise.all(stopKeys.map((key) => env.PLANNING_ORDERS.get(`order:${key}`, "json")))).filter(Boolean);
+    const stops = (await Promise.all(stopKeys.map((key) => env.PLANNING_ORDERS.get(`order:${key}`, "json")))).filter(Boolean).map(withNoteDates);
     body.stops = await Promise.all(stops.map(async (order) => {
       const point = await cachedPoint(env, order);
       return point ? { ...order, point } : order;
@@ -2067,8 +2069,9 @@ async function addPlanStop(request, env) {
   if (record.abortedAt) return json({ error: "Deze rit is afgebroken." }, 409, env);
   if ((record.orderKeys || []).includes(key)) return json({ route: record, already: true }, 200, env);
 
-  const order = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
-  if (!order || order.cancelled || order.fulfilled) return json({ error: "Deze order staat niet meer open." }, 404, env);
+  const stored = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
+  if (!stored || stored.cancelled || stored.fulfilled) return json({ error: "Deze order staat niet meer open." }, 404, env);
+  const order = withNoteDates(stored);
 
   if (role === "driver") {
     const today = amsterdamNow().day;
@@ -2076,6 +2079,10 @@ async function addPlanStop(request, env) {
     const eligible = order.paid && !order.refunded && order.addressComplete && order.deliveryMethod !== "pickup"
       && !order.deliveryAppointmentLocked && !(order.dueDate && order.dueDate < HIDE_ORDERS_DUE_BEFORE);
     if (!eligible) return json({ error: "Deze order kan niet zomaar mee. Bel de planner." }, 403, env);
+    // What the note says about the day holds on the road too.
+    if (order.dateUnclear) return json({ error: "In de opmerking bij deze order staat iets over de dag. Bel de planner." }, 403, env);
+    if (order.earliestDate && record.date < order.earliestDate) return json({ error: `Deze order mag volgens de opmerking pas vanaf ${spokenDay(order.earliestDate)}. Bel de planner.` }, 403, env);
+    if ((order.avoidDates || []).includes(record.date)) return json({ error: `Volgens de opmerking kan deze order niet op ${spokenDay(record.date)}. Bel de planner.` }, 403, env);
     const weighed = await routeMinutesWith(env, record, order);
     if (weighed.missing) return json({ error: `Van ${weighed.missing} is geen locatie bekend, dus de rit is niet na te rekenen. Bel de planner.` }, 403, env);
     if (weighed.minutes > DAY_LIMIT_MINUTES) return json({ error: "Met deze stop wordt de rit langer dan 5:45. Bel de planner." }, 403, env);
@@ -2806,13 +2813,268 @@ function shopifyTime(value) {
   return Number.isNaN(date.getTime()) ? "" : date.toISOString();
 }
 
+// ---------------------------------------------------------------------------
+// The day in the order's note. The customer at checkout, or the office after a
+// phone call, writes it in words in Shopify's note (the "Opmerking"): "bezorging
+// 7 oktober", "graag voor 7-10", "vanaf dinsdag 6 okt", "tussen 5 en 9 oktober",
+// "week 41", "7 oktober niet thuis". What the note says wins over the date the
+// shop gave (picked at checkout, or five working days for rijplaten).
+//
+// It does not guess. A moment it cannot place for certain ("dinsdag", "volgende
+// week", "begin oktober"), a weekday that is not that date's, or days that do
+// not go together: the order goes to the planner to check (dateUnclear).
+// ---------------------------------------------------------------------------
+const NOTE_MONTHS = { januari: 1, jan: 1, februari: 2, feb: 2, maart: 3, mrt: 3, april: 4, apr: 4, mei: 5, juni: 6, jun: 6, juli: 7, jul: 7, augustus: 8, aug: 8, september: 9, sept: 9, sep: 9, oktober: 10, october: 10, okt: 10, oct: 10, november: 11, nov: 11, december: 12, dec: 12 };
+const NOTE_WEEKDAYS = { zondag: 0, zo: 0, maandag: 1, ma: 1, dinsdag: 2, di: 2, woensdag: 3, wo: 3, donderdag: 4, do: 4, vrijdag: 5, vr: 5, zaterdag: 6, za: 6 };
+const WEEKDAY_NAMES = ["zondag", "maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag"];
+const MONTH_NAMES = ["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"];
+const noteWords = (words) => Object.keys(words).sort((a, b) => b.length - a.length).join("|");
+const NOTE_MONTH = `(${noteWords(NOTE_MONTHS)})\\.?(?![a-z])`;
+const NOTE_WEEKDAY = `(?:\\b(${noteWords(NOTE_WEEKDAYS)})\\.?,?\\s+(?:de\\s+)?)?`;
+const NOTE_DAY = `(\\d{1,2})(?:ste|de|e)?`;
+// A number pair that is a time, a count or a size, not a day: "9-12 uur", "2-3 dagen".
+const NOT_A_DAY = "(?!\\s*(?:uur|u\\b|h\\b|min|dag|dagen|werkdag|werkdagen|week|weken|stuks|st\\b|x\\b|pallet|platen|meter|m\\b|cm|mm|kg|%))";
+const NOTE_PATTERNS = [
+  // 2026-10-07
+  { kind: "iso", re: new RegExp("(?<![\\d-])(\\d{4})-(\\d{2})-(\\d{2})(?![\\d-])", "g") },
+  // 5 t/m 9 oktober, 5-9 okt, tussen 5 en 9 oktober
+  { kind: "span", re: new RegExp(`(?<![\\d/.-])${NOTE_DAY}\\s*(-|t\\/m|tm|tot en met|tot|en|of)\\s*${NOTE_DAY}\\s*${NOTE_MONTH}(?:\\s+(\\d{4}))?`, "g") },
+  // (dinsdag) 7 oktober (2026)
+  { kind: "words", re: new RegExp(`${NOTE_WEEKDAY}(?<![\\d/.-])\\b${NOTE_DAY}\\s*${NOTE_MONTH}(?:\\s+(\\d{4}))?`, "g") },
+  // (di) 7-10, 7/10, 07-10-2026
+  { kind: "digits", re: new RegExp(`${NOTE_WEEKDAY}(?<![\\d/.:-])\\b(\\d{1,2})[-/](\\d{1,2})(?:[-/](\\d{4}|\\d{2}))?(?![\\d/]|[-.:]\\d)${NOT_A_DAY}`, "g") },
+  // week 41
+  { kind: "week", re: /\bweek\s*(?:nr\.?\s*|nummer\s*)?(\d{1,2})\b/g },
+];
+// Words just before a day that say what kind of day it is, tried in this order.
+// "Gepland voor 7 oktober" is that day; "voor 7 oktober" on its own is before it.
+const NOTE_DELIVER = "(?:bezorgen|leveren|afleveren|komen|brengen|langskomen)";
+const NOTE_BEFORE = [
+  { kind: "week-of", re: /(?:^|\s)week van$/ },
+  { kind: "on", re: /(?:^|\s)(?:gepland|ingepland|afgesproken|verzet|verschoven|gezet|staat|staan)\s+(?:voor|naar|tot)$/ },
+  { kind: "tot", re: /(?:^|\s)(?:tot en met|t\/m|tot)$/ },
+  { kind: "from", re: new RegExp(`(?:^|\\s)(?:vanaf|pas vanaf|niet voor|niet eerder dan|ten vroegste|op zijn vroegst|niet(?:\\s+[a-z]+)?\\s+${NOTE_DELIVER}\\s+voor)$`) },
+  { kind: "until", re: new RegExp(`(?:^|\\s)niet(?:\\s+[a-z]+)?\\s+${NOTE_DELIVER}\\s+na$`) },
+  { kind: "after", re: /(?:^|\s)(?:na|pas na|na de)$/ },
+  { kind: "until", re: /(?:^|\s)(?:uiterlijk|ten laatste|op zijn laatst|niet later dan|voor of op|op of voor|tot uiterlijk)$/ },
+  { kind: "before", re: /(?:^|\s)voor$/ },
+  { kind: "not", re: new RegExp(`(?:^|\\s)(?:niet op|liever niet|niet|behalve|geen|niet\\s+${NOTE_DELIVER})$`) },
+];
+// Words just after a day that turn it round: "7 oktober niet thuis", "7 oktober kan niet".
+const NOTE_AFTER_ABSENT = /^\s*[,:]?\s*(?:ben|zijn|is)?\s*(?:ik|we|wij|er)?\s*(?:niet thuis|niemand thuis|niet aanwezig|afwezig|op vakantie|weg)\b/;
+const NOTE_AFTER_NOT = /^\s*[,:]?\s*(?:kan|kunnen|gaat|lukt|past)\s+(?:ik|we|wij|het|dat)?\s*niet\b/;
+// A number pair is only a day right after a word about the day: "bezorging
+// 7/10", "vanaf 7-10". "Huisnummer 3-5" is not.
+const NOTE_DATE_WORD = /(?:^|\s)(?:op|vanaf|na|voor|uiterlijk|tot|t\/m|tussen|bezorging|bezorgen|bezorgd|levering|leveren|geleverd|afleveren|datum|leverdatum|bezorgdatum|week van)$/;
+const NOTE_ABSENT = /\b(?:niet thuis|niemand thuis|niet aanwezig|afwezig|op vakantie|vakantie)\b/;
+const NOTE_VAGUE = new RegExp(`\\b(?:maandag|dinsdag|woensdag|donderdag|vrijdag|zaterdag|zondag)(?:en|s)?\\b|\\b(?:vandaag|morgen|overmorgen)\\b|\\b(?:volgende|komende|deze|over (?:een|twee|drie|vier|\\d+)) (?:week|weken)\\b|\\b(?:begin|eind|einde|half|halverwege|midden|medio|in)\\s+(?:${noteWords(NOTE_MONTHS)})(?![a-z])|\\b(?:in het|dit|volgend|komend) weekend\\b|\\bna de vakantie\\b`, "g");
+const DAY_MS = 86_400_000;
+
+function isoOf(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+// A day and month without a year are taken in the year that puts them nearest
+// a month after the order: "7 oktober" on an order of 20 September is this
+// year's, "5 januari" on one of 15 December is next year's.
+function noteDay(day, month, year, reference) {
+  const make = (y) => {
+    const date = new Date(Date.UTC(y, month - 1, day, 12));
+    return date.getUTCMonth() === month - 1 && date.getUTCDate() === day ? date : null;
+  };
+  if (!(month >= 1 && month <= 12 && day >= 1 && day <= 31)) return null;
+  if (year) {
+    const date = make(year < 100 ? 2000 + year : year);
+    return date ? isoOf(date) : null;
+  }
+  const target = Date.parse(`${reference}T12:00:00Z`) + 30 * DAY_MS;
+  const base = new Date(target).getUTCFullYear();
+  const options = [base - 1, base, base + 1].map(make).filter(Boolean);
+  options.sort((a, b) => Math.abs(a - target) - Math.abs(b - target));
+  return options.length ? isoOf(options[0]) : null;
+}
+
+// Monday to Sunday of an ISO week, in the year that puts it nearest a month
+// after the order.
+function noteWeek(week, reference) {
+  if (!(week >= 1 && week <= 53)) return null;
+  const target = Date.parse(`${reference}T12:00:00Z`) + 30 * DAY_MS;
+  const base = new Date(target).getUTCFullYear();
+  const mondays = [base - 1, base, base + 1].map((year) => {
+    const jan4 = new Date(Date.UTC(year, 0, 4, 12));
+    return new Date(jan4.getTime() - ((jan4.getUTCDay() + 6) % 7) * DAY_MS + (week - 1) * 7 * DAY_MS);
+  });
+  mondays.sort((a, b) => Math.abs(a - target) - Math.abs(b - target));
+  return { from: isoOf(mondays[0]), to: isoOf(new Date(mondays[0].getTime() + 6 * DAY_MS)) };
+}
+
+function shiftIso(isoDate, days) {
+  return isoOf(new Date(Date.parse(`${isoDate}T12:00:00Z`) + days * DAY_MS));
+}
+
+function spokenDay(isoDate) {
+  const date = new Date(`${isoDate}T12:00:00Z`);
+  return `${WEEKDAY_NAMES[date.getUTCDay()]} ${date.getUTCDate()} ${MONTH_NAMES[date.getUTCMonth()]}`;
+}
+
+// What the note says about the day: { earliest, latest, avoid, unclear, conflict },
+// or null when it says nothing about one. reference is the order's date.
+export function readNoteDates(note, reference) {
+  const text = String(note || "").toLowerCase().replace(/vóór/g, "voor").replace(/[–—]/g, "-").replace(/\s+/g, " ");
+  if (!text.trim()) return null;
+  const ref = /^\d{4}-\d{2}-\d{2}$/.test(String(reference || "")) ? reference : new Date().toISOString().slice(0, 10);
+  let masked = text;
+  const found = [];
+  const conflicts = [];
+  for (const { kind, re } of NOTE_PATTERNS) {
+    for (const match of masked.matchAll(re)) {
+      const start = match.index;
+      const end = start + match[0].length;
+      const before = text.slice(Math.max(0, start - 40), start);
+      let mention = null;
+      if (kind === "iso") {
+        const day = noteDay(Number(match[3]), Number(match[2]), Number(match[1]), ref);
+        if (day) mention = { from: day, to: day };
+      } else if (kind === "span") {
+        const month = NOTE_MONTHS[match[4]];
+        const from = noteDay(Number(match[1]), month, match[5] ? Number(match[5]) : null, ref);
+        let to = noteDay(Number(match[3]), month, match[5] ? Number(match[5]) : null, ref);
+        if (!from || !to) continue;
+        // "7 en 9 oktober", "7 of 9 oktober": two days, each read on its own.
+        // Only "tussen 7 en 9 oktober" is everything in between.
+        if ((match[2] === "en" || match[2] === "of") && !/(?:^|\s)tussen\s*$/.test(before)) {
+          const second = start + match[0].search(/\d+(?:ste|de|e)?\s*[a-z]+\.?(?:\s+\d{4})?$/);
+          found.push({ from, to: from, start, end: second, before, after: text.slice(end, end + 30), pair: true });
+          found.push({ from: to, to, start: second, end, before: text.slice(Math.max(0, second - 40), second), after: text.slice(end, end + 30), pairedWith: before });
+          masked = masked.slice(0, start) + " ".repeat(end - start) + masked.slice(end);
+          continue;
+        }
+        if (match[2] === "tot") to = shiftIso(to, -1);
+        if (from <= to) mention = { from, to, span: true };
+      } else if (kind === "words" || kind === "digits") {
+        const month = kind === "words" ? NOTE_MONTHS[match[3]] : Number(match[3]);
+        const year = match[4] ? Number(match[4]) : null;
+        if (kind === "digits" && !year && !match[1] && !NOTE_DATE_WORD.test(before.replace(/[\s:,]+$/, ""))) continue;
+        const day = noteDay(Number(match[2]), month, year, ref);
+        if (!day) {
+          // "31 september" is a slip of the pen: said, not guessed at.
+          if (kind === "words") conflicts.push(`De opmerking noemt ${Number(match[2])} ${MONTH_NAMES[month - 1]}, een dag die niet bestaat`);
+          continue;
+        }
+        mention = { from: day, to: day };
+        const said = match[1] ? NOTE_WEEKDAYS[match[1]] : null;
+        if (said !== null && said !== new Date(`${day}T12:00:00Z`).getUTCDay()) {
+          conflicts.push(`De opmerking zegt ${WEEKDAY_NAMES[said]} ${spokenDay(day).split(" ").slice(1).join(" ")}, maar dat is een ${spokenDay(day).split(" ")[0]}`);
+        }
+      } else if (kind === "week") {
+        const week = noteWeek(Number(match[1]), ref);
+        if (week) mention = { ...week, span: true };
+      }
+      if (!mention) continue;
+      found.push({ ...mention, start, end, before, after: text.slice(end, end + 30) });
+      masked = masked.slice(0, start) + " ".repeat(end - start) + masked.slice(end);
+    }
+  }
+  found.sort((a, b) => a.start - b.start);
+
+  // Two days joined by "t/m" or "tot" are a span too: "5 oktober t/m 9 oktober".
+  const mentions = [];
+  for (const mention of found) {
+    const last = mentions[mentions.length - 1];
+    const between = last ? text.slice(last.end, mention.start) : "";
+    if (last && !last.joined && /^\s*(?:-|t\/m|tm|tot en met|tot)\s*$/.test(between)) {
+      last.to = /^\s*tot\s*$/.test(between) ? shiftIso(mention.to, -1) : mention.to;
+      last.end = mention.end;
+      last.after = mention.after;
+      last.span = true;
+      last.joined = true;
+      continue;
+    }
+    mentions.push({ ...mention });
+  }
+
+  let earliest = null;
+  let latest = null;
+  const avoid = new Set();
+  const later = (a, b) => (!a || b > a ? b : a);
+  const sooner = (a, b) => (!a || b < a ? b : a);
+  // The second of "7 en 9 oktober" shares the words before the first:
+  // "niet op 7 en 9 oktober" is neither day.
+  let pairedLead = null;
+  for (const mention of mentions) {
+    let lead = mention.pairedWith ?? mention.before;
+    for (let previous = null; previous !== lead;) {
+      previous = lead;
+      lead = lead.replace(/[\s:,]+$/, "").replace(/(?:^|\s)(?:op|de|het|dag|datum|graag)$/, "");
+    }
+    if (mention.pairedWith !== undefined && pairedLead !== null) lead = pairedLead;
+    pairedLead = mention.pair ? lead : null;
+    const absent = NOTE_ABSENT.test(mention.pairedWith ?? mention.before) || NOTE_AFTER_ABSENT.test(mention.after);
+    const refused = NOTE_AFTER_NOT.test(mention.after);
+    const word = NOTE_BEFORE.find(({ re }) => re.test(lead))?.kind;
+    const day = mention.from;
+    if (absent && !mention.span && word === "tot") {
+      // "Op vakantie tot 7 oktober": after that day, to be safe.
+      earliest = later(earliest, shiftIso(day, 1));
+    } else if (absent && !mention.span && word === "before") {
+      earliest = later(earliest, day);
+    } else if (absent && !mention.span && word === "from") {
+      latest = sooner(latest, shiftIso(day, -1));
+    } else if (absent && !mention.span && word === "after") {
+      latest = sooner(latest, day);
+    } else if (absent || refused || word === "not") {
+      for (let each = mention.from; each <= mention.to && avoid.size < 62; each = shiftIso(each, 1)) avoid.add(each);
+    } else if (word === "week-of") {
+      const monday = shiftIso(day, -((new Date(`${day}T12:00:00Z`).getUTCDay() + 6) % 7));
+      earliest = later(earliest, monday);
+      latest = sooner(latest, shiftIso(monday, 6));
+    } else if (!mention.span && word === "from") {
+      earliest = later(earliest, day);
+    } else if (!mention.span && word === "after") {
+      earliest = later(earliest, shiftIso(day, 1));
+    } else if (!mention.span && (word === "until" || word === "tot")) {
+      latest = sooner(latest, mention.to);
+    } else if (!mention.span && word === "before") {
+      latest = sooner(latest, shiftIso(mention.to, -1));
+    } else {
+      earliest = later(earliest, mention.from);
+      latest = sooner(latest, mention.to);
+    }
+  }
+  if (earliest && latest && earliest > latest) conflicts.push("De opmerking noemt dagen die niet samengaan");
+
+  const vague = [...new Set([...masked.matchAll(NOTE_VAGUE)].map((match) => match[0].trim()))].slice(0, 3);
+  if (!mentions.length && !vague.length && !conflicts.length) return null;
+  const read = { earliest, latest, avoid: [...avoid].sort() };
+  if (vague.length) read.unclear = vague.join(", ");
+  if (conflicts.length) read.conflict = conflicts[0];
+  return read;
+}
+
+// The order with what its note says about the day on it: earliestDate (not
+// before), dueDate (not after, the note's over the shop's), avoidDates (not on),
+// and dateUnclear when the planner has to look. The same order read twice gives
+// the same answer, so orders stored before notes were read can be read on the way out.
+export function withNoteDates(order) {
+  const read = readNoteDates(order.customerNote, order.orderDate);
+  if (!read) return order;
+  const dated = { ...order, noteDates: read };
+  if (read.unclear || read.conflict) dated.dateUnclear = true;
+  if (read.conflict) return dated;
+  if (read.earliest) dated.earliestDate = read.earliest;
+  if (read.avoid.length) dated.avoidDates = read.avoid;
+  if (read.latest) dated.dueDate = read.latest;
+  else if (read.earliest && (!order.dueDate || order.dueDate < read.earliest)) dated.dueDate = read.earliest;
+  return dated;
+}
+
 export function mapShopifyOrder(order, shopDomain = "") {
   const shipping = order.shipping_address || {};
   const lineItems = orderedLines(order);
   const tags = String(order.tags || "").toLowerCase();
   const deliveryMethod = inferDeliveryMethod(order, tags);
 
-  return {
+  return withNoteDates({
     id: order.name || String(order.id),
     shopifyOrderId: order.admin_graphql_api_id || (order.id ? `gid://shopify/Order/${order.id}` : null),
     shopDomain,
@@ -2845,7 +3107,7 @@ export function mapShopifyOrder(order, shopDomain = "") {
     // parcel tagged so is skipped by whoever prints the DHL labels.
     ownDeliveryTagged: /(^|,)\s*eigen bezorging\s*(,|$)/.test(tags),
     shopifyUpdatedAt: shopifyTime(order.updated_at),
-  };
+  });
 }
 
 function productLabel(item) {

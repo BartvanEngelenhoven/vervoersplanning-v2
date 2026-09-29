@@ -576,6 +576,11 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
 
 /* --- September 2026 review --------------------------------------------- */
 .badge.planned { color: #0f4f56; background: #d8eef0; }
+/* Waiting for the day its note names. */
+.badge.wait { color: #35535e; background: #e1ecef; }
+.badge.wait::before { content: "◷"; }
+.map-dot.wait { background: #5f7f8c; }
+.order-group.wait { border-left: 4px solid #5f7f8c; }
 .badge.planned::before { content: "▤"; }
 .map-dot.planned { background: #1f6f78; }
 .badge-planned { display: inline-flex; align-items: center; gap: .3rem; font-size: .75rem; font-weight: 700; color: #0f4f56; }
