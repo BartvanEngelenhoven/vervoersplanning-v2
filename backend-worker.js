@@ -232,8 +232,8 @@ async function handleRequest(request, requestEnv) {
     // headers, and the browser reports only "Failed to fetch" instead of
     // anything the planner could act on.
     console.error(error);
-    if (kvLimitSpent(error)) return json({ error: KV_LIMIT_MESSAGE }, 503, env);
-    return json({ error: "Er ging iets mis op de server. Probeer het zo opnieuw." }, 500, env);
+    if (kvLimitSpent(error)) return json({ error: say(env, KV_LIMIT_MESSAGE, "Безплатният дневен лимит на Cloudflare е изчерпан. От 02:00 всичко работи отново; дотогава се обади на диспечера.") }, 503, env);
+    return json({ error: say(env, "Er ging iets mis op de server. Probeer het zo opnieuw.", "Нещо се обърка на сървъра. Опитай отново след малко.") }, 500, env);
   }
 }
 
@@ -360,6 +360,10 @@ async function route(request, env) {
 
   if (request.method === "POST" && url.pathname === "/drivers/remove") {
     return removeDriver(request, env);
+  }
+
+  if (request.method === "POST" && url.pathname === "/drivers/lang") {
+    return setDriverLang(request, env);
   }
 
   if (request.method === "POST" && url.pathname === "/plan/driver") {
@@ -957,9 +961,9 @@ async function markDelivered(request, env) {
   if (history) return json({ ok: true, already: true, id: displayOrderId }, 200, env);
 
   const storedOrder = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
-  if (!storedOrder) return json({ error: "Deze order staat niet meer open in de planning. Ververs het scherm." }, 404, env);
-  if (storedOrder.cancelled) return json({ error: "Deze order is geannuleerd. Niet afleveren." }, 409, env);
-  if (storedOrder.refunded) return json({ error: "Deze order is terugbetaald. Niet afleveren; bel de planner." }, 409, env);
+  if (!storedOrder) return json({ error: say(env, "Deze order staat niet meer open in de planning. Ververs het scherm.", "Тази поръчка вече не е отворена в плана. Опресни екрана.") }, 404, env);
+  if (storedOrder.cancelled) return json({ error: say(env, "Deze order is geannuleerd. Niet afleveren.", "Тази поръчка е анулирана. Не я доставяй.") }, 409, env);
+  if (storedOrder.refunded) return json({ error: say(env, "Deze order is terugbetaald. Niet afleveren; bel de planner.", "Парите за тази поръчка са върнати. Не я доставяй; обади се на диспечера.") }, 409, env);
 
   // The driver reports deliveries of their own routes only. The phone says which
   // route the stop is in, so that one route is read instead of every route being
@@ -976,13 +980,13 @@ async function markDelivered(request, env) {
     const inNamedRoute = named && !named.abortedAt && isCallersRoute(env, named) && (named.orderKeys || []).includes(key);
     if (!inNamedRoute) {
       const stops = await plannedStops(env, window.from, window.to);
-      if (!stops.has(key) || !isCallersRoute(env, stops.get(key))) return json({ error: NOT_YOUR_ROUTE }, 403, env);
+      if (!stops.has(key) || !isCallersRoute(env, stops.get(key))) return json({ error: say(env, NOT_YOUR_ROUTE, NOT_YOUR_ROUTE_BG) }, 403, env);
     }
   }
 
   const shopifyOrderId = storedOrder.shopifyOrderId || payload.shopifyOrderId;
   const token = await shopifyAdminToken(env, shopDomain);
-  if (!token || !shopifyOrderId) return json({ error: "Er is geen Shopify-koppeling voor deze winkel. Bel de planner." }, 501, env);
+  if (!token || !shopifyOrderId) return json({ error: say(env, "Er is geen Shopify-koppeling voor deze winkel. Bel de planner.", "Няма връзка с Shopify за този магазин. Обади се на диспечера.") }, 501, env);
 
   // Always asked of Shopify, never taken on trust from the announcement marker:
   // an announced order is already fulfilled and comes back as such, customer
@@ -1028,7 +1032,7 @@ async function markDelivered(request, env) {
       ours = madeWhileReporting(await env.PLANNING_ORDERS.get(seenKey, "json"), waited);
     }
     if (!ours) {
-      return json({ error: "Geen antwoord van Shopify. Wacht een minuut, ververs en kijk of de stop als bezorgd staat voor je het opnieuw probeert.", userErrors: created.userErrors }, created.status, env);
+      return json({ error: say(env, "Geen antwoord van Shopify. Wacht een minuut, ververs en kijk of de stop als bezorgd staat voor je het opnieuw probeert.", "Shopify не отговаря. Изчакай минута, опресни и провери дали спирката вече е отбелязана като доставена, преди да опиташ отново."), userErrors: created.userErrors }, created.status, env);
     }
     fulfillment = { id: ours.id, status: "SUCCESS" };
   }
@@ -2072,40 +2076,40 @@ async function addPlanStop(request, env) {
   const date = String(payload.date || "");
   const id = String(payload.id || "");
   let record = await readPlanRecord(env, date, id);
-  if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
-  if (!isCallersRoute(env, record)) return json({ error: NOT_YOUR_ROUTE }, 403, env);
-  if (record.abortedAt) return json({ error: "Deze rit is afgebroken." }, 409, env);
+  if (!record) return json({ error: say(env, "Deze rit staat niet meer in de agenda.", "Този маршрут вече не е в графика.") }, 404, env);
+  if (!isCallersRoute(env, record)) return json({ error: say(env, NOT_YOUR_ROUTE, NOT_YOUR_ROUTE_BG) }, 403, env);
+  if (record.abortedAt) return json({ error: say(env, "Deze rit is afgebroken.", "Този маршрут е прекратен.") }, 409, env);
   if ((record.orderKeys || []).includes(key)) return json({ route: record, already: true }, 200, env);
 
   const stored = await env.PLANNING_ORDERS.get(`order:${key}`, "json");
-  if (!stored || stored.cancelled || stored.fulfilled) return json({ error: "Deze order staat niet meer open." }, 404, env);
+  if (!stored || stored.cancelled || stored.fulfilled) return json({ error: say(env, "Deze order staat niet meer open.", "Тази поръчка вече не е отворена.") }, 404, env);
   const order = withNoteDates(stored);
 
   if (role === "driver") {
     const today = amsterdamNow().day;
-    if (record.date > today || record.date < shiftDay(today, -7)) return json({ error: "Onderweg iets meenemen kan alleen in de rit die je nu rijdt." }, 403, env);
+    if (record.date > today || record.date < shiftDay(today, -7)) return json({ error: say(env, "Onderweg iets meenemen kan alleen in de rit die je nu rijdt.", "По пътя можеш да добавяш само към маршрута, който караш сега.") }, 403, env);
     const eligible = order.paid && !order.refunded && order.addressComplete && order.deliveryMethod !== "pickup"
       && !order.deliveryAppointmentLocked && !(order.dueDate && order.dueDate < HIDE_ORDERS_DUE_BEFORE);
-    if (!eligible) return json({ error: "Deze order kan niet zomaar mee. Bel de planner." }, 403, env);
+    if (!eligible) return json({ error: say(env, "Deze order kan niet zomaar mee. Bel de planner.", "Тази поръчка не може да се вземе просто така. Обади се на диспечера.") }, 403, env);
     // What the note says about the day holds on the road too.
-    if (order.dateUnclear) return json({ error: "In de opmerking bij deze order staat iets over de dag. Bel de planner." }, 403, env);
-    if (order.earliestDate && record.date < order.earliestDate) return json({ error: `Deze order mag volgens de opmerking pas vanaf ${spokenDay(order.earliestDate)}. Bel de planner.` }, 403, env);
-    if ((order.avoidDates || []).includes(record.date)) return json({ error: `Volgens de opmerking kan deze order niet op ${spokenDay(record.date)}. Bel de planner.` }, 403, env);
+    if (order.dateUnclear) return json({ error: say(env, "In de opmerking bij deze order staat iets over de dag. Bel de planner.", "В бележката към тази поръчка пише нещо за деня. Обади се на диспечера.") }, 403, env);
+    if (order.earliestDate && record.date < order.earliestDate) return json({ error: say(env, `Deze order mag volgens de opmerking pas vanaf ${spokenDay(order.earliestDate)}. Bel de planner.`, `Според бележката тази поръчка може да се достави едва от ${spokenDayBg(order.earliestDate)}. Обади се на диспечера.`) }, 403, env);
+    if ((order.avoidDates || []).includes(record.date)) return json({ error: say(env, `Volgens de opmerking kan deze order niet op ${spokenDay(record.date)}. Bel de planner.`, `Според бележката тази поръчка не може да се достави на ${spokenDayBg(record.date)}. Обади се на диспечера.`) }, 403, env);
     const weighed = await routeMinutesWith(env, record, order);
-    if (weighed.missing) return json({ error: `Van ${weighed.missing} is geen locatie bekend, dus de rit is niet na te rekenen. Bel de planner.` }, 403, env);
-    if (weighed.minutes > DAY_LIMIT_MINUTES) return json({ error: "Met deze stop wordt de rit langer dan 5:45. Bel de planner." }, 403, env);
+    if (weighed.missing) return json({ error: say(env, `Van ${weighed.missing} is geen locatie bekend, dus de rit is niet na te rekenen. Bel de planner.`, `Местоположението на ${weighed.missing} не е известно, затова маршрутът не може да се пресметне. Обади се на диспечера.`) }, 403, env);
+    if (weighed.minutes > DAY_LIMIT_MINUTES) return json({ error: say(env, "Met deze stop wordt de rit langer dan 5:45. Bel de planner.", "С тази спирка маршрутът става по-дълъг от 5:45 ч. Обади се на диспечера.") }, 403, env);
   }
 
   const stops = await plannedStops(env, shiftDay(amsterdamNow().day, -7), "9999-12-31");
   const other = stops.get(key);
-  if (other && other.id !== record.id) return json({ error: `Deze order staat al in rit ${other.number || "?"} op ${other.date}.` }, 409, env);
+  if (other && other.id !== record.id) return json({ error: say(env, `Deze order staat al in rit ${other.number || "?"} op ${other.date}.`, `Тази поръчка вече е в маршрут ${other.number || "?"} на ${other.date}.`) }, 409, env);
   const concept = (await conceptStops(env)).get(key);
-  if (concept) return json({ error: `Deze order staat in het concept ${concept.name} van de planner.` }, 409, env);
+  if (concept) return json({ error: say(env, `Deze order staat in het concept ${concept.name} van de planner.`, `Тази поръчка е в чернова „${concept.name}“ на диспечера.`) }, 409, env);
 
   let tagged = [];
   if (payload.tag && !order.ownDeliveryTagged) {
     const result = await tagKeysOwnDelivery(env, [key]);
-    if (result.failed.length) return json({ error: "Shopify kon de tag 'eigen bezorging' niet zetten. De stop is niet toegevoegd." }, 502, env);
+    if (result.failed.length) return json({ error: say(env, "Shopify kon de tag 'eigen bezorging' niet zetten. De stop is niet toegevoegd.", "Shopify не успя да постави етикета „eigen bezorging“. Спирката не е добавена.") }, 502, env);
     tagged = result.tagged;
   }
 
@@ -2114,7 +2118,7 @@ async function addPlanStop(request, env) {
   record = await readPlanRecord(env, date, id);
   if (!record || record.abortedAt || !isCallersRoute(env, record)) {
     await untagOrders(env, tagged);
-    return json({ error: !record ? "Deze rit staat niet meer in de agenda." : record.abortedAt ? "Deze rit is intussen afgebroken." : NOT_YOUR_ROUTE }, 409, env);
+    return json({ error: !record ? say(env, "Deze rit staat niet meer in de agenda.", "Този маршрут вече не е в графика.") : record.abortedAt ? say(env, "Deze rit is intussen afgebroken.", "Междувременно този маршрут е прекратен.") : say(env, NOT_YOUR_ROUTE, NOT_YOUR_ROUTE_BG) }, 409, env);
   }
   const keys = [...(record.orderKeys || [])];
   const position = Number.isInteger(payload.position) ? Math.max(0, Math.min(keys.length, payload.position)) : keys.length;
@@ -2179,8 +2183,8 @@ async function removePlanStop(request, env) {
   const payload = await request.json().catch(() => ({}));
   const key = String(payload.orderKey || "");
   const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
-  if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
-  if (record.abortedAt) return json({ error: "Deze rit is afgebroken." }, 409, env);
+  if (!record) return json({ error: say(env, "Deze rit staat niet meer in de agenda.", "Този маршрут вече не е в графика.") }, 404, env);
+  if (record.abortedAt) return json({ error: say(env, "Deze rit is afgebroken.", "Този маршрут е прекратен.") }, 409, env);
   record.orderKeys = (record.orderKeys || []).filter((entry) => entry !== key);
   if (payload.name) record.name = cleanName(payload.name, record.name);
   if (!record.orderKeys.length) {
@@ -2203,14 +2207,14 @@ async function closePlanRoute(request, env, { finish }) {
   if (!role) return unauthorized(env);
   const payload = await request.json().catch(() => ({}));
   const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
-  if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
-  if (!isCallersRoute(env, record)) return json({ error: NOT_YOUR_ROUTE }, 403, env);
+  if (!record) return json({ error: say(env, "Deze rit staat niet meer in de agenda.", "Този маршрут вече не е в графика.") }, 404, env);
+  if (!isCallersRoute(env, record)) return json({ error: say(env, NOT_YOUR_ROUTE, NOT_YOUR_ROUTE_BG) }, 403, env);
   if (record.abortedAt) return json({ route: record }, 200, env);
   if (role === "driver") {
     const window = driverWindow();
-    if (record.date < window.from || record.date > window.to) return json({ error: "Deze rit valt buiten jouw week." }, 403, env);
+    if (record.date < window.from || record.date > window.to) return json({ error: say(env, "Deze rit valt buiten jouw week.", "Този маршрут е извън твоята седмица.") }, 403, env);
   }
-  if (finish && record.date > amsterdamNow().day) return json({ error: "Een rit van een latere dag kun je nog niet afronden." }, 409, env);
+  if (finish && record.date > amsterdamNow().day) return json({ error: say(env, "Een rit van een latere dag kun je nog niet afronden.", "Маршрут за по-късен ден още не може да се приключи.") }, 409, env);
 
   const keys = record.orderKeys || [];
   const delivered = await Promise.all(keys.map(async (key) =>
@@ -2233,7 +2237,7 @@ async function setPlanNote(request, env) {
   if (denied) return denied;
   const payload = await request.json().catch(() => ({}));
   const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
-  if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
+  if (!record) return json({ error: say(env, "Deze rit staat niet meer in de agenda.", "Този маршрут вече не е в графика.") }, 404, env);
   const note = String(payload.note || "").trim().slice(0, 1000);
   await env.PLANNING_ORDERS.put(`${PLAN_NOTE_PREFIX}${record.id}`, JSON.stringify({ id: record.id, note, updatedAt: new Date().toISOString() }), { expiration: planExpiration(record.date) });
   return json({ route: { ...record, note } }, 200, env);
@@ -2426,6 +2430,22 @@ const DRIVER_CODE_LENGTH = 12;
 const MAX_DRIVERS = 20;
 const DRIVER_GONE = "Deze bezorger bestaat niet meer. Ververs het scherm.";
 const NOT_YOUR_ROUTE = "Deze rit staat niet (meer) op jouw naam. Ververs het scherm, of bel de planner.";
+const NOT_YOUR_ROUTE_BG = "Този маршрут (вече) не е на твое име. Опресни екрана или се обади на диспечера.";
+// The languages a driver's screens can be in: Dutch, and Bulgarian.
+const DRIVER_LANGS = ["nl", "bg"];
+
+// The Worker's words to a driver who reads Bulgarian, in Bulgarian. Everyone
+// else, the planner included, gets the Dutch.
+function say(env, nl, bg) {
+  return env[CALLER]?.driver?.lang === "bg" ? bg : nl;
+}
+
+function spokenDayBg(isoDate) {
+  const date = new Date(`${isoDate}T12:00:00Z`);
+  const days = ["неделя", "понеделник", "вторник", "сряда", "четвъртък", "петък", "събота"];
+  const months = ["януари", "февруари", "март", "април", "май", "юни", "юли", "август", "септември", "октомври", "ноември", "декември"];
+  return `${days[date.getUTCDay()]}, ${date.getUTCDate()} ${months[date.getUTCMonth()]}`;
+}
 
 // The planner, a driver by name, or whoever holds the shared code from before
 // (a driver without a name). A driver's code is looked up by its hash; one of
@@ -2441,7 +2461,7 @@ async function identify(request, env) {
   if (code.length !== DRIVER_CODE_LENGTH) return { role: null };
   const hash = await sha256Hex(code);
   const driver = (await readDrivers(env)).find((entry) => typeof entry.codeHash === "string" && timingSafeEqual(entry.codeHash, hash));
-  return driver ? { role: "driver", driver: { id: driver.id, name: driver.name } } : { role: null };
+  return driver ? { role: "driver", driver: { id: driver.id, name: driver.name, lang: DRIVER_LANGS.includes(driver.lang) ? driver.lang : "nl" } } : { role: null };
 }
 
 // The driver asking, by id and name; null for the planner or the shared code.
@@ -2472,7 +2492,7 @@ async function writeDrivers(env, drivers) {
 
 // What the planner's screen may know of the drivers: never the hash.
 function publicDrivers(drivers) {
-  return drivers.map((driver) => ({ id: driver.id, name: driver.name, codeSetAt: driver.codeSetAt || null }));
+  return drivers.map((driver) => ({ id: driver.id, name: driver.name, codeSetAt: driver.codeSetAt || null, lang: DRIVER_LANGS.includes(driver.lang) ? driver.lang : "nl" }));
 }
 
 // "" for no driver, the id of a driver who exists, or null for one who does not
@@ -2549,6 +2569,20 @@ async function renewDriverCode(request, env) {
   return json({ driver: { id: driver.id, name: driver.name }, code: formatDriverCode(code), drivers: publicDrivers(drivers) }, 200, env);
 }
 
+// The language of a driver's screens on their phone.
+async function setDriverLang(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  if (!DRIVER_LANGS.includes(payload.lang)) return json({ error: "Onbekende taal." }, 400, env);
+  const drivers = await readDrivers(env);
+  const driver = drivers.find((entry) => entry.id === String(payload.id || ""));
+  if (!driver) return json({ error: DRIVER_GONE }, 404, env);
+  driver.lang = payload.lang;
+  await writeDrivers(env, drivers);
+  return json({ drivers: publicDrivers(drivers) }, 200, env);
+}
+
 // Their code stops working at once. Routes they had keep their id and show
 // in the agenda as having no driver, until the planner gives them to someone.
 async function removeDriver(request, env) {
@@ -2568,7 +2602,7 @@ async function setPlanDriver(request, env) {
   if (denied) return denied;
   const payload = await request.json().catch(() => ({}));
   const record = await readPlanRecord(env, String(payload.date || ""), String(payload.id || ""));
-  if (!record) return json({ error: "Deze rit staat niet meer in de agenda." }, 404, env);
+  if (!record) return json({ error: say(env, "Deze rit staat niet meer in de agenda.", "Този маршрут вече не е в графика.") }, 404, env);
   const driverId = await knownDriverId(env, payload.driverId);
   if (driverId === null) return json({ error: DRIVER_GONE }, 404, env);
   if ((record.driverId || "") === driverId) return json({ route: record }, 200, env);

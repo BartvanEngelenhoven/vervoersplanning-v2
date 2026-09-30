@@ -1404,7 +1404,7 @@ await test("bezorgers: de planner maakt ze aan, elk met een eigen code, en allee
   assert.ok(!stored.includes(sanne.code) && !stored.includes(sanne.code.replaceAll("-", "")), "de code zelf wordt nergens bewaard");
 
   const who = await call(env, "GET", "/whoami", { key: sanne.code });
-  assert.deepEqual(who.data, { role: "driver", driver: { id: sanne.id, name: "Sanne" } });
+  assert.deepEqual(who.data, { role: "driver", driver: { id: sanne.id, name: "Sanne", lang: "nl" } });
   const getypt = ` ${sanne.code.toUpperCase().replaceAll("-", " ")} `;
   assert.equal((await call(env, "GET", "/whoami", { key: getypt })).data.driver?.name, "Sanne", "hoofdletters en spaties maken niet uit");
   assert.equal((await call(env, "GET", "/whoami", { key: "abcd-efgh-jkmn" })).status, 401);
@@ -1431,7 +1431,7 @@ await test("een bezorger ziet alleen de eigen ritten, en kan niets met die van e
   const zijn = (await call(env, "GET", "/plan", { key: sanne.code })).data;
   assert.deepEqual(zijn.routes.map((route) => route.id), [vanSanne.id], "alleen de eigen rit");
   assert.deepEqual(zijn.stops.map((stop) => stop.id), [a.order.id], "alleen de eigen klanten");
-  assert.deepEqual(zijn.driver, { id: sanne.id, name: "Sanne" });
+  assert.deepEqual(zijn.driver, { id: sanne.id, name: "Sanne", lang: "nl" });
   assert.ok(zijn.heldKeys.includes(b.key) && zijn.heldKeys.includes(c.key), "de orders van een ander worden niet aangeboden");
   assert.deepEqual(zijn.announcements, []);
   assert.ok(!zijn.drivers, "de lijst met bezorgers is voor de planner");
@@ -1637,6 +1637,31 @@ await test("afgehandeld: de planner rondt een order af zonder de bus; in Shopify
   const terug = await call(env, "POST", "/actions/undo-delivered", { key: PLANNER, body: { id: a.order.id, shopDomain: DRS } });
   assert.equal(terug.status, 200, JSON.stringify(terug.data));
   assert.equal(shop.orders.get(a.order.shopifyOrderId).fulfilled, false, "terugdraaien kan");
+});
+
+await test("taal per bezorger: de planner zet Bulgaars, de telefoon hoort het, en de Worker antwoordt die bezorger in het Bulgaars", async () => {
+  const env = makeEnv();
+  const sanne = await addDriver(env, "Sanne");
+  const joost = await addDriver(env, "Joost");
+  assert.equal((await call(env, "POST", "/drivers/lang", { key: joost.code, body: { id: joost.id, lang: "bg" } })).status, 403, "alleen de planner");
+  assert.equal((await call(env, "POST", "/drivers/lang", { key: PLANNER, body: { id: joost.id, lang: "fr" } })).status, 400);
+  const gezet = await call(env, "POST", "/drivers/lang", { key: PLANNER, body: { id: joost.id, lang: "bg" } });
+  assert.equal(gezet.status, 200);
+  assert.deepEqual(gezet.data.drivers.map((driver) => [driver.name, driver.lang]), [["Sanne", "nl"], ["Joost", "bg"]]);
+  assert.equal((await call(env, "GET", "/whoami", { key: joost.code })).data.driver.lang, "bg");
+  assert.equal((await call(env, "GET", "/plan", { key: joost.code })).data.driver.lang, "bg");
+
+  const a = await seedOrder(env, DRS, "#DRS960");
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), orderKeys: [a.key], driverId: sanne.id } })).data.route;
+  const bezorgd = (key) => call(env, "POST", "/actions/mark-delivered", { key, body: { id: a.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date } });
+  assert.equal((await bezorgd(joost.code)).data.error, "Този маршрут (вече) не е на твое име. Опресни екрана или се обади на диспечера.");
+  const later = (await call(env, "POST", "/plan/finish", { key: joost.code, body: { id: route.id, date: route.date } })).data.error;
+  assert.match(later, /^Този маршрут/, "ook bij afronden");
+  await call(env, "POST", "/plan/driver", { key: PLANNER, body: { id: route.id, date: route.date, driverId: joost.id } });
+  const tomorrow = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(1), orderKeys: [(await seedOrder(env, DRS, "#DRS961")).key], driverId: joost.id } })).data.route;
+  assert.equal((await call(env, "POST", "/plan/finish", { key: joost.code, body: { id: tomorrow.id, date: tomorrow.date } })).data.error, "Маршрут за по-късен ден още не може да се приключи.");
+  // Sanne reads Dutch, and so does the planner.
+  assert.equal((await call(env, "POST", "/plan/finish", { key: sanne.code, body: { id: route.id, date: route.date } })).data.error, "Deze rit staat niet (meer) op jouw naam. Ververs het scherm, of bel de planner.");
 });
 
 globalThis.fetch = realFetch;

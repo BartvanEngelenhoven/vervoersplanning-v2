@@ -478,7 +478,7 @@ function formatMinutes(minutes) {
   const whole = Math.max(0, Math.round(Number(minutes) || 0));
   const hours = Math.floor(whole / 60);
   const rest = whole % 60;
-  return `${hours}:${String(rest).padStart(2, "0")} uur`;
+  return `${hours}:${String(rest).padStart(2, "0")} ${tr("uur")}`;
 }
 
 // A date that does not exist ("2026-13-01") reads as "Onbekend" instead of
@@ -644,12 +644,14 @@ function storedDriver() {
 // The driver this phone belongs to: { id, name }, or null for the shared code
 // from before drivers had names. Kept for the next time the phone opens.
 function rememberDriver(driver) {
-  state.driver = driver && driver.name ? { id: String(driver.id || ""), name: String(driver.name) } : null;
+  const before = driverLang();
+  state.driver = driver && driver.name ? { id: String(driver.id || ""), name: String(driver.name), lang: driver.lang === "bg" ? "bg" : "nl" } : null;
   try {
     localStorage.setItem(driverStorageKey, JSON.stringify(state.driver));
   } catch {
     // Not remembered; the next refresh says it again.
   }
+  if (driverLang() !== before) applyDriverLang();
 }
 
 function applyRole(role) {
@@ -663,6 +665,122 @@ function applyRole(role) {
   state.role = role;
   document.body.classList.toggle("role-driver", role === "driver");
   if (role === "driver") showView("bezorger");
+  applyDriverLang();
+}
+
+// ---------------------------------------------------------------------------
+// The driver's language. A driver the planner set to Bulgarian sees their own
+// screens in Bulgarian; the planner's screens stay Dutch. The Dutch text is the
+// key, so anything without a translation stays readable. What people typed
+// (customers' notes, the planner's notes) and product names stay as written.
+// ---------------------------------------------------------------------------
+const DRIVER_WORDS = {
+  bg: {
+    "Welkom {name}": "Здравей, {name}",
+    "Welkom": "Здравей",
+    "De ritten zijn nog niet geladen.": "Маршрутите още не са заредени.",
+    "Dit zijn jouw ritten. Tik op een rit om de stops te zien.": "Това са твоите маршрути. Докосни маршрут, за да видиш спирките.",
+    "Er staat deze week nog geen rit voor je klaar.": "Тази седмица още няма маршрут за теб.",
+    "{reason} Je ziet de ritten zoals ze bij het laatste verversen waren; ververs als je bereik hebt.": "{reason} Виждаш маршрутите такива, каквито бяха при последното опресняване; опресни, когато имаш връзка.",
+    "Vandaag · {day}": "Днес · {day}",
+    "Nog open van {day}": "Още отворено от {day}",
+    "Rit {number}": "Маршрут {number}",
+    "{count} te gaan": "остават {count}",
+    "{count} bezorgd": "доставени {count}",
+    "Afgebroken": "Прекратен",
+    "Afgerond · {count} bezorgd": "Приключен · доставени {count}",
+    "Uitloggen op deze telefoon": "Изход от този телефон",
+    "Handleiding": "Ръководство (на нидерландски)",
+    "‹ Alle ritten": "‹ Всички маршрути",
+    "{date} · {count} te gaan": "{date} · остават {count}",
+    "Van de planner:": "От диспечера:",
+    "Deze dag:": "За този ден:",
+    "{reason} Je ziet de rit zoals hij bij het laatste verversen was.": "{reason} Виждаш маршрута такъв, какъвто беше при последното опресняване.",
+    "Deze rit is afgerond.": "Този маршрут е приключен.",
+    "Deze rit is afgebroken{reason}.": "Този маршрут е прекратен{reason}.",
+    "Rit openen in Google Maps": "Отвори маршрута в Google Maps",
+    "Onbekende klant": "Непознат клиент",
+    "aangekondigd": "обявена",
+    "Bel {phone}": "Обади се на {phone}",
+    "Opmerking:": "Бележка:",
+    "{id} · {shop} · {minutes} min lossen": "{id} · {shop} · {minutes} мин разтоварване",
+    "Bezorgd": "Доставено",
+    "Bezig…": "Изчакай…",
+    "{id} bezorgd op {time}": "{id} е доставена на {time}",
+    "{id} bezorgd": "{id} е доставена",
+    "{id} is geannuleerd, niet afleveren": "{id} е анулирана, не я доставяй",
+    "{id} is terugbetaald, niet afleveren": "Парите за {id} са върнати, не я доставяй",
+    "{id}: status nog niet bevestigd, ververs zo even": "{id}: статусът още не е потвърден, опресни след малко",
+    "{id} staat niet meer open. Bel de planner voor je gaat.": "{id} вече не е отворена. Обади се на диспечера, преди да тръгнеш.",
+    "Kan er nog bij": "Може да се добави още",
+    "+{extra}, rit wordt dan {total}": "+{extra}, тогава маршрутът става {total}",
+    "Meenemen": "Вземи",
+    "Rit afronden": "Приключи маршрута",
+    "Nog niet als bezorgd gemeld: <b>{list}</b>. Heb je die wel afgeleverd? Tik dan eerst hierboven op Bezorgd. Wat niet bezorgd is, gaat terug naar de planning.": "Още не са отбелязани като доставени: <b>{list}</b>. Ако са доставени, първо докосни „Доставено“ по-горе. Недоставеното се връща за планиране.",
+    "Waarom niet bezorgd? (mag leeg)": "Защо не е доставено? (може да остане празно)",
+    "Bijvoorbeeld: klant niet thuis": "Например: клиентът не е вкъщи",
+    "Alle stops zijn als bezorgd gemeld.": "Всички спирки са отбелязани като доставени.",
+    "Ja, rit afronden": "Да, приключи маршрута",
+    "Toch niet": "Отказ",
+    "Rit afbreken": "Прекрати маршрута",
+    "Wat nog niet bezorgd is, gaat terug naar de planning. Wat al bezorgd is, blijft bezorgd.": "Недоставеното се връща за планиране. Доставеното остава доставено.",
+    "Waarom? (mag leeg)": "Защо? (може да остане празно)",
+    "Bijvoorbeeld: bus kapot, klant niet thuis": "Например: бусът е повреден, клиентът не е вкъщи",
+    "Ja, rit afbreken": "Да, прекрати маршрута",
+    "Afronden is niet gelukt.": "Приключването не успя.",
+    "Afbreken is niet gelukt.": "Прекратяването не успя.",
+    "{error} De rit staat nog zoals hij stond.": "{error} Маршрутът е същият като преди.",
+    "Afronden is niet gelukt. Probeer het opnieuw als je bereik hebt; de rit staat nog zoals hij stond.": "Приключването не успя. Опитай отново, когато имаш връзка; маршрутът е същият като преди.",
+    "Afbreken is niet gelukt. Probeer het opnieuw als je bereik hebt; de rit staat nog zoals hij stond.": "Прекратяването не успя. Опитай отново, когато имаш връзка; маршрутът е същият като преди.",
+    "Rit {number} is afgerond. {count} bezorgd.": "Маршрут {number} е приключен. Доставени: {count}.",
+    "Rit {number} is afgebroken. {count} bezorgd.": "Маршрут {number} е прекратен. Доставени: {count}.",
+    "Rit {number} is afgerond. {count} bezorgd, {back} terug naar de planning.": "Маршрут {number} е приключен. Доставени: {count}, върнати за планиране: {back}.",
+    "Rit {number} is afgebroken. {count} bezorgd, {back} terug naar de planning.": "Маршрут {number} е прекратен. Доставени: {count}, върнати за планиране: {back}.",
+    "{id} als bezorgd melden?": "Да отбележа ли {id} като доставена?",
+    "Bezorgd melden is niet gelukt: geen verbinding. Probeer het opnieuw als je bereik hebt; twee keer melden kan geen kwaad.": "Отбелязването не успя: няма връзка. Опитай отново, когато имаш връзка; ако отбележиш два пъти, няма проблем.",
+    "Bezorgd melden is niet gelukt. Probeer het opnieuw.": "Отбелязването не успя. Опитай отново.",
+    "Geen antwoord. Misschien is de stop toch toegevoegd; het scherm wordt nu ververst. Staat hij erbij, dan is het gelukt. Nog eens Meenemen kan geen kwaad.": "Няма отговор. Може спирката все пак да е добавена; екранът се опреснява. Ако я виждаш, всичко е наред. Повторното „Вземи“ не вреди.",
+    "{error} Je rijdt de oorspronkelijke rit.": "{error} Караш първоначалния маршрут.",
+    "Toevoegen is niet gelukt.": "Добавянето не успя.",
+    "Laatst ververst om {time}": "Последно опресняване в {time}",
+    "{reason} — bestaande gegevens blijven staan": "{reason} — показаните данни остават",
+    "Geen verbinding": "Няма връзка",
+    "Geen verbinding.": "Няма връзка.",
+    "Code ontbreekt of klopt niet": "Кодът липсва или е грешен",
+    "Data kon niet worden geladen": "Данните не можаха да се заредят",
+    "De ritten konden niet worden geladen": "Маршрутите не можаха да се заредят",
+    "Ververs": "Опресни",
+    "Gegevens laden…": "Зареждане…",
+    "Uitloggen op dit apparaat? De code wordt hier vergeten; op andere apparaten blijft alles zoals het is.": "Изход от това устройство? Кодът се забравя тук; на другите устройства нищо не се променя.",
+    "Code om de planning te openen": "Код за достъп",
+    "Die code klopt niet. Probeer het opnieuw:": "Кодът е грешен. Опитай отново:",
+    "Te vaak een verkeerde code. Wacht vijf minuten en probeer het dan opnieuw.": "Твърде много грешни кодове. Изчакай пет минути и опитай отново.",
+    "uur": "ч.",
+    "Adres onbekend": "Адресът е неизвестен",
+    "Product onbekend": "Продуктът е неизвестен",
+  },
+};
+
+// The language of the screen: the driver's own, for a driver; Dutch otherwise.
+function driverLang() {
+  return state.role === "driver" && state.driver?.lang === "bg" ? "bg" : "nl";
+}
+
+function tr(text, vars = {}, lang = driverLang()) {
+  const pattern = (lang !== "nl" && DRIVER_WORDS[lang]?.[text]) || text;
+  return pattern.replace(/\{(\w+)\}/g, (_, name) => String(vars[name] ?? ""));
+}
+
+function driverLocale() {
+  return driverLang() === "bg" ? "bg-BG" : "nl-NL";
+}
+
+// Words on the page itself that a driver sees before anything is drawn.
+function applyDriverLang() {
+  const lang = driverLang();
+  document.documentElement.lang = lang;
+  const knop = document.querySelector("#refreshMobile");
+  if (knop && !knop.disabled) knop.textContent = tr("Ververs");
 }
 
 // While the driver or the planner is typing in one of the inline panels, the
@@ -708,14 +826,14 @@ function renderDriverList(holder) {
   // ask for one.
   const oudeCode = state.driver === null && state.ownCodes;
   holder.innerHTML = `
-    <div class="view-head"><h1 class="driver-welcome">${state.driver?.name ? `Welkom ${escapeHtml(state.driver.name)}` : "Welkom"}</h1>
-      <p>${!geladen ? "De ritten zijn nog niet geladen." : ritten.length ? "Dit zijn jouw ritten. Tik op een rit om de stops te zien." : "Er staat deze week nog geen rit voor je klaar."}</p></div>
+    <div class="view-head"><h1 class="driver-welcome">${state.driver?.name ? tr("Welkom {name}", { name: escapeHtml(state.driver.name) }) : tr("Welkom")}</h1>
+      <p>${!geladen ? tr("De ritten zijn nog niet geladen.") : ritten.length ? tr("Dit zijn jouw ritten. Tik op een rit om de stops te zien.") : tr("Er staat deze week nog geen rit voor je klaar.")}</p></div>
     ${oudeCode ? `<p class="note-box">Je bent ingelogd met de oude code voor alle bezorgers. Daarmee zie je alleen ritten die nog geen bezorger hebben. Vraag de planner om je eigen code, tik onderaan op <b>Uitloggen op deze telefoon</b> en vul je eigen code in.</p>` : ""}
-    ${state.lastFetchOk ? "" : `<p class="plan-offline">${offlineReason()} Je ziet de ritten zoals ze bij het laatste verversen waren; ververs als je bereik hebt.</p>`}
+    ${state.lastFetchOk ? "" : `<p class="plan-offline">${tr("{reason} Je ziet de ritten zoals ze bij het laatste verversen waren; ververs als je bereik hebt.", { reason: offlineReason() })}</p>`}
     ${perDag.map((dag) => {
-      const naam = capitalize(new Intl.DateTimeFormat("nl-NL", { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag)));
+      const naam = capitalize(new Intl.DateTimeFormat(driverLocale(), { weekday: "long", day: "numeric", month: "long" }).format(dateFromIso(dag)));
       const dagnotitie = dayNoteFor(dag);
-      const kop = dag === vandaag ? `Vandaag · ${naam}` : dag < vandaag ? `Nog open van ${naam.toLowerCase()}` : naam;
+      const kop = dag === vandaag ? tr("Vandaag · {day}", { day: naam }) : dag < vandaag ? tr("Nog open van {day}", { day: naam.toLowerCase() }) : naam;
       return `<section class="driver-day${dag === vandaag ? " vandaag" : ""}${dag < vandaag ? " eerder" : ""}">
         <h2>${kop}</h2>
         ${dagnotitie ? `<p class="note-box">${escapeHtml(dagnotitie)}</p>` : ""}
@@ -723,16 +841,16 @@ function renderDriverList(holder) {
           const status = plannedRouteStatus(planned);
           const klaar = status.stops.filter((stop) => stop.status === "bezorgd").length;
           return `<button class="driver-route${planned.abortedAt ? (planned.finished ? " afgerond" : " afgebroken") : ""}" type="button" data-planned="${escapeHtml(planned.id)}">
-            <span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span>
+            <span class="rit-nummer">${tr("Rit {number}", { number: escapeHtml(planned.number || "?") })}</span>
             <b>${escapeHtml(planned.name)}</b>
-            <span>${planned.abortedAt ? (planned.finished ? `Afgerond · ${klaar} bezorgd` : "Afgebroken") : `${status.open.length} te gaan${klaar ? ` · ${klaar} bezorgd` : ""}`}</span>
+            <span>${planned.abortedAt ? (planned.finished ? tr("Afgerond · {count} bezorgd", { count: klaar }) : tr("Afgebroken")) : `${tr("{count} te gaan", { count: status.open.length })}${klaar ? ` · ${tr("{count} bezorgd", { count: klaar })}` : ""}`}</span>
             ${planned.note ? `<em>${escapeHtml(planned.note)}</em>` : ""}
           </button>`;
         }).join("")}
       </section>`;
     }).join("")}
-    <div class="driver-foot"><button class="button subtle-action logout-button" type="button">Uitloggen op deze telefoon</button>
-    <a class="button subtle-action" href="handleiding.html#bezorger">Handleiding</a></div>`;
+    <div class="driver-foot"><button class="button subtle-action logout-button" type="button">${tr("Uitloggen op deze telefoon")}</button>
+    <a class="button subtle-action" href="handleiding.html#bezorger">${tr("Handleiding")}</a></div>`;
 
   holder.querySelectorAll(".driver-route").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -762,66 +880,66 @@ function renderDriverRoute(holder, planned) {
   const dagnotitie = dayNoteFor(planned.date);
 
   holder.innerHTML = `
-    <button id="driverBack" class="button subtle-action driver-back" type="button">‹ Alle ritten</button>
+    <button id="driverBack" class="button subtle-action driver-back" type="button">${tr("‹ Alle ritten")}</button>
     <div class="driver-route-head">
-      <h1><span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span> ${escapeHtml(planned.name)}</h1>
-      <p>${formatDate(planned.date)} · ${status.open.length} te gaan</p>
+      <h1><span class="rit-nummer">${tr("Rit {number}", { number: escapeHtml(planned.number || "?") })}</span> ${escapeHtml(planned.name)}</h1>
+      <p>${tr("{date} · {count} te gaan", { date: formatDate(planned.date), count: status.open.length })}</p>
     </div>
-    ${planned.note ? `<p class="note-box"><b>Van de planner:</b> ${escapeHtml(planned.note)}</p>` : ""}
-    ${dagnotitie ? `<p class="note-box"><b>Deze dag:</b> ${escapeHtml(dagnotitie)}</p>` : ""}
-    ${state.lastFetchOk ? "" : `<p class="plan-offline">${offlineReason()} Je ziet de rit zoals hij bij het laatste verversen was.</p>`}
+    ${planned.note ? `<p class="note-box"><b>${tr("Van de planner:")}</b> ${escapeHtml(planned.note)}</p>` : ""}
+    ${dagnotitie ? `<p class="note-box"><b>${tr("Deze dag:")}</b> ${escapeHtml(dagnotitie)}</p>` : ""}
+    ${state.lastFetchOk ? "" : `<p class="plan-offline">${tr("{reason} Je ziet de rit zoals hij bij het laatste verversen was.", { reason: offlineReason() })}</p>`}
     ${planned.abortedAt ? (planned.finished
-      ? `<p class="note-box afgerond">Deze rit is afgerond.</p>`
-      : `<p class="note-box afgebroken">Deze rit is afgebroken${planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : ""}.</p>`) : ""}
-    ${volgorde.length ? `<a class="button primary driver-maps" href="${driverMapsUrl(volgorde)}" target="_blank" rel="noreferrer">Rit openen in Google Maps</a>` : ""}
+      ? `<p class="note-box afgerond">${tr("Deze rit is afgerond.")}</p>`
+      : `<p class="note-box afgebroken">${tr("Deze rit is afgebroken{reason}.", { reason: planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : "" })}</p>`) : ""}
+    ${volgorde.length ? `<a class="button primary driver-maps" href="${driverMapsUrl(volgorde)}" target="_blank" rel="noreferrer">${tr("Rit openen in Google Maps")}</a>` : ""}
 
     <ol class="driver-stops">
       ${volgorde.map((order, index) => `<li class="driver-stop">
         <div class="driver-stop-nr">${index + 1}</div>
         <div class="driver-stop-body">
-          <b>${escapeHtml(order.customer || "Onbekende klant")}${order.announced ? '<span class="badge-announced">aangekondigd</span>' : ""}</b>
+          <b>${escapeHtml(order.customer || tr("Onbekende klant"))}${order.announced ? `<span class="badge-announced">${tr("aangekondigd")}</span>` : ""}</b>
           <a class="driver-address" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">${addressSummary(order)}</a>
-          ${order.phone ? `<a class="driver-phone" href="${telHref(order.phone)}">Bel ${escapeHtml(order.phone)}</a>` : ""}
+          ${order.phone ? `<a class="driver-phone" href="${telHref(order.phone)}">${tr("Bel {phone}", { phone: escapeHtml(order.phone) })}</a>` : ""}
           <span class="driver-products">${productSummary(order)}</span>
-          ${order.customerNote ? `<span class="driver-customer-note">Opmerking: ${escapeHtml(order.customerNote)}</span>` : ""}
-          <span class="driver-meta">${escapeHtml(order.id)} · ${escapeHtml(order.webshop || "")} · ${deliveryMinutes(order)} min lossen</span>
-          ${planned.abortedAt ? "" : `<button class="button primary mark-delivered driver-deliver" type="button" data-order-key="${orderKey(order)}">Bezorgd</button>`}
+          ${order.customerNote ? `<span class="driver-customer-note">${tr("Opmerking:")} ${escapeHtml(order.customerNote)}</span>` : ""}
+          <span class="driver-meta">${tr("{id} · {shop} · {minutes} min lossen", { id: escapeHtml(order.id), shop: escapeHtml(order.webshop || ""), minutes: deliveryMinutes(order) })}</span>
+          ${planned.abortedAt ? "" : `<button class="button primary mark-delivered driver-deliver" type="button" data-order-key="${orderKey(order)}">${tr("Bezorgd")}</button>`}
         </div>
       </li>`).join("")}
     </ol>
 
     ${status.stops.filter((stop) => stop.status !== "open").length ? `<ul class="plan-stops">${status.stops.filter((stop) => stop.status !== "open").map(stopStatusLine).join("")}</ul>` : ""}
 
-    ${erbij.length ? `<div class="plan-additions"><h3>Kan er nog bij</h3>${erbij.map((kandidaat) => {
+    ${erbij.length ? `<div class="plan-additions"><h3>${tr("Kan er nog bij")}</h3>${erbij.map((kandidaat) => {
       const o = kandidaat.item.order;
       return `<div class="plan-addition"><div><b>${escapeHtml(o.id)} · ${escapeHtml(o.city || "")}</b>
         <span>${productSummary(o)}</span>${orderNote(o, { short: true })}
-        <span>+${formatMinutes(kandidaat.extra)}, rit wordt dan ${formatMinutes(kandidaat.totaal)}</span></div>
-        <button class="button primary accept-addition" type="button" data-key="${orderKey(o)}">Meenemen</button></div>`;
+        <span>${tr("+{extra}, rit wordt dan {total}", { extra: formatMinutes(kandidaat.extra), total: formatMinutes(kandidaat.totaal) })}</span></div>
+        <button class="button primary accept-addition" type="button" data-key="${orderKey(o)}">${tr("Meenemen")}</button></div>`;
     }).join("")}</div>` : ""}
 
     ${planned.abortedAt || !rijdtNu ? "" : `<div class="inline-editor finish-box" id="finishBox">
-      <button id="finishOpen" class="button primary" type="button">Rit afronden</button>
+      <button id="finishOpen" class="button primary" type="button">${tr("Rit afronden")}</button>
       <div class="finish-form" hidden>
         ${volgorde.length
-          ? `<p>Nog niet als bezorgd gemeld: <b>${volgorde.map((order) => escapeHtml(`${order.id} ${order.city || ""}`.trim())).join(", ")}</b>. Heb je die wel afgeleverd? Tik dan eerst hierboven op Bezorgd. Wat niet bezorgd is, gaat terug naar de planning.</p>
-          <label>Waarom niet bezorgd? (mag leeg)<textarea id="finishReason" rows="2" maxlength="300" placeholder="Bijvoorbeeld: klant niet thuis"></textarea></label>`
-          : "<p>Alle stops zijn als bezorgd gemeld.</p>"}
+          ? `<p>${tr("Nog niet als bezorgd gemeld: <b>{list}</b>. Heb je die wel afgeleverd? Tik dan eerst hierboven op Bezorgd. Wat niet bezorgd is, gaat terug naar de planning.", { list: volgorde.map((order) => escapeHtml(`${order.id} ${order.city || ""}`.trim())).join(", ") })}</p>
+          <label>${tr("Waarom niet bezorgd? (mag leeg)")}<textarea id="finishReason" rows="2" maxlength="300" placeholder="${tr("Bijvoorbeeld: klant niet thuis")}"></textarea></label>`
+          : `<p>${tr("Alle stops zijn als bezorgd gemeld.")}</p>`}
         <div class="abort-actions">
-          <button id="finishConfirm" class="button primary" type="button">Ja, rit afronden</button>
-          <button id="finishCancel" class="button subtle-action" type="button">Toch niet</button>
+          <button id="finishConfirm" class="button primary" type="button">${tr("Ja, rit afronden")}</button>
+          <button id="finishCancel" class="button subtle-action" type="button">${tr("Toch niet")}</button>
         </div>
       </div>
     </div>`}
 
     ${planned.abortedAt ? "" : `<div class="inline-editor abort-box" id="abortBox">
-      <button id="abortOpen" class="button danger" type="button">Rit afbreken</button>
+      <button id="abortOpen" class="button danger" type="button">${tr("Rit afbreken")}</button>
       <div class="abort-form" hidden>
-        <p>Wat nog niet bezorgd is, gaat terug naar de planning. Wat al bezorgd is, blijft bezorgd.</p>
-        <label>Waarom? (mag leeg)<textarea id="abortReason" rows="2" maxlength="300" placeholder="Bijvoorbeeld: bus kapot, klant niet thuis"></textarea></label>
+        <p>${tr("Wat nog niet bezorgd is, gaat terug naar de planning. Wat al bezorgd is, blijft bezorgd.")}</p>
+        <label>${tr("Waarom? (mag leeg)")}<textarea id="abortReason" rows="2" maxlength="300" placeholder="${tr("Bijvoorbeeld: bus kapot, klant niet thuis")}"></textarea></label>
         <div class="abort-actions">
-          <button id="abortConfirm" class="button danger" type="button">Ja, rit afbreken</button>
-          <button id="abortCancel" class="button subtle-action" type="button">Toch niet</button>
+          <button id="abortConfirm" class="button danger" type="button">${tr("Ja, rit afbreken")}</button>
+          <button id="abortCancel" class="button subtle-action" type="button">${tr("Toch niet")}</button>
         </div>
       </div>
     </div>`}`;
@@ -894,7 +1012,7 @@ function renderDriverRoute(holder, planned) {
 async function closeRoute(planned, reden, button, { finish }) {
   const werk = finish ? "Afronden" : "Afbreken";
   button.disabled = true;
-  button.textContent = "Bezig…";
+  button.textContent = tr("Bezig…");
   let response = null;
   try {
     response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/${finish ? "finish" : "abort"}`, {
@@ -907,10 +1025,10 @@ async function closeRoute(planned, reden, button, { finish }) {
   }
   if (!response?.ok) {
     window.alert(response
-      ? `${await errorText(response, `${werk} is niet gelukt.`)} De rit staat nog zoals hij stond.`
-      : `${werk} is niet gelukt. Probeer het opnieuw als je bereik hebt; de rit staat nog zoals hij stond.`);
+      ? tr("{error} De rit staat nog zoals hij stond.", { error: await errorText(response, tr(`${werk} is niet gelukt.`)) })
+      : tr(`${werk} is niet gelukt. Probeer het opnieuw als je bereik hebt; de rit staat nog zoals hij stond.`));
     button.disabled = false;
-    button.textContent = finish ? "Ja, rit afronden" : "Ja, rit afbreken";
+    button.textContent = tr(finish ? "Ja, rit afronden" : "Ja, rit afbreken");
     return;
   }
   const { route } = await response.json();
@@ -921,7 +1039,12 @@ async function closeRoute(planned, reden, button, { finish }) {
   document.querySelector("#abortBox")?.removeAttribute("data-open");
   document.querySelector("#finishBox")?.removeAttribute("data-open");
   document.activeElement?.blur?.();
-  window.alert(`Rit ${route.number || "?"} is ${route.finished ? "afgerond" : "afgebroken"}. ${klaar} bezorgd${terug ? `, ${terug} ${terug === 1 ? "order gaat" : "orders gaan"} terug naar de planning` : ""}.`);
+  if (driverLang() === "nl") {
+    window.alert(`Rit ${route.number || "?"} is ${route.finished ? "afgerond" : "afgebroken"}. ${klaar} bezorgd${terug ? `, ${terug} ${terug === 1 ? "order gaat" : "orders gaan"} terug naar de planning` : ""}.`);
+  } else {
+    const hoe = route.finished ? "afgerond" : "afgebroken";
+    window.alert(tr(terug ? `Rit {number} is ${hoe}. {count} bezorgd, {back} terug naar de planning.` : `Rit {number} is ${hoe}. {count} bezorgd.`, { number: route.number || "?", count: klaar, back: terug }));
+  }
   state.driverRouteId = null;
   state.openPlan = null;
   await refreshData();
@@ -2482,7 +2605,7 @@ function singleOrderMapsUrl(order) {
 // For HTML only, so escaped here. Links use mapsAddress, which stays raw
 // because URL encoding takes care of it there.
 function addressSummary(order) {
-  return escapeHtml(mapsAddress(order) || "Adres onbekend");
+  return escapeHtml(mapsAddress(order) || tr("Adres onbekend"));
 }
 
 function mapsAddress(order) {
@@ -2499,12 +2622,12 @@ function orderNote(order, { short = false } = {}) {
   const note = String(order.customerNote || "").trim();
   if (!note) return "";
   const text = short && note.length > 120 ? `${note.slice(0, 117)}…` : note;
-  return `<span class="order-note">Opmerking: ${escapeHtml(text)}</span>`;
+  return `<span class="order-note">${tr("Opmerking:")} ${escapeHtml(text)}</span>`;
 }
 
 function productSummary(order) {
   const products = Array.isArray(order.products) ? order.products.filter(Boolean) : [];
-  return escapeHtml(products.length ? products.join(", ") : "Product onbekend");
+  return escapeHtml(products.length ? products.join(", ") : tr("Product onbekend"));
 }
 
 function businessClass(order) {
@@ -2762,13 +2885,13 @@ function formatDateTime(value) {
 async function markDelivered(order, button, planned = null) {
   if (!order) return;
   if (!ensureOperatorKey()) return;
-  if (!window.confirm(`${order.id} als bezorgd melden?`)) return;
+  if (!window.confirm(tr("{id} als bezorgd melden?", { id: order.id }))) return;
   const reset = () => {
     button.disabled = false;
-    button.textContent = "Bezorgd";
+    button.textContent = tr("Bezorgd");
   };
   button.disabled = true;
-  button.textContent = "Bezig…";
+  button.textContent = tr("Bezig…");
   let response = null;
   try {
     response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
@@ -2785,12 +2908,12 @@ async function markDelivered(order, button, planned = null) {
     response = null;
   }
   if (!response) {
-    window.alert("Bezorgd melden is niet gelukt: geen verbinding. Probeer het opnieuw als je bereik hebt; twee keer melden kan geen kwaad.");
+    window.alert(tr("Bezorgd melden is niet gelukt: geen verbinding. Probeer het opnieuw als je bereik hebt; twee keer melden kan geen kwaad."));
     reset();
     return;
   }
   if (!response.ok) {
-    window.alert(await errorText(response, "Bezorgd melden is niet gelukt. Probeer het opnieuw."));
+    window.alert(await errorText(response, tr("Bezorgd melden is niet gelukt. Probeer het opnieuw.")));
     reset();
     // Cancelled, refunded or no longer open: show the stop as it now stands.
     if ([404, 409].includes(response.status)) await refreshData();
@@ -2892,7 +3015,7 @@ function ensureOperatorKey() {
   const stored = storedOperatorKey();
   if (stored) return stored;
   if (operatorPromptDeclined) return "";
-  return askOperatorKey("Code om de planning te openen");
+  return askOperatorKey(tr("Code om de planning te openen"));
 }
 
 // Every backend call carries the operator code. On a rejected code the planner
@@ -2915,9 +3038,11 @@ async function backendFetch(url, options = {}) {
     } catch {
       // Nothing stored to forget.
     }
+    // Asked in the language of the driver this phone had, before it is forgotten.
+    const vraag = tr("Die code klopt niet. Probeer het opnieuw:");
     state.role = null;
     state.driver = undefined;
-    if (!askOperatorKey("Die code klopt niet. Probeer het opnieuw:")) return response;
+    if (!askOperatorKey(vraag)) return response;
     response = await send();
   }
   // An action (Bezorgd, a stop out) says the Worker's message itself.
@@ -2932,7 +3057,8 @@ let brakeToldAt = 0;
 async function tellBrake(response) {
   if (Date.now() - brakeToldAt < 5 * 60_000) return;
   brakeToldAt = Date.now();
-  const text = await errorText(response.clone(), "Te vaak een verkeerde code. Wacht vijf minuten en probeer het dan opnieuw.");
+  // The brake answers before anyone is known, so in Dutch: a Bulgarian phone says it itself.
+  const text = driverLang() === "nl" ? await errorText(response.clone(), "Te vaak een verkeerde code. Wacht vijf minuten en probeer het dan opnieuw.") : tr("Te vaak een verkeerde code. Wacht vijf minuten en probeer het dan opnieuw.");
   window.alert(text);
 }
 
@@ -2948,22 +3074,22 @@ async function refreshData(full = true) {
   const buttons = [document.querySelector("#refreshButton"), document.querySelector("#refreshMobile")].filter(Boolean);
   buttons.forEach((button) => {
     button.disabled = true;
-    button.textContent = "Bezig…";
+    button.textContent = tr("Bezig…");
   });
   try {
     const separator = CONFIG.dataUrl.includes("?") ? "&" : "?";
     const response = await backendFetch(`${CONFIG.dataUrl}${separator}t=${Date.now()}`, { cache: "no-store" });
-    if (response.status === 401) throw new Error("Code ontbreekt of klopt niet");
+    if (response.status === 401) throw new Error(tr("Code ontbreekt of klopt niet"));
     // In the Worker's words when it gave any: "the free plan's day is used up"
     // tells the reader more than "could not load".
-    if (!response.ok) throw new Error(await errorText(response, "Data kon niet worden geladen"));
+    if (!response.ok) throw new Error(await errorText(response, tr("Data kon niet worden geladen")));
     const loaded = await response.json();
     if (seq !== refreshSeq) return;
 
     if (full) {
       const plan = await fetchPlan();
       if (seq !== refreshSeq) return;
-      if (plan === null) throw new Error("De ritten konden niet worden geladen");
+      if (plan === null) throw new Error(tr("De ritten konden niet worden geladen"));
       state.plan = plan;
       const history = await fetchHistory([...new Set(state.plan.flatMap(planKeys))]);
       if (seq !== refreshSeq) return;
@@ -3010,13 +3136,13 @@ async function refreshData(full = true) {
     state.fetchError = "";
     const klok = new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Europe/Amsterdam" }).format(new Date());
     const bron = state.driveMinutes ? "gemeten rijtijden" : "geschatte rijtijden";
-    showSync(state.role === "driver" ? `Laatst ververst om ${klok}` : `Laatst ververst om ${klok} · ${bron}`);
+    showSync(state.role === "driver" ? tr("Laatst ververst om {time}", { time: klok }) : `Laatst ververst om ${klok} · ${bron}`);
   } catch (error) {
     if (seq !== refreshSeq) return;
     state.lastFetchOk = false;
-    const offline = error instanceof TypeError ? "Geen verbinding" : error.message;
+    const offline = error instanceof TypeError ? tr("Geen verbinding") : error.message;
     state.fetchError = error instanceof TypeError ? "" : error.message;
-    showSync(`${offline} — bestaande gegevens blijven staan`, true);
+    showSync(tr("{reason} — bestaande gegevens blijven staan", { reason: offline }), true);
     // Redrawn without new data, so screens that depend on the connection say so.
     renderDriver();
     renderOpenPlan();
@@ -3024,7 +3150,7 @@ async function refreshData(full = true) {
     if (seq === refreshSeq) {
       buttons.forEach((button) => {
         button.disabled = false;
-        button.textContent = "Ververs";
+        button.textContent = tr("Ververs");
       });
     }
   }
@@ -3046,7 +3172,7 @@ function showSync(text, fout = false) {
 // Why the screen shows the last refresh's data: in the Worker's words when it
 // gave any (the free plan's day used up is no lost signal), else no connection.
 function offlineReason() {
-  return state.fetchError ? escapeHtml(state.fetchError.replace(/\.?$/, ".")) : "Geen verbinding.";
+  return state.fetchError ? escapeHtml(state.fetchError.replace(/\.?$/, ".")) : tr("Geen verbinding.");
 }
 
 // Measured driving times, only when a Google key is set in the backend, which
@@ -3330,7 +3456,7 @@ async function acceptAddition(kandidaat, button) {
   const order = kandidaat.item.order;
   if (button) {
     button.disabled = true;
-    button.textContent = "Bezig…";
+    button.textContent = tr("Bezig…");
   }
   const open = plannedRouteStatus(planned).open;
   const keys = planKeys(planned);
@@ -3352,12 +3478,12 @@ async function acceptAddition(kandidaat, button) {
   if (!response) {
     // The request may have gone through with the answer lost on the way back:
     // look before saying anything for certain. Asking again is harmless.
-    window.alert("Geen antwoord. Misschien is de stop toch toegevoegd; het scherm wordt nu ververst. Staat hij erbij, dan is het gelukt. Nog eens Meenemen kan geen kwaad.");
+    window.alert(tr("Geen antwoord. Misschien is de stop toch toegevoegd; het scherm wordt nu ververst. Staat hij erbij, dan is het gelukt. Nog eens Meenemen kan geen kwaad."));
     await refreshData();
     return;
   }
   if (!response.ok) {
-    window.alert(`${await errorText(response, "Toevoegen is niet gelukt.")} Je rijdt de oorspronkelijke rit.`);
+    window.alert(tr("{error} Je rijdt de oorspronkelijke rit.", { error: await errorText(response, tr("Toevoegen is niet gelukt.")) }));
     renderOpenPlan();
     renderDriver();
     return;
@@ -3656,11 +3782,11 @@ function capitalize(text) {
 // stop delivered this morning is never called "not found" over a lost signal.
 function stopStatusLine(stop) {
   const id = escapeHtml(stop.id);
-  if (stop.status === "bezorgd") return `<li class="plan-stop klaar"><s>${id}</s> bezorgd${stop.at ? ` op ${formatDateTime(stop.at)}` : ""}</li>`;
-  if (stop.status === "geannuleerd") return `<li class="plan-stop fout">${id} is geannuleerd, niet afleveren</li>`;
-  if (stop.status === "terugbetaald") return `<li class="plan-stop fout">${id} is terugbetaald, niet afleveren</li>`;
-  if (stop.status === "onbevestigd") return `<li class="plan-stop">${id}: status nog niet bevestigd, ververs zo even</li>`;
-  return `<li class="plan-stop fout">${id} staat niet meer open. Bel de planner voor je gaat.</li>`;
+  if (stop.status === "bezorgd") return `<li class="plan-stop klaar">${stop.at ? tr("{id} bezorgd op {time}", { id: `<s>${id}</s>`, time: formatDateTime(stop.at) }) : tr("{id} bezorgd", { id: `<s>${id}</s>` })}</li>`;
+  if (stop.status === "geannuleerd") return `<li class="plan-stop fout">${tr("{id} is geannuleerd, niet afleveren", { id })}</li>`;
+  if (stop.status === "terugbetaald") return `<li class="plan-stop fout">${tr("{id} is terugbetaald, niet afleveren", { id })}</li>`;
+  if (stop.status === "onbevestigd") return `<li class="plan-stop">${tr("{id}: status nog niet bevestigd, ververs zo even", { id })}</li>`;
+  return `<li class="plan-stop fout">${tr("{id} staat niet meer open. Bel de planner voor je gaat.", { id })}</li>`;
 }
 
 // Navigation from wherever the van is now, through the stops that are left, in
@@ -3683,7 +3809,7 @@ function telHref(number) {
 }
 
 function logout() {
-  if (!window.confirm("Uitloggen op dit apparaat? De code wordt hier vergeten; op andere apparaten blijft alles zoals het is.")) return;
+  if (!window.confirm(tr("Uitloggen op dit apparaat? De code wordt hier vergeten; op andere apparaten blijft alles zoals het is."))) return;
   try {
     localStorage.removeItem(operatorKeyStorageKey);
     localStorage.removeItem(roleStorageKey);
@@ -3708,6 +3834,10 @@ function renderDriversPage() {
       <div><h2>${escapeHtml(driver.name)}</h2>
         <p>${ritten ? `${ritten} ${ritten === 1 ? "rit" : "ritten"} in de agenda` : "Geen ritten in de agenda"}${driver.codeSetAt ? ` · code gemaakt ${formatDateTime(driver.codeSetAt)}` : ""}</p></div>
       <div class="driver-card-actions">
+        <label class="driver-lang"><span>Taal op de telefoon</span><select class="driver-lang-select" data-driver="${escapeHtml(driver.id)}">
+          <option value="nl"${driver.lang === "bg" ? "" : " selected"}>Nederlands</option>
+          <option value="bg"${driver.lang === "bg" ? " selected" : ""}>Български (Bulgaars)</option>
+        </select></label>
         <button class="button subtle-action driver-renew" type="button" data-driver="${escapeHtml(driver.id)}">Nieuwe code</button>
         <button class="button subtle-action driver-remove" type="button" data-driver="${escapeHtml(driver.id)}">Verwijderen</button>
       </div>
@@ -3716,6 +3846,10 @@ function renderDriversPage() {
   const find = (button) => drivers.find((driver) => driver.id === button.dataset.driver);
   holder.querySelectorAll(".driver-renew").forEach((button) => button.addEventListener("click", () => renewDriverCode(find(button), button)));
   holder.querySelectorAll(".driver-remove").forEach((button) => button.addEventListener("click", () => removeDriver(find(button), button)));
+  holder.querySelectorAll(".driver-lang-select").forEach((select) => select.addEventListener("change", () => {
+    select.disabled = true;
+    driverAction("/drivers/lang", { id: select.dataset.driver, lang: select.value });
+  }));
   renderDriverCode();
 }
 
@@ -3772,7 +3906,8 @@ async function driverAction(path, body) {
   }
   const payload = await response.json();
   if (Array.isArray(payload.drivers)) state.drivers = payload.drivers;
-  state.driverCode = payload.code && payload.driver ? { name: payload.driver.name, code: payload.code } : null;
+  if (payload.code && payload.driver) state.driverCode = { name: payload.driver.name, code: payload.code };
+  else if (state.driverCode && !state.drivers.some((driver) => driver.name === state.driverCode.name)) state.driverCode = null;
   renderDriversPage();
   renderRouteInHand();
   renderAgenda();

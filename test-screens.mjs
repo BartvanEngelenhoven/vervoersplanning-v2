@@ -487,7 +487,7 @@ await test("de telefoon zegt Welkom met de naam; wie nog de oude code heeft, hoo
   worker({ "/plan": [200, { routes: [], dayNotes: [], announcements: [], heldKeys: [], driver: { id: "d-daan", name: "Daan" } }] });
   await fn.refreshData();
   assert.equal(state.driver.name, "Daan");
-  assert.deepEqual(fn.storedDriver(), { id: "d-daan", name: "Daan" });
+  assert.deepEqual(fn.storedDriver(), { id: "d-daan", name: "Daan", lang: "nl" });
   worker({ "/plan": [200, { routes: [], dayNotes: [], announcements: [], heldKeys: [], driver: null }] });
   await fn.refreshData();
   assert.equal(fn.storedDriver(), null, "de oude code heeft geen naam");
@@ -808,6 +808,61 @@ await test("Afgehandeld bij een order in de lijst: gaat als afgehandeld naar de 
   assert.equal(calls.find((call) => call.path === "/actions/mark-delivered").body.handled, true);
   assert.ok(!state.orders.some((item) => item.id === stop.id), "meteen uit de planning");
   assert.equal(fn.historySourceLabel({ source: "afgehandeld" }), "Afgehandeld, niet met de bus");
+});
+
+await test("de app van een Bulgaarse bezorger is in het Bulgaars; de planner en andere bezorgers houden Nederlands", async () => {
+  clockAt("2026-09-29T08:00:00Z", "Europe/Amsterdam");
+  const stop = order("Doorn", 52.03, 5.32, { phone: "06 1234 5678", customerNote: "Graag achterom" });
+  const rit = { id: "rit-bg", number: 5, date: "2026-09-29", name: "Doorn", orderKeys: [key(stop)], driverId: "d-joost" };
+  scene({ role: "driver", orders: [stop], plan: [rit] });
+  state.planLoaded = true;
+  state.driver = { id: "d-joost", name: "Joost", lang: "bg" };
+  fn.renderDriver();
+  let html = element("#driverView").innerHTML;
+  assert.match(html, /<h1 class="driver-welcome">Здравей, Joost<\/h1>/);
+  assert.match(html, /Това са твоите маршрути/);
+  assert.match(html, /Днес · Вторник, 29 септември/);
+  assert.match(html, /Маршрут 5/);
+  assert.match(html, /остават 1/);
+  assert.match(html, /Изход от този телефон/);
+
+  state.driverRouteId = rit.id;
+  fn.renderDriver();
+  html = element("#driverView").innerHTML;
+  for (const woord of ["‹ Всички маршрути", "Отвори маршрута в Google Maps", "Обади се на 06 1234 5678", "Бележка: Graag achterom", "мин разтоварване", ">Доставено<", "Приключи маршрута", "Прекрати маршрута", "Да, приключи маршрута", "Отказ"]) {
+    assert.ok(html.includes(woord), `ontbreekt: ${woord}`);
+  }
+  assert.equal(fn.formatMinutes(90), "1:30 ч.");
+  const gevraagd = [];
+  fn.window.confirm = (tekst) => { gevraagd.push(tekst); return false; };
+  await fn.markDelivered(stop, { disabled: false, textContent: "" }, rit);
+  assert.equal(gevraagd[0], `Да отбележа ли ${stop.id} като доставена?`);
+  fn.window.confirm = () => true;
+
+  // The same phone for a Dutch driver, and the planner: Dutch.
+  state.driver = { id: "d-sanne", name: "Sanne", lang: "nl" };
+  state.driverRouteId = null;
+  fn.renderDriver();
+  assert.match(element("#driverView").innerHTML, /Welkom Sanne/);
+  state.role = "planner";
+  assert.equal(fn.formatMinutes(90), "1:30 uur");
+  state.driver = undefined;
+});
+
+await test("Bezorgers: per bezorger een taal voor de telefoon", async () => {
+  scene({ role: "planner" });
+  state.drivers = [{ id: "d-sanne", name: "Sanne", lang: "nl" }, { id: "d-joost", name: "Joost", lang: "bg" }];
+  fn.renderDriversPage();
+  const html = element("#driverList").innerHTML;
+  assert.match(html, /<option value="bg" selected>Български \(Bulgaars\)<\/option>/);
+  const calls = worker({ "/drivers/lang": [200, { drivers: [{ id: "d-sanne", name: "Sanne", lang: "bg" }, { id: "d-joost", name: "Joost", lang: "bg" }] }] });
+  state.driverCode = { name: "Sanne", code: "abcd-efgh-jkmn" };
+  await fn.driverAction("/drivers/lang", { id: "d-sanne", lang: "bg" });
+  assert.deepEqual(calls.find((call) => call.path === "/drivers/lang").body, { id: "d-sanne", lang: "bg" });
+  assert.equal(state.drivers[0].lang, "bg");
+  assert.equal(state.driverCode?.code, "abcd-efgh-jkmn", "een code op het scherm blijft staan");
+  state.drivers = [];
+  state.driverCode = null;
 });
 
 let failed = 0;
