@@ -73,7 +73,7 @@ const REPORT_UNSURE_PREFIX = "reporting-unsure:";
 const REPORT_NOTE_TTL = 600;
 // Who reported a delivery through the planning. Only those deliveries hold a
 // fulfillment the planning made, which Terugdraaien can undo.
-const OWN_SOURCES = ["planner", "bezorger", "driver"];
+const OWN_SOURCES = ["planner", "bezorger", "driver", "afgehandeld"];
 // The free plan allows so many KV reads, writes and listings a day; past that
 // every call fails until the count resets at midnight UTC. Said plainly, so the
 // driver phones instead of trying again and again.
@@ -946,6 +946,10 @@ async function markDelivered(request, env) {
   const displayOrderId = String(payload.id || "");
   if (!shopDomain || !displayOrderId) return json({ error: "Order ontbreekt in het verzoek." }, 400, env);
   const key = `${shopDomain}:${displayOrderId}`;
+  // "Afgehandeld": done without the van (picked up after all, say). The same
+  // fulfillment without a mail, filed as such. Only the planner.
+  const handled = payload.handled === true;
+  if (handled && role !== "planner") return json({ error: "Dit mag alleen de planner." }, 403, env);
 
   // Reported twice (a double tap, or a first try whose answer was lost in a
   // dead spot): the first one stands and the second is simply told so.
@@ -989,7 +993,7 @@ async function markDelivered(request, env) {
   // While this report runs, Shopify's own webhook for the fulfillment leaves
   // the order alone (see storeShopifyOrder). Sixty seconds is KV's shortest life.
   const reportingKey = `${REPORTING_PREFIX}${key}`;
-  const source = role === "driver" ? "bezorger" : "planner";
+  const source = role === "driver" ? "bezorger" : handled ? "afgehandeld" : "planner";
   const askedAt = new Date().toISOString();
   await env.PLANNING_ORDERS.put(reportingKey, askedAt, { expirationTtl: 60 });
   const created = await createShopifyFulfillment(shopDomain, token, shopifyOrderId, false);
@@ -1046,7 +1050,7 @@ async function markDelivered(request, env) {
   await env.PLANNING_ORDERS.delete(`order:${key}`);
   if (announced) await env.PLANNING_ORDERS.delete(announcedKey);
   await appendOrderPlanningNote(shopDomain, token, shopifyOrderId, [
-    announced ? `Bezorgd gemeld via Vervoersplanning (aangekondigd op ${announced.at})` : "Bezorgd gemeld via Vervoersplanning",
+    handled ? "Afgehandeld via Vervoersplanning (niet met de bus)" : announced ? `Bezorgd gemeld via Vervoersplanning (aangekondigd op ${announced.at})` : "Bezorgd gemeld via Vervoersplanning",
     `Tijd: ${new Date().toLocaleString("nl-NL", { timeZone: "Europe/Amsterdam" })}`,
   ]);
   return json({ ok: true, id: displayOrderId, fulfillment }, 200, env);

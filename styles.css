@@ -712,3 +712,5 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
 .driver-route.afgerond { border-left-color: var(--good); }
 .driver-route.afgerond span:not(.rit-nummer) { color: #0f5a37; font-weight: 650; }
 .agenda-finished { margin: .15rem 0; padding: .4rem .55rem; border-radius: 8px; background: #e3f3ea; color: #0f5a37; font-size: .8rem; }
+.agenda-concept-warning { margin: 0; padding: .3rem .45rem; border-radius: 8px; background: #fbe4e0; color: #8c352c; font-size: .8rem; font-weight: 650; }
+.order-side .mark-handled { width: 100%; }

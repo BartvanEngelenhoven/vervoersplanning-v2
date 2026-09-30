@@ -16,6 +16,7 @@ De planning voor eigen bezorging van De Rijplaten Specialist en De Slowfeeder Sp
 Wat de site in Shopify verandert:
 
 - **Bezorgd**: zet de order op verzonden (fulfilled), **zonder** mail aan de klant, en schrijft een regel in de ordernotitie. Krijgt Bezorgd geen antwoord van Shopify, dan boekt de Worker de bezorging alsnog zodra Shopify zelf meldt dat de order verzonden is.
+- **Afgehandeld** (bij een order onder Orders, alleen de planner): hetzelfde als Bezorgd, voor een order die niet met de bus ging (toch opgehaald). In de historie staat hij als *Afgehandeld, niet met de bus*.
 - **Terugdraaien**: annuleert die verzending weer. Alleen voor verzendingen die de planning zelf maakte. De historie geeft naast de 50 nieuwste verzendingen (meestal DHL-pakketten) ook de nieuwste 200 bezorgingen van de planning zelf, zodat die niet uit beeld raken.
 - Een **pakket in een ingeplande rit** en **Toch zelf bezorgen** krijgen de tag `eigen bezorging`, zodat wie de DHL-labels print ze overslaat.
 - De **aankondiging om 16:00** staat op proef: zie hieronder.

@@ -166,12 +166,13 @@ function fakeShopify(body) {
     shop.orders.get(variables.id)?.tags.delete(variables.tags[0]);
     return { data: { tagsRemove: { userErrors: [] } } };
   }
-  if (/OrderNote/.test(query)) return { data: { order: { id: variables.id, note: shop.orders.get(variables.id)?.note || "" } } };
+  // The update is named UpdateOrderNote: asked first, or it read as the query.
   if (/orderUpdate/.test(query)) {
     const order = shop.orders.get(variables.input.id);
     if (order) order.note = variables.input.note;
     return { data: { orderUpdate: { order: { id: variables.input.id }, userErrors: [] } } };
   }
+  if (/OrderNote/.test(query)) return { data: { order: { id: variables.id, note: shop.orders.get(variables.id)?.note || "" } } };
   throw new Error(`fake Shopify: unexpected query ${query.slice(0, 80)}`);
 }
 
@@ -1618,6 +1619,24 @@ await test("rit afronden: wat bezorgd is blijft, de rest gaat terug; niet voor e
   assert.equal((await call(env, "POST", "/actions/mark-delivered", { key: sanne.code, body: { id: b.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date } })).status, 403, "een afgeronde rit is dicht");
   const opnieuw = await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(1), name: "Doorn", orderKeys: [b.key] } });
   assert.equal(opnieuw.status, 200, "wat terugging, is vrij om opnieuw in te plannen");
+});
+
+await test("afgehandeld: de planner rondt een order af zonder de bus; in Shopify verzonden zonder mail, terug te draaien; niet voor de bezorger", async () => {
+  const env = makeEnv();
+  const sanne = await addDriver(env, "Sanne");
+  const a = await seedOrder(env, DRS, "#DRS950");
+  assert.equal((await call(env, "POST", "/actions/mark-delivered", { key: sanne.code, body: { id: a.order.id, shopDomain: DRS, handled: true } })).status, 403);
+  assert.equal((await call(env, "POST", "/actions/mark-delivered", { key: DRIVER, body: { id: a.order.id, shopDomain: DRS, handled: true } })).status, 403);
+  const af = await call(env, "POST", "/actions/mark-delivered", { key: PLANNER, body: { id: a.order.id, shopDomain: DRS, handled: true } });
+  assert.equal(af.status, 200, JSON.stringify(af.data));
+  assert.equal((await env.PLANNING_ORDERS.get(`delivered:${a.key}`, "json")).source, "afgehandeld");
+  assert.equal(await env.PLANNING_ORDERS.get(`order:${a.key}`), null, "uit de planning");
+  assert.equal(shop.orders.get(a.order.shopifyOrderId).fulfilled, true);
+  assert.equal(shop.mails.length, 0, "geen mail aan de klant");
+  assert.match(shop.orders.get(a.order.shopifyOrderId).note, /Afgehandeld via Vervoersplanning \(niet met de bus\)/);
+  const terug = await call(env, "POST", "/actions/undo-delivered", { key: PLANNER, body: { id: a.order.id, shopDomain: DRS } });
+  assert.equal(terug.status, 200, JSON.stringify(terug.data));
+  assert.equal(shop.orders.get(a.order.shopifyOrderId).fulfilled, false, "terugdraaien kan");
 });
 
 globalThis.fetch = realFetch;

@@ -1356,6 +1356,9 @@ function renderAgenda() {
     const concept = noteConcepts.find((entry) => entry.id === button.dataset.concept);
     button.addEventListener("click", () => concept && putRouteInHand(concept.route, null, concept.date));
   });
+  holder.querySelectorAll(".reject-note-concept").forEach((button) => {
+    button.addEventListener("click", () => rejectNoteConcept(noteConcepts.find((entry) => entry.id === button.dataset.concept), button));
+  });
 
   holder.querySelectorAll(".place-here").forEach((button) => {
     button.addEventListener("click", () => placeRouteOnDay(button.dataset.day));
@@ -1386,10 +1389,32 @@ function noteConceptCard(concept) {
     <b><span class="concept-tag">Concept</span> ${escapeHtml(concept.name)}</b>
     <span>${aantal} ${aantal === 1 ? "stop" : "stops"} · ongeveer ${formatMinutes(concept.route.totalMinutes)} · de dag uit de opmerking</span>
     <ul class="agenda-concept-stops">${concept.orders.map((order) => `<li>${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}${order.paid ? "" : " <em>nog niet betaald</em>"}</li>`).join("")}</ul>
+    ${noteConceptWarning(concept) ? `<p class="agenda-concept-warning">${escapeHtml(noteConceptWarning(concept))}</p>` : ""}
     ${concept.fits.map((fit) => `<p class="agenda-concept-fit">${escapeHtml(fit.order.id)} past bij rit ${escapeHtml(fit.planned.number || "?")} (+${formatMinutes(fit.extra)}): open die rit en kies Meenemen.</p>`).join("")}
     <p class="agenda-concept-hint">Nog geen ritnummer; de bezorger ziet dit niet.</p>
-    <div class="agenda-route-actions"><button class="button primary plan-note-concept" type="button" data-concept="${escapeHtml(concept.id)}">Inplannen</button></div>
+    <div class="agenda-route-actions"><button class="button primary plan-note-concept" type="button" data-concept="${escapeHtml(concept.id)}">Inplannen</button>
+      <button class="button subtle-action reject-note-concept" type="button" data-concept="${escapeHtml(concept.id)}">Afwijzen</button></div>
   </div>`;
+}
+
+// A day too long for one van, a load too heavy or an address it cannot place:
+// said on the concept, since the note put it there and not the budgets.
+function noteConceptWarning(concept) {
+  const route = concept.route;
+  const teZwaar = route.loadKnown && route.load > CONFIG.vehicleCapacityKg;
+  return route.unknownPoint || route.overByMinutes || teZwaar ? routeWarning(route) : "";
+}
+
+// Not for the van after all: the orders of a concept from the notes go with FVR
+// (rijplaten) or DHL (slowfeeders), as the minus on a proposal sends them, and
+// leave the agenda. Under Orders, Terug naar de planning brings them back.
+async function rejectNoteConcept(concept, button) {
+  if (!concept) return;
+  const aantal = concept.orders.length;
+  const vervoerders = [...new Set(concept.orders.map(carrierOf))].join(" of ");
+  if (!window.confirm(`${concept.orders.map((order) => order.id).join(", ")} ${aantal === 1 ? "gaat" : "gaan"} dan met ${vervoerders} in plaats van met de bus, en ${aantal === 1 ? "komt" : "komen"} niet meer in de agenda of een voorstel. Terugzetten kan onder Orders met Terug naar de planning.`)) return;
+  if (button) button.disabled = true;
+  for (const order of concept.orders) await setExternal(order, true);
 }
 
 // On the Concepten page: the concepts made from notes, below the saved ones.
@@ -1401,7 +1426,9 @@ function noteConceptsSection(concepten) {
       <div class="concept-head"><div><h2>${escapeHtml(concept.name)}</h2>
         <p>${concept.orders.length} ${concept.orders.length === 1 ? "stop" : "stops"} · ongeveer ${formatMinutes(concept.route.totalMinutes)} · volgens de opmerking op ${escapeHtml(shortDay(concept.date))}</p></div></div>
       <ol class="concept-stops">${concept.orders.map((order) => `<li><b>${escapeHtml(order.city || "Plaats onbekend")} · ${escapeHtml(order.id)}</b><span>${productSummary(order)}</span>${orderNote(order, { short: true })}</li>`).join("")}</ol>
-      <div class="concept-actions"><button class="button manual-action note-concept-plan" type="button" data-concept="${escapeHtml(concept.id)}">Inplannen</button></div>
+      ${noteConceptWarning(concept) ? `<p class="concept-gone">${escapeHtml(noteConceptWarning(concept))}</p>` : ""}
+      <div class="concept-actions"><button class="button manual-action note-concept-plan" type="button" data-concept="${escapeHtml(concept.id)}">Inplannen</button>
+        <button class="button subtle-action note-concept-reject" type="button" data-concept="${escapeHtml(concept.id)}">Afwijzen</button></div>
     </article>`).join("")}`;
 }
 
@@ -1812,6 +1839,10 @@ function renderOrders() {
     const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
     button.addEventListener("click", () => clearForceInclude(order));
   });
+  document.querySelectorAll(".mark-handled").forEach((button) => {
+    const order = state.allOrders.find((item) => orderKey(item) === button.dataset.orderKey);
+    button.addEventListener("click", () => markHandled(order, button));
+  });
   document.querySelector("#emptyState").hidden = visible.length > 0;
 }
 
@@ -1866,6 +1897,7 @@ function orderCard(item) {
       <span><b>Betaling</b>${escapeHtml(order.paymentStatus || (order.paid ? "Betaald" : "In afwachting"))}</span>
       <a class="button ghost" href="${singleOrderMapsUrl(order)}" target="_blank" rel="noreferrer">Maps</a>
       ${manualActionButton(item, key, isForced)}
+      ${order.cancelled || order.fulfilled || order.refunded ? "" : `<button class="button subtle-action mark-handled" type="button" data-order-key="${key}">Afgehandeld</button>`}
     </div>
   </article>`;
 }
@@ -2412,6 +2444,7 @@ function renderHistory() {
 
 function historySourceLabel(item) {
   if (item.source === "shopify") return "In Shopify verzonden";
+  if (item.source === "afgehandeld") return "Afgehandeld, niet met de bus";
   if (item.source === "bezorger") return `Bezorgd gemeld door ${item.by ? escapeHtml(item.by) : "de bezorger"}`;
   return "Bezorgd gemeld";
 }
@@ -2766,6 +2799,29 @@ async function markDelivered(order, button, planned = null) {
   // Delivered: an abort form or note left open must not keep the screen on
   // "Bezig…" with the stop still listed.
   closeEditors();
+  bookedHere([order]);
+  await refreshData();
+}
+
+// Done without the van: picked up after all, or settled otherwise. In Shopify
+// it goes to fulfilled like Bezorgd, without a mail, and it leaves the planning;
+// under Bezorgd it can be undone.
+async function markHandled(order, button) {
+  if (!order || !ensureOperatorKey()) return;
+  if (!window.confirm(`${order.id} afhandelen? Bijvoorbeeld omdat de klant hem toch zelf heeft opgehaald. De order gaat uit de planning en staat in Shopify op verzonden, zonder mail aan de klant. Terugdraaien kan onder Bezorgd.`)) return;
+  button.disabled = true;
+  button.textContent = "Bezig…";
+  const response = await backendFetch(`${CONFIG.apiBaseUrl}/actions/mark-delivered`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: order.id, shopDomain: order.shopDomain, shopifyOrderId: order.shopifyOrderId, handled: true }),
+  }).catch(() => null);
+  if (!response?.ok) {
+    window.alert(response ? await errorText(response, "Afhandelen is niet gelukt. Probeer het opnieuw.") : "Geen verbinding. Probeer het opnieuw.");
+    button.disabled = false;
+    button.textContent = "Afgehandeld";
+    return;
+  }
   bookedHere([order]);
   await refreshData();
 }
@@ -4102,6 +4158,9 @@ function renderConcepts() {
   holder.querySelectorAll(".note-concept-plan").forEach((button) => button.addEventListener("click", () => {
     const concept = uitOpmerking.find((entry) => entry.id === button.dataset.concept);
     if (concept) putRouteInHand(concept.route, null, concept.date);
+  }));
+  holder.querySelectorAll(".note-concept-reject").forEach((button) => button.addEventListener("click", () => {
+    rejectNoteConcept(uitOpmerking.find((entry) => entry.id === button.dataset.concept), button);
   }));
   const find = (button) => state.concepts.find((concept) => concept.id === button.dataset.concept);
   holder.querySelectorAll(".concept-open").forEach((button) => button.addEventListener("click", () => openConcept(find(button))));
