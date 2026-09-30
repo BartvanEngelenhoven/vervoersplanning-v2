@@ -7,3 +7,4 @@ wrangler.toml
 node_modules/
 .wrangler/
 .site/
+!chat/wrangler.toml

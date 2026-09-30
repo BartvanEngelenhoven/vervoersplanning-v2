@@ -1,0 +1,18 @@
+name = "specialisten-chat"
+main = "chat-worker.js"
+compatibility_date = "2026-09-23"
+preview_urls = false
+
+# The chat window the shops load with one <script> line.
+[[rules]]
+type = "Text"
+globs = ["**/*.txt"]
+fallthrough = false
+
+[vars]
+# The OpenAI model that writes the answers. gpt-5.4-mini: $0.75 per million
+# tokens in (a tenth of that for the product list it has seen before), $4.50 out.
+OPENAI_MODEL = "gpt-5.4-mini"
+
+# Set the key with (it is never written in a file):
+# npx wrangler secret put OPENAI_API_KEY --config chat/wrangler.toml

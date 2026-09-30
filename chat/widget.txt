@@ -1,0 +1,135 @@
+// The chat window on the shop (served by chat-worker.js as /widget.js). A shop loads it with one line:
+//   <script src="https://specialisten-chat.<account>.workers.dev/widget.js" data-winkel="slowfeeder" defer></script>
+// data-winkel is "slowfeeder" or "rijplaten"; data-positie="links" puts the
+// button bottom-left (for when another button already sits bottom-right).
+(function () {
+  var script = document.currentScript;
+  if (!script || window.__specialistenChat) return;
+  window.__specialistenChat = true;
+
+  var SHOPS = {
+    slowfeeder: { name: "Slowfeeder Specialist", color: "#2f6b3a", hello: "Hoi! Waar kan ik je mee helpen? Vraag gerust welke slowfeeder of hooiruif het best bij jouw paard of pony past." },
+    rijplaten: { name: "De Rijplaten Specialist", color: "#1f4e79", hello: "Hallo! Waar kan ik u mee helpen? Vraag gerust welke rijplaten het best passen bij uw klus of ondergrond." },
+  };
+  var key = SHOPS[script.getAttribute("data-winkel")] ? script.getAttribute("data-winkel") : "slowfeeder";
+  var shop = SHOPS[key];
+  var endpoint = new URL("/chat", script.src).href;
+  var left = script.getAttribute("data-positie") === "links";
+  var storeKey = "specialisten-chat-" + key;
+
+  var messages = [];
+  try { messages = JSON.parse(sessionStorage.getItem(storeKey) || "[]") || []; } catch (e) { messages = []; }
+  function save() { try { sessionStorage.setItem(storeKey, JSON.stringify(messages.slice(-20))); } catch (e) {} }
+
+  var host = document.createElement("div");
+  host.id = "specialisten-chat";
+  var root = host.attachShadow ? host.attachShadow({ mode: "open" }) : host;
+  var side = left ? "left" : "right";
+  root.innerHTML =
+    "<style>" +
+    ":host{all:initial}" +
+    "*{box-sizing:border-box;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}" +
+    ".knop{position:fixed;bottom:20px;" + side + ":20px;z-index:2147483000;width:60px;height:60px;border-radius:50%;border:0;background:" + shop.color + ";color:#fff;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center}" +
+    ".knop svg{width:28px;height:28px}" +
+    ".paneel{position:fixed;bottom:90px;" + side + ":20px;z-index:2147483001;width:370px;height:560px;max-height:calc(100vh - 110px);background:#fff;border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);display:none;flex-direction:column;overflow:hidden}" +
+    ".paneel.open{display:flex}" +
+    ".kop{background:" + shop.color + ";color:#fff;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:8px}" +
+    ".kop b{font-size:15px}.kop small{display:block;font-size:12px;opacity:.85;margin-top:2px}" +
+    ".sluit{background:none;border:0;color:#fff;font-size:26px;line-height:1;cursor:pointer;padding:4px 8px}" +
+    ".lijst{flex:1;overflow-y:auto;padding:14px;background:#f6f6f3;display:flex;flex-direction:column;gap:10px}" +
+    ".bericht{max-width:85%;padding:10px 12px;border-radius:12px;font-size:14px;line-height:1.45;color:#222;white-space:normal;word-wrap:break-word}" +
+    ".bericht.bot{background:#fff;border:1px solid #e3e3de;align-self:flex-start;border-bottom-left-radius:4px}" +
+    ".bericht.klant{background:" + shop.color + ";color:#fff;align-self:flex-end;border-bottom-right-radius:4px}" +
+    ".bericht a{color:" + shop.color + ";font-weight:600}.bericht.klant a{color:#fff}" +
+    ".typt{color:#777;font-style:italic}" +
+    "form{display:flex;gap:8px;padding:10px;border-top:1px solid #e3e3de;background:#fff}" +
+    "textarea{flex:1;resize:none;border:1px solid #ccc;border-radius:10px;padding:10px;font-size:16px;height:44px;max-height:120px;color:#222;background:#fff}" +
+    "textarea:focus{outline:2px solid " + shop.color + ";border-color:transparent}" +
+    ".stuur{border:0;border-radius:10px;background:" + shop.color + ";color:#fff;padding:0 14px;font-size:14px;font-weight:600;cursor:pointer}" +
+    ".stuur:disabled{opacity:.5;cursor:default}" +
+    ".voet{font-size:11px;color:#888;text-align:center;padding:0 10px 8px;background:#fff}" +
+    "@media (max-width:500px){.paneel{inset:0;width:auto;height:auto;max-height:none;border-radius:0}.paneel.open~.knop{display:none}}" +
+    "</style>" +
+    "<div class='paneel' role='dialog' aria-label='Chat met " + shop.name + "'>" +
+    "<div class='kop'><div><b>" + shop.name + "</b><small>Digitale assistent</small></div><button class='sluit' aria-label='Sluiten'>×</button></div>" +
+    "<div class='lijst' aria-live='polite'></div>" +
+    "<form><textarea rows='1' placeholder='Typ je vraag…' aria-label='Je vraag' maxlength='1000'></textarea><button class='stuur' type='submit'>Stuur</button></form>" +
+    "<div class='voet'>Automatische assistent: controleer belangrijke details even in de winkel.</div>" +
+    "</div>" +
+    "<button class='knop' aria-label='Chat openen'><svg viewBox='0 0 24 24' fill='currentColor'><path d='M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 4v-4H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z'/></svg></button>";
+
+  var panel = root.querySelector(".paneel");
+  var list = root.querySelector(".lijst");
+  var form = root.querySelector("form");
+  var input = root.querySelector("textarea");
+  var send = root.querySelector(".stuur");
+  var busy = false;
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; });
+  }
+  // Just enough markdown for the answers: [text](link), bare links, **bold**, lines.
+  function format(text) {
+    var out = escapeHtml(text);
+    var links = [];
+    out = out.replace(/\[([^\]]+)\]\((https:\/\/[^)\s]+)\)/g, function (_, label, url) {
+      links.push("<a href='" + url + "' target='_top'>" + label + "</a>");
+      return "\u0000" + (links.length - 1) + "\u0000";
+    });
+    out = out.replace(/https:\/\/[^\s<]+[^\s<.,;:!?)]/g, function (url) { return "<a href='" + url + "' target='_top'>" + url + "</a>"; });
+    out = out.replace(/\u0000(\d+)\u0000/g, function (_, i) { return links[Number(i)]; });
+    out = out.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+    return out.replace(/\n/g, "<br>");
+  }
+  function add(role, text, extraClass) {
+    var el = document.createElement("div");
+    el.className = "bericht " + (role === "user" ? "klant" : "bot") + (extraClass ? " " + extraClass : "");
+    el.innerHTML = role === "user" ? escapeHtml(text).replace(/\n/g, "<br>") : format(text);
+    list.appendChild(el);
+    list.scrollTop = list.scrollHeight;
+    return el;
+  }
+  function render() {
+    list.innerHTML = "";
+    add("assistant", shop.hello);
+    messages.forEach(function (m) { add(m.role, m.content); });
+  }
+
+  function open(yes) {
+    panel.classList.toggle("open", yes);
+    if (yes) { render(); setTimeout(function () { input.focus(); }, 50); }
+  }
+  root.querySelector(".knop").addEventListener("click", function () { open(!panel.classList.contains("open")); });
+  root.querySelector(".sluit").addEventListener("click", function () { open(false); });
+
+  input.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit")); }
+  });
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var text = input.value.trim();
+    if (!text || busy) return;
+    busy = true; send.disabled = true; input.value = "";
+    messages.push({ role: "user", content: text });
+    save();
+    add("user", text);
+    var waiting = add("assistant", "Even denken…", "typt");
+    fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ shop: key, messages: messages }) })
+      .then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function (data) {
+        var reply = data.reply || "Er ging even iets mis. Probeer het zo nog eens.";
+        messages.push({ role: "assistant", content: reply });
+        save();
+        waiting.remove();
+        add("assistant", reply);
+      })
+      .catch(function () {
+        messages.pop(); save();
+        waiting.remove();
+        add("assistant", "Geen verbinding. Probeer het zo nog eens.");
+      })
+      .then(function () { busy = false; send.disabled = false; input.focus(); });
+  });
+
+  (document.body || document.documentElement).appendChild(host);
+})();
