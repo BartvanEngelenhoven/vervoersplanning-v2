@@ -371,7 +371,11 @@ async function route(request, env) {
   }
 
   if (request.method === "POST" && url.pathname === "/plan/abort") {
-    return abortPlanRoute(request, env);
+    return closePlanRoute(request, env, { finish: false });
+  }
+
+  if (request.method === "POST" && url.pathname === "/plan/finish") {
+    return closePlanRoute(request, env, { finish: true });
   }
 
   if (request.method === "POST" && url.pathname === "/plan/note") {
@@ -2182,12 +2186,15 @@ async function removePlanStop(request, env) {
   return json({ route: await writePlanRecord(env, record) }, 200, env);
 }
 
-// Breaking a route off halfway. Which stops were delivered is decided here from
-// the delivered records, not from whatever the driver's phone last loaded: the
-// phone may have been offline for the last three drops. Delivered stops stay on
-// the route as its record; the rest are released so the planning offers them
-// again, and are kept apart so the planner can see what came back and why.
-async function abortPlanRoute(request, env) {
+// Breaking a route off halfway, or finishing it ("Rit afronden") at the end of
+// the day. Which stops were delivered is decided here from the delivered
+// records, not from whatever the driver's phone last loaded: the phone may have
+// been offline for the last three drops. Delivered stops stay on the route as
+// its record; the rest are released so the planning offers them again, and are
+// kept apart so the planner can see what came back and why. Both close the route
+// the same way (abortedAt); a finished one says so (finished), and can only be
+// finished on its day or after.
+async function closePlanRoute(request, env, { finish }) {
   const role = roleFor(request, env);
   if (!role) return unauthorized(env);
   const payload = await request.json().catch(() => ({}));
@@ -2199,6 +2206,7 @@ async function abortPlanRoute(request, env) {
     const window = driverWindow();
     if (record.date < window.from || record.date > window.to) return json({ error: "Deze rit valt buiten jouw week." }, 403, env);
   }
+  if (finish && record.date > amsterdamNow().day) return json({ error: "Een rit van een latere dag kun je nog niet afronden." }, 409, env);
 
   const keys = record.orderKeys || [];
   const delivered = await Promise.all(keys.map(async (key) =>
@@ -2210,6 +2218,7 @@ async function abortPlanRoute(request, env) {
   record.abortedAt = new Date().toISOString();
   record.abortedBy = role === "driver" ? callerDriver(env)?.name || "bezorger" : "planner";
   record.abortReason = String(payload.reason || "").slice(0, 300);
+  if (finish) record.finished = true;
   return json({ route: await writePlanRecord(env, record) }, 200, env);
 }
 

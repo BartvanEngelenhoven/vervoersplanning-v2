@@ -697,3 +697,18 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
 .concept-section { margin: 1.4rem 0 .2rem; font-size: 1.1rem; }
 .concept-section-sub { margin: 0 0 .6rem; color: var(--muted); font-size: .9rem; }
 .concept-card.uit-opmerking { border-left-style: dashed; }
+
+/* --- Rit afronden --------------------------------------------------------
+   The end of a route: what was delivered stays, the rest goes back. */
+.finish-box { margin: 1.4rem 0 0; padding-top: 1rem; border-top: 1px solid var(--line); }
+.finish-box > .button { width: 100%; min-height: 52px; font-size: 1.05rem; }
+.finish-form { display: grid; gap: .6rem; }
+.finish-form[hidden] { display: none; }
+.finish-form p { margin: 0; }
+.finish-form label { display: grid; gap: .3rem; font-weight: 650; }
+.finish-form textarea { width: 100%; padding: .6rem; border: 1px solid var(--line); border-radius: 10px; font: inherit; }
+.finish-box + .abort-box { margin-top: .8rem; border-top: 0; padding-top: 0; }
+.note-box.afgerond { border-color: #9fd0b4; background: #e3f3ea; }
+.driver-route.afgerond { border-left-color: var(--good); }
+.driver-route.afgerond span:not(.rit-nummer) { color: #0f5a37; font-weight: 650; }
+.agenda-finished { margin: .15rem 0; padding: .4rem .55rem; border-radius: 8px; background: #e3f3ea; color: #0f5a37; font-size: .8rem; }

@@ -739,6 +739,45 @@ await test("een concept uit de opmerking op een voorbije dag blijft in de agenda
   state.concepts = [];
 });
 
+await test("Rit afronden: onder een rit van vandaag, noemt wat nog open staat, en daarna staat de rit als afgerond", async () => {
+  clockAt("2026-09-29T12:00:00Z", "Europe/Amsterdam");
+  const klaar = order("Doorn", 52.03, 5.32);
+  const open = order("Leersum", 52.01, 5.43);
+  const vandaag = { id: "rit-af", number: 7, date: "2026-09-29", name: "Doorn en Leersum", orderKeys: [key(klaar), key(open)], driverId: "d-sanne" };
+  const morgen = { id: "rit-morgen", number: 8, date: "2026-09-30", name: "Zeist", orderKeys: [key(order("Zeist", 52.09, 5.23))], driverId: "d-sanne" };
+  scene({ role: "driver", orders: [open], plan: [vandaag, morgen], delivered: [[key(klaar), "2026-09-29T10:00:00Z"]] });
+  state.planLoaded = true;
+  state.driverRouteId = vandaag.id;
+  fn.renderDriver();
+  let html = element("#driverView").innerHTML;
+  assert.match(html, /id="finishOpen" class="button primary" type="button">Rit afronden</);
+  assert.match(html, new RegExp(`Nog niet als bezorgd gemeld: <b>${open.id} Leersum</b>`));
+  assert.ok(html.indexOf("finishBox") < html.indexOf("abortBox"), "afronden boven afbreken");
+  state.driverRouteId = morgen.id;
+  fn.renderDriver();
+  assert.doesNotMatch(element("#driverView").innerHTML, /Rit afronden/, "een rit van morgen rond je nog niet af");
+
+  const calls = worker({ "/plan/finish": [200, { route: { ...vandaag, finished: true, abortedAt: "2026-09-29T14:00:00Z", abortedBy: "Sanne", orderKeys: [key(klaar)], droppedKeys: [key(open)] } }] });
+  const meldingen = [];
+  fn.window.alert = (tekst) => meldingen.push(tekst);
+  await fn.closeRoute(vandaag, "niet thuis", { disabled: false, textContent: "" }, { finish: true });
+  assert.deepEqual(calls.find((call) => call.path === "/plan/finish").body, { id: "rit-af", date: "2026-09-29", reason: "niet thuis" });
+  assert.match(meldingen[0], /Rit 7 is afgerond\. 1 bezorgd, 1 order gaat terug naar de planning\./);
+
+  // Finished: the list says so, and so does the agenda.
+  const afgerond = { ...vandaag, finished: true, abortedAt: "2026-09-29T14:00:00Z", abortedBy: "Sanne", abortReason: "niet thuis", orderKeys: [key(klaar)], droppedKeys: [key(open)] };
+  scene({ role: "driver", orders: [], plan: [afgerond], delivered: [[key(klaar), "2026-09-29T10:00:00Z"]] });
+  state.planLoaded = true;
+  fn.renderDriver();
+  html = element("#driverView").innerHTML;
+  assert.match(html, /driver-route afgerond/);
+  assert.match(html, /Afgerond · 1 bezorgd/);
+  scene({ role: "planner", orders: [], plan: [afgerond], delivered: [[key(klaar), "2026-09-29T10:00:00Z"]] });
+  state.routeInHand = null;
+  fn.renderAgenda();
+  assert.match(element("#agendaDays").innerHTML, /<p class="agenda-finished">Afgerond door Sanne om .*1 niet bezorgd, terug naar de planning: #S\d+ \(niet thuis\)\.<\/p>/);
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);

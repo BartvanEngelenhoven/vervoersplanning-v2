@@ -1591,6 +1591,35 @@ await test("opmerking met een dag: ook een oude order krijgt hem, de bezorger kr
   assert.equal((await call(env, "POST", "/plan/add-stop", { key: PLANNER, body: { id: route.id, date: route.date, orderKey: later.key } })).status, 200);
 });
 
+await test("rit afronden: wat bezorgd is blijft, de rest gaat terug; niet voor een rit van later of van een ander", async () => {
+  const env = makeEnv();
+  const sanne = await addDriver(env, "Sanne");
+  const joost = await addDriver(env, "Joost");
+  const a = await seedOrder(env, DRS, "#DRS940");
+  const b = await seedOrder(env, DRS, "#DRS941");
+  const c = await seedOrder(env, DRS, "#DRS942");
+  const route = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), name: "Doorn", orderKeys: [a.key, b.key], driverId: sanne.id } })).data.route;
+  const morgen = (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(1), name: "Zeist", orderKeys: [c.key], driverId: sanne.id } })).data.route;
+  assert.equal((await call(env, "POST", "/actions/mark-delivered", { key: sanne.code, body: { id: a.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date } })).status, 200);
+
+  const vanAnder = await call(env, "POST", "/plan/finish", { key: joost.code, body: { id: route.id, date: route.date } });
+  assert.equal(vanAnder.status, 403, "niet de rit van een ander");
+  const later = await call(env, "POST", "/plan/finish", { key: sanne.code, body: { id: morgen.id, date: morgen.date } });
+  assert.equal(later.status, 409, "een rit van morgen kan nog niet af");
+
+  const af = await call(env, "POST", "/plan/finish", { key: sanne.code, body: { id: route.id, date: route.date, reason: "niet thuis" } });
+  assert.equal(af.status, 200, JSON.stringify(af.data));
+  assert.equal(af.data.route.finished, true);
+  assert.deepEqual(af.data.route.orderKeys, [a.key], "wat bezorgd is, blijft bij de rit");
+  assert.deepEqual(af.data.route.droppedKeys, [b.key], "de rest gaat terug naar de planning");
+  assert.equal(af.data.route.abortedBy, "Sanne");
+  assert.equal(af.data.route.abortReason, "niet thuis");
+  assert.equal((await call(env, "POST", "/plan/finish", { key: sanne.code, body: { id: route.id, date: route.date } })).data.route.finished, true, "twee keer tikken kan geen kwaad");
+  assert.equal((await call(env, "POST", "/actions/mark-delivered", { key: sanne.code, body: { id: b.order.id, shopDomain: DRS, routeId: route.id, routeDate: route.date } })).status, 403, "een afgeronde rit is dicht");
+  const opnieuw = await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(1), name: "Doorn", orderKeys: [b.key] } });
+  assert.equal(opnieuw.status, 200, "wat terugging, is vrij om opnieuw in te plannen");
+});
+
 globalThis.fetch = realFetch;
 let failed = 0;
 for (const [status, name, error] of results) {

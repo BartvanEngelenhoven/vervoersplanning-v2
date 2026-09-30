@@ -722,10 +722,10 @@ function renderDriverList(holder) {
         ${ritten.filter((planned) => planned.date === dag).map((planned) => {
           const status = plannedRouteStatus(planned);
           const klaar = status.stops.filter((stop) => stop.status === "bezorgd").length;
-          return `<button class="driver-route${planned.abortedAt ? " afgebroken" : ""}" type="button" data-planned="${escapeHtml(planned.id)}">
+          return `<button class="driver-route${planned.abortedAt ? (planned.finished ? " afgerond" : " afgebroken") : ""}" type="button" data-planned="${escapeHtml(planned.id)}">
             <span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span>
             <b>${escapeHtml(planned.name)}</b>
-            <span>${planned.abortedAt ? "Afgebroken" : `${status.open.length} te gaan${klaar ? ` · ${klaar} bezorgd` : ""}`}</span>
+            <span>${planned.abortedAt ? (planned.finished ? `Afgerond · ${klaar} bezorgd` : "Afgebroken") : `${status.open.length} te gaan${klaar ? ` · ${klaar} bezorgd` : ""}`}</span>
             ${planned.note ? `<em>${escapeHtml(planned.note)}</em>` : ""}
           </button>`;
         }).join("")}
@@ -770,7 +770,9 @@ function renderDriverRoute(holder, planned) {
     ${planned.note ? `<p class="note-box"><b>Van de planner:</b> ${escapeHtml(planned.note)}</p>` : ""}
     ${dagnotitie ? `<p class="note-box"><b>Deze dag:</b> ${escapeHtml(dagnotitie)}</p>` : ""}
     ${state.lastFetchOk ? "" : `<p class="plan-offline">${offlineReason()} Je ziet de rit zoals hij bij het laatste verversen was.</p>`}
-    ${planned.abortedAt ? `<p class="note-box afgebroken">Deze rit is afgebroken${planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : ""}.</p>` : ""}
+    ${planned.abortedAt ? (planned.finished
+      ? `<p class="note-box afgerond">Deze rit is afgerond.</p>`
+      : `<p class="note-box afgebroken">Deze rit is afgebroken${planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : ""}.</p>`) : ""}
     ${volgorde.length ? `<a class="button primary driver-maps" href="${driverMapsUrl(volgorde)}" target="_blank" rel="noreferrer">Rit openen in Google Maps</a>` : ""}
 
     <ol class="driver-stops">
@@ -797,6 +799,20 @@ function renderDriverRoute(holder, planned) {
         <span>+${formatMinutes(kandidaat.extra)}, rit wordt dan ${formatMinutes(kandidaat.totaal)}</span></div>
         <button class="button primary accept-addition" type="button" data-key="${orderKey(o)}">Meenemen</button></div>`;
     }).join("")}</div>` : ""}
+
+    ${planned.abortedAt || !rijdtNu ? "" : `<div class="inline-editor finish-box" id="finishBox">
+      <button id="finishOpen" class="button primary" type="button">Rit afronden</button>
+      <div class="finish-form" hidden>
+        ${volgorde.length
+          ? `<p>Nog niet als bezorgd gemeld: <b>${volgorde.map((order) => escapeHtml(`${order.id} ${order.city || ""}`.trim())).join(", ")}</b>. Heb je die wel afgeleverd? Tik dan eerst hierboven op Bezorgd. Wat niet bezorgd is, gaat terug naar de planning.</p>
+          <label>Waarom niet bezorgd? (mag leeg)<textarea id="finishReason" rows="2" maxlength="300" placeholder="Bijvoorbeeld: klant niet thuis"></textarea></label>`
+          : "<p>Alle stops zijn als bezorgd gemeld.</p>"}
+        <div class="abort-actions">
+          <button id="finishConfirm" class="button primary" type="button">Ja, rit afronden</button>
+          <button id="finishCancel" class="button subtle-action" type="button">Toch niet</button>
+        </div>
+      </div>
+    </div>`}
 
     ${planned.abortedAt ? "" : `<div class="inline-editor abort-box" id="abortBox">
       <button id="abortOpen" class="button danger" type="button">Rit afbreken</button>
@@ -829,6 +845,27 @@ function renderDriverRoute(holder, planned) {
     button.addEventListener("click", () => acceptAddition(kandidaat, button));
   });
 
+  const finish = holder.querySelector("#finishBox");
+  if (finish) {
+    const form = finish.querySelector(".finish-form");
+    finish.querySelector("#finishOpen").addEventListener("click", () => {
+      form.hidden = false;
+      finish.dataset.open = "1";
+      finish.querySelector("#finishOpen").hidden = true;
+      finish.querySelector("#finishConfirm").focus();
+    });
+    finish.querySelector("#finishCancel").addEventListener("click", () => {
+      form.hidden = true;
+      delete finish.dataset.open;
+      finish.querySelector("#finishOpen").hidden = false;
+      document.activeElement?.blur?.();
+      renderDriver();
+    });
+    finish.querySelector("#finishConfirm").addEventListener("click", (event) => {
+      closeRoute(planned, finish.querySelector("#finishReason")?.value || "", event.currentTarget, { finish: true });
+    });
+  }
+
   const box = holder.querySelector("#abortBox");
   if (box) {
     const form = box.querySelector(".abort-form");
@@ -847,17 +884,20 @@ function renderDriverRoute(holder, planned) {
       renderDriver();
     });
     box.querySelector("#abortConfirm").addEventListener("click", (event) => {
-      abortRoute(planned, box.querySelector("#abortReason").value, event.currentTarget);
+      closeRoute(planned, box.querySelector("#abortReason").value, event.currentTarget, { finish: false });
     });
   }
 }
 
-async function abortRoute(planned, reden, button) {
+// Finishing a route ("Rit afronden") or breaking it off: either way what was
+// delivered stays delivered and the rest goes back to the planning.
+async function closeRoute(planned, reden, button, { finish }) {
+  const werk = finish ? "Afronden" : "Afbreken";
   button.disabled = true;
   button.textContent = "Bezig…";
   let response = null;
   try {
-    response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/abort`, {
+    response = await backendFetch(`${CONFIG.apiBaseUrl}/plan/${finish ? "finish" : "abort"}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: planned.id, date: planned.date, reason: reden }),
@@ -867,10 +907,10 @@ async function abortRoute(planned, reden, button) {
   }
   if (!response?.ok) {
     window.alert(response
-      ? `${await errorText(response, "Afbreken is niet gelukt.")} De rit staat nog zoals hij stond.`
-      : "Afbreken is niet gelukt. Probeer het opnieuw als je bereik hebt; de rit staat nog zoals hij stond.");
+      ? `${await errorText(response, `${werk} is niet gelukt.`)} De rit staat nog zoals hij stond.`
+      : `${werk} is niet gelukt. Probeer het opnieuw als je bereik hebt; de rit staat nog zoals hij stond.`);
     button.disabled = false;
-    button.textContent = "Ja, rit afbreken";
+    button.textContent = finish ? "Ja, rit afronden" : "Ja, rit afbreken";
     return;
   }
   const { route } = await response.json();
@@ -879,8 +919,9 @@ async function abortRoute(planned, reden, button) {
   // Done typing: let go of the reason field, or the redraw that follows would
   // still think someone is busy in it and leave the old route on screen.
   document.querySelector("#abortBox")?.removeAttribute("data-open");
+  document.querySelector("#finishBox")?.removeAttribute("data-open");
   document.activeElement?.blur?.();
-  window.alert(`Rit ${route.number || "?"} is afgebroken. ${klaar} bezorgd, ${terug} ${terug === 1 ? "order gaat" : "orders gaan"} terug naar de planning.`);
+  window.alert(`Rit ${route.number || "?"} is ${route.finished ? "afgerond" : "afgebroken"}. ${klaar} bezorgd${terug ? `, ${terug} ${terug === 1 ? "order gaat" : "orders gaan"} terug naar de planning` : ""}.`);
   state.driverRouteId = null;
   state.openPlan = null;
   await refreshData();
@@ -1273,9 +1314,11 @@ function renderAgenda() {
         const bezorgd = status.stops.filter((stop) => stop.status === "bezorgd").length;
         const anders = status.stops.length - status.open.length - bezorgd;
         const terug = (planned.droppedKeys || []).map((key) => escapeHtml(key.split(":").pop())).join(", ") || "geen";
-        const afgebroken = planned.abortedAt
-          ? `<p class="agenda-aborted">Afgebroken door ${escapeHtml(planned.abortedBy || "iemand")} om ${formatDateTime(planned.abortedAt)}${planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : ""}. ${(planned.droppedKeys || []).length} terug naar de planning: ${terug}.</p>`
-          : "";
+        const teruggekomen = (planned.droppedKeys || []).length;
+        const afgebroken = !planned.abortedAt ? ""
+          : planned.finished
+            ? `<p class="agenda-finished">Afgerond door ${escapeHtml(planned.abortedBy || "iemand")} om ${formatDateTime(planned.abortedAt)}${teruggekomen ? `. ${teruggekomen} niet bezorgd, terug naar de planning: ${terug}${planned.abortReason ? ` (${escapeHtml(planned.abortReason)})` : ""}` : ""}.</p>`
+            : `<p class="agenda-aborted">Afgebroken door ${escapeHtml(planned.abortedBy || "iemand")} om ${formatDateTime(planned.abortedAt)}${planned.abortReason ? `: ${escapeHtml(planned.abortReason)}` : ""}. ${teruggekomen} terug naar de planning: ${terug}.</p>`;
         const telling = planned.abortedAt
           ? `${bezorgd} bezorgd`
           : [`${status.open.length} ${status.open.length === 1 ? "stop" : "stops"} te gaan`, bezorgd ? `${bezorgd} bezorgd` : "", anders ? `${anders} geannuleerd of onbekend` : ""].filter(Boolean).join(" · ");
@@ -1290,7 +1333,7 @@ function renderAgenda() {
                 ${drivers.map((driver) => `<option value="${escapeHtml(driver.id)}"${driver.id === planned.driverId ? " selected" : ""}>${escapeHtml(driver.name)}</option>`).join("")}
               </select></label>
               ${bestuurder ? "" : '<em class="agenda-no-driver">Nog geen bezorger: kies wie deze rit rijdt.</em>'}`;
-        return `<div class="agenda-route${planned.abortedAt ? " afgebroken" : ""}">
+        return `<div class="agenda-route${planned.abortedAt ? (planned.finished ? " afgerond" : " afgebroken") : ""}">
           <b><span class="rit-nummer">Rit ${escapeHtml(planned.number || "?")}</span> ${escapeHtml(planned.name)}</b>
           <span>${telling}</span>
           ${wie}
