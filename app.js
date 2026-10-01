@@ -1528,16 +1528,15 @@ function noteConceptWarning(concept) {
   return route.unknownPoint || route.overByMinutes || teZwaar ? routeWarning(route) : "";
 }
 
-// Not for the van after all: the orders of a concept from the notes go with FVR
-// (rijplaten) or DHL (slowfeeders), as the minus on a proposal sends them, and
-// leave the agenda. Under Orders, Terug naar de planning brings them back.
+// Not as a concept in the agenda: its orders leave the agenda and go through the
+// planning like any other order, with the van or a carrier as it decides. The
+// day from the note still counts. Under Orders, Weer als concept brings them back.
 async function rejectNoteConcept(concept, button) {
   if (!concept) return;
   const aantal = concept.orders.length;
-  const vervoerders = [...new Set(concept.orders.map(carrierOf))].join(" of ");
-  if (!window.confirm(`${concept.orders.map((order) => order.id).join(", ")} ${aantal === 1 ? "gaat" : "gaan"} dan met ${vervoerders} in plaats van met de bus, en ${aantal === 1 ? "komt" : "komen"} niet meer in de agenda of een voorstel. Terugzetten kan onder Orders met Terug naar de planning.`)) return;
+  if (!window.confirm(`${concept.orders.map((order) => order.id).join(", ")} uit de agenda halen? ${aantal === 1 ? "De order gaat" : "De orders gaan"} dan gewoon mee in de planning, zoals elke andere order: zelf bezorgen of met FVR/DHL, wat de planning kiest.`)) return;
   if (button) button.disabled = true;
-  for (const order of concept.orders) await setExternal(order, true);
+  for (const order of concept.orders) await setNoteConceptOff(order, true);
 }
 
 // On the Concepten page: the concepts made from notes, below the saved ones.
@@ -1962,6 +1961,10 @@ function renderOrders() {
     const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
     button.addEventListener("click", () => clearForceInclude(order));
   });
+  document.querySelectorAll(".note-concept-back").forEach((button) => {
+    const order = state.allOrders.find((item) => orderKey(item) === button.dataset.orderKey);
+    button.addEventListener("click", () => setNoteConceptOff(order, false, button));
+  });
   document.querySelectorAll(".mark-handled").forEach((button) => {
     const order = state.allOrders.find((item) => orderKey(item) === button.dataset.orderKey);
     button.addEventListener("click", () => markHandled(order, button));
@@ -2042,6 +2045,9 @@ function manualActionButton(item, key, isForced) {
   if (item.decision === "planned" || item.decision === "concept") return "";
   if (item.order.cancelled || item.order.fulfilled || item.order.refunded || item.order.deliveryMethod === "pickup") return "";
   if (item.order.extern) return `<button class="button manual-action clear-extern" type="button" data-order-key="${key}">Terug naar de planning</button>`;
+  // Turned down as a concept in the agenda: it can go back there, next to the usual choice.
+  const terug = item.order.noteConceptOff && noteDayOf(item.order) && !isForced ? `<button class="button subtle-action note-concept-back" type="button" data-order-key="${key}">Weer als concept in de agenda</button>` : "";
+  if (terug) return `${terug}${item.decision === "include" ? "" : `<button class="button manual-action force-include" type="button" data-order-key="${key}">Toch zelf bezorgen</button>`}`;
   if (isForced) return `<button class="button subtle-action clear-force-include" type="button" data-order-key="${key}">Automatisch advies</button>`;
   if (item.decision === "include") return "";
   return `<button class="button manual-action force-include" type="button" data-order-key="${key}">Toch zelf bezorgen</button>`;
@@ -2392,6 +2398,25 @@ async function refreshFromShopify(form) {
     found.forEach((entry) => { telling[entry.state] = (telling[entry.state] || 0) + 1; });
     window.alert(`${found.length} open orders opnieuw ingelezen${found.length ? `: ${Object.entries(telling).map(([state, count]) => `${count} ${state}`).join(", ")}` : ""}.`);
   }
+}
+
+// Turned down as a concept from the note, or back again; kept by the Worker,
+// so every screen agrees.
+async function setNoteConceptOff(order, off, button = null) {
+  if (!order || !ensureOperatorKey()) return;
+  if (button) button.disabled = true;
+  const response = await backendFetch(`${CONFIG.apiBaseUrl}/orders/note-concept`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ orderKey: orderKey(order), off }),
+  }).catch(() => null);
+  if (!response?.ok) {
+    window.alert(response ? await errorText(response, "Opslaan is niet gelukt. Probeer het opnieuw.") : "Geen verbinding. Probeer het opnieuw.");
+    if (button) button.disabled = false;
+    return;
+  }
+  for (const item of state.allOrders) if (orderKey(item) === orderKey(order)) item.noteConceptOff = off;
+  rebuildPlanning();
 }
 
 async function setExternal(order, extern, button = null) {
@@ -2806,7 +2831,7 @@ function buildNoteConcepts() {
   const groups = new Map();
   for (const order of state.orders) {
     const dag = noteDayOf(order);
-    if (!dag || order.dateUnclear) continue;
+    if (!dag || order.dateUnclear || order.noteConceptOff) continue;
     if (order.cancelled || order.fulfilled || order.refunded || order.deliveryMethod === "pickup" || order.extern) continue;
     // Only what goes with the van, to an address the planning can place, and
     // not what the planner already took in hand.

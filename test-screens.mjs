@@ -778,23 +778,30 @@ await test("Rit afronden: onder een rit van vandaag, noemt wat nog open staat, e
   assert.match(element("#agendaDays").innerHTML, /<p class="agenda-finished">Afgerond door Sanne om .*1 niet bezorgd, terug naar de planning: #S\d+ \(niet thuis\)\.<\/p>/);
 });
 
-await test("Afwijzen bij een concept uit de opmerking: de orders gaan met FVR of DHL en verdwijnen uit de agenda; een te lange dag staat erbij", async () => {
+await test("Afwijzen bij een concept uit de opmerking: alleen uit de agenda; de order gaat verder als elke andere order", async () => {
   clockAt("2026-09-29T08:00:00Z", "Europe/Amsterdam");
   const ver = opDag("Eemshaven", 53.44, 6.83, "2026-10-07");
-  scene({ role: "planner", orders: [ver] });
+  const gemist = opDag("Doorn", 52.03, 5.32, "2026-09-28");
+  scene({ role: "planner", orders: [ver, gemist] });
   state.routeInHand = null;
   fn.renderAgenda();
   const html = element("#agendaDays").innerHTML;
   assert.match(html, /class="button subtle-action reject-note-concept"[^>]*>Afwijzen</);
   assert.match(html, /<p class="agenda-concept-warning">Te lang: \d+ min boven 5:30 uur/);
-  const calls = worker({ "/orders/shipping": [200, { ok: true }] });
+  const calls = worker({ "/orders/note-concept": [200, { ok: true }] });
   const gevraagd = [];
   fn.window.confirm = (tekst) => { gevraagd.push(tekst); return true; };
-  await fn.rejectNoteConcept(state.noteConcepts[0], { disabled: false });
-  assert.match(gevraagd[0], new RegExp(`${ver.id} gaat dan met FVR in plaats van met de bus`));
-  assert.deepEqual(calls.find((call) => call.path === "/orders/shipping").body, { orderKey: key(ver), extern: true });
-  assert.equal(state.noteConcepts.length, 0, "uit de agenda");
-  assert.equal(besluit(ver).decision, "dhl");
+  const conceptGemist = state.noteConcepts.find((concept) => concept.orders.includes(gemist));
+  await fn.rejectNoteConcept(conceptGemist, { disabled: false });
+  assert.match(gevraagd[0], new RegExp(`${gemist.id} uit de agenda halen\\? De order gaat dan gewoon mee in de planning`));
+  assert.deepEqual(calls.find((call) => call.path === "/orders/note-concept").body, { orderKey: key(gemist), off: true });
+  assert.ok(!state.noteConcepts.some((concept) => concept.orders.includes(gemist)), "uit de agenda");
+  assert.ok(!gemist.extern, "niet naar FVR of DHL");
+  assert.equal(besluit(gemist).decision, "include", "zelf bezorgen, zoals de planning hem anders ook zou doen");
+  assert.ok(state.routes.some((route) => route.orders.includes(gemist)), "en weer in een voorstel");
+  assert.equal(state.noteConcepts.length, 1, "de andere blijft staan");
+  fn.renderOrders();
+  assert.match(element("#ordersBody").innerHTML, /note-concept-back[^>]*>Weer als concept in de agenda</);
   fn.window.confirm = () => true;
 });
 

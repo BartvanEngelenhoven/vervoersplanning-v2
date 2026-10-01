@@ -1664,6 +1664,21 @@ await test("taal per bezorger: de planner zet Bulgaars, de telefoon hoort het, e
   assert.equal((await call(env, "POST", "/plan/finish", { key: sanne.code, body: { id: route.id, date: route.date } })).data.error, "Deze rit staat niet (meer) op jouw naam. Ververs het scherm, of bel de planner.");
 });
 
+await test("afwijzen als concept: de Worker onthoudt het per order, alleen de planner, en het kan terug", async () => {
+  const env = makeEnv();
+  const sanne = await addDriver(env, "Sanne");
+  const a = await seedOrder(env, DRS, "#DRS970");
+  const zet = (key, off) => call(env, "POST", "/orders/note-concept", { key, body: { orderKey: a.key, off } });
+  assert.equal((await zet(sanne.code, true)).status, 403, "alleen de planner");
+  assert.equal((await call(env, "POST", "/orders/note-concept", { key: PLANNER, body: { orderKey: "x:<b>", off: true } })).status, 400);
+  assert.equal((await zet(PLANNER, true)).status, 200);
+  const af = (await call(env, "GET", "/orders", { key: PLANNER })).data.find((order) => order.id === a.order.id);
+  assert.equal(af.noteConceptOff, true);
+  assert.ok(!af.extern, "en niet met een vervoerder");
+  assert.equal((await zet(PLANNER, false)).status, 200);
+  assert.ok(!("noteConceptOff" in (await call(env, "GET", "/orders", { key: PLANNER })).data.find((order) => order.id === a.order.id)));
+});
+
 globalThis.fetch = realFetch;
 let failed = 0;
 for (const [status, name, error] of results) {

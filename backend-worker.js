@@ -248,6 +248,10 @@ async function route(request, env) {
     return setOrderShipping(request, env);
   }
 
+  if (request.method === "POST" && url.pathname === "/orders/note-concept") {
+    return setOrderNoteConcept(request, env);
+  }
+
   if (request.method === "GET" && url.pathname === "/orders") {
     return getOrders(request, env);
   }
@@ -485,6 +489,9 @@ async function getOrders(request, env) {
   // Taken out of a proposal by the planner: goes with DHL or FVR, not the van.
   const extern = new Set((await listAll(env, SHIPPING_PREFIX)).map((key) => key.name.slice(SHIPPING_PREFIX.length)));
   if (extern.size) orders = orders.map((order) => (extern.has(`${order.shopDomain}:${order.id}`) ? { ...order, extern: true } : order));
+  // Turned down as a concept in the agenda: planned like any other order.
+  const offConcept = new Set((await listAll(env, CONCEPT_OFF_PREFIX)).map((key) => key.name.slice(CONCEPT_OFF_PREFIX.length)));
+  if (offConcept.size) orders = orders.map((order) => (offConcept.has(`${order.shopDomain}:${order.id}`) ? { ...order, noteConceptOff: true } : order));
 
   if (role === "driver") {
     // Cancelled ones stay in (without anything personal), so a stop in the
@@ -683,6 +690,28 @@ async function setOrderShipping(request, env) {
     await env.PLANNING_ORDERS.delete(`${SHIPPING_PREFIX}${orderKey}`);
   }
   return json({ ok: true, orderKey, extern: Boolean(payload.extern) }, 200, env);
+}
+
+// Turned down as a concept in the agenda ("Afwijzen"): an order whose note
+// names a day stands there as a concept until the planner says no. Then it goes
+// through the planning like any other order. Only the order's number is kept.
+const CONCEPT_OFF_PREFIX = "concept-off:";
+
+async function setOrderNoteConcept(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const orderKey = String(payload.orderKey || "");
+  const split = orderKey.indexOf(":");
+  if (split < 0 || !KNOWN_SHOPS.includes(orderKey.slice(0, split)) || !/^#[\w-]+$/.test(orderKey.slice(split + 1))) {
+    return json({ error: "Onbekende order." }, 400, env);
+  }
+  if (payload.off) {
+    await env.PLANNING_ORDERS.put(`${CONCEPT_OFF_PREFIX}${orderKey}`, JSON.stringify({ off: true, at: new Date().toISOString() }), { expirationTtl: 120 * DAY_SECONDS });
+  } else {
+    await env.PLANNING_ORDERS.delete(`${CONCEPT_OFF_PREFIX}${orderKey}`);
+  }
+  return json({ ok: true, orderKey, off: Boolean(payload.off) }, 200, env);
 }
 
 // Until fourteen days after it was cancelled, counted the same way: a refund or a
