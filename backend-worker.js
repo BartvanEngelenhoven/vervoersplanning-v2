@@ -1324,6 +1324,9 @@ async function setStatusTags(request, env) {
     if (fresh && !fresh.cancelled) await env.PLANNING_ORDERS.put(recordKey, JSON.stringify({ ...fresh, planningTags: tags }));
     results.push({ orderKey, ok: true, tags });
   }
+  // Counts and Shopify's first no, for wrangler tail; nothing about the customer.
+  const count = (test) => results.filter(test).length;
+  console.log("status-tags", JSON.stringify({ asked: asked.length, ok: count((r) => r.ok), later: count((r) => r.later), gone: count((r) => r.gone), refused: count((r) => r.error), error: results.find((r) => r.error)?.error }));
   return json({ ok: true, results }, 200, env);
 }
 
