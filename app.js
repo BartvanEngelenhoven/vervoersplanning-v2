@@ -66,9 +66,9 @@ const alwaysOwnTransportProducts = [
   "compacte vierkante slowfeeder hooiruif",
   "patura klima",
 ];
-// v1 also collected every order ever put in a manual route, which then stayed on
-// "Meenemen" in that browser for good. Only "Toch zelf bezorgen" writes here now,
-// so the old list is left behind rather than carried over.
+// "Toch zelf bezorgen" as this browser kept it until October 2026. The Worker
+// keeps the choice now (forcedOwn on the order), so every screen says the same;
+// what is still here moves there once (moveForcedIncludes) and goes.
 const forcedIncludeKey = "vervoersplanning.forceInclude.v2";
 const operatorKeyStorageKey = "vervoersplanning.operatorKey.v1";
 // The role that code opened last time, so a phone that loses its signal before
@@ -186,7 +186,7 @@ function decide(order) {
 }
 
 function applyManualDecision(order, automatic) {
-  if (!forcedIncludes.has(orderKey(order)) || order.extern) return automatic;
+  if (!isForcedOwn(order) || order.extern) return automatic;
   if (order.cancelled || order.fulfilled || order.refunded || order.deliveryMethod === "pickup") return automatic;
   // Chosen by hand, but not without an address to drive to.
   if (!order.addressComplete) return automatic;
@@ -2001,7 +2001,7 @@ function groupedOrderSections(items) {
 function orderCard(item) {
   const order = item.order;
   const key = orderKey(order);
-  const isForced = forcedIncludes.has(key);
+  const isForced = isForcedOwn(order);
   const planned = item.decision === "planned" ? item.planned : null;
   const held = item.decision === "concept";
   return `<article class="order-card">
@@ -2702,17 +2702,159 @@ async function forceInclude(order) {
       return false;
     }
   }
-  forcedIncludes.add(orderKey(order));
-  saveForcedIncludes();
+  if (!(await saveOwnChoice(order, true))) return false;
   await refreshData();
   return true;
 }
 
-function clearForceInclude(order) {
-  if (!order) return;
-  forcedIncludes.delete(orderKey(order));
+async function clearForceInclude(order) {
+  if (!order || !ensureOperatorKey()) return;
+  if (await saveOwnChoice(order, false)) rebuildPlanning();
+}
+
+function isForcedOwn(order) {
+  return Boolean(order.forcedOwn) || forcedIncludes.has(orderKey(order));
+}
+
+// "Toch zelf bezorgen" on (own) or off, kept by the Worker, so the planner's
+// other screens say the same. Without a Worker (the demo) this browser keeps it.
+async function saveOwnChoice(order, own) {
+  const key = orderKey(order);
+  if (usesBackend) {
+    const response = await backendFetch(`${CONFIG.apiBaseUrl}/orders/shipping`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ orderKey: key, own }),
+    }).catch(() => null);
+    if (!response?.ok) {
+      window.alert(response ? await errorText(response, "Opslaan is niet gelukt. Probeer het opnieuw.") : "Geen verbinding. Probeer het opnieuw.");
+      return false;
+    }
+    for (const item of state.allOrders) if (orderKey(item) === key) Object.assign(item, { forcedOwn: own, extern: false });
+  }
+  if (own && !usesBackend) forcedIncludes.add(key);
+  else forcedIncludes.delete(key);
   saveForcedIncludes();
-  rebuildPlanning();
+  return true;
+}
+
+// What this browser still kept of "Toch zelf bezorgen" goes to the Worker,
+// once: orders still open go there, the rest is dropped. Until then the choice
+// counts here as before.
+let movingForced = false;
+async function moveForcedIncludes() {
+  if (!usesBackend || state.role !== "planner" || !forcedIncludes.size || movingForced) return;
+  movingForced = true;
+  try {
+    const open = new Map(state.allOrders.map((order) => [orderKey(order), order]));
+    for (const key of [...forcedIncludes]) {
+      const order = open.get(key);
+      if (order && !order.forcedOwn && !order.extern && !order.cancelled && !order.fulfilled) {
+        const response = await backendFetch(`${CONFIG.apiBaseUrl}/orders/shipping`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ orderKey: key, own: true }),
+        }).catch(() => null);
+        // Tried again after the next refresh.
+        if (!response?.ok) return;
+        order.forcedOwn = true;
+      }
+      forcedIncludes.delete(key);
+      saveForcedIncludes();
+    }
+  } finally {
+    movingForced = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The status in Shopify. Every open order carries its status from here as a
+// tag on the order there ("Planning: FVR"), so the shop shows what the
+// planning decided. The planner's screen works the status out, so the
+// planner's screen sends it: after a full refresh, and only where the tag in
+// Shopify differs. The Worker puts it on (setStatusTags).
+// ---------------------------------------------------------------------------
+const STATUS_TAG_BATCH = 10;
+// After Shopify said no for an order: not asked again for half an hour.
+const STATUS_TAG_RETRY_MS = 30 * 60_000;
+const statusTagRetryAt = new Map();
+let statusTagRun = null;
+
+// Meenemen, Ingepland and In concept all go with the van: one tag, Bezorgen.
+// Niet meenemen (cancelled, picked up, refunded) carries none.
+function statusTagOf(item) {
+  const status = statusOf(item);
+  if (["include", "planned", "concept"].includes(status)) return "bezorgen";
+  if (status === "review") return "controleren";
+  if (status === "wait") return "wacht";
+  if (status === "fvr" || status === "dhl") return status;
+  return "";
+}
+
+function statusTagDue(item) {
+  const want = statusTagOf(item);
+  const has = Array.isArray(item.order.planningTags) ? item.order.planningTags : [];
+  return want ? !(has.length === 1 && has[0] === want) : has.length > 0;
+}
+
+async function syncStatusTags() {
+  if (!usesBackend || state.role !== "planner" || statusTagRun) return;
+  // Only from the plain overview. With a route or concept open, parcels are
+  // weighed against that route alone, and would be tagged by it.
+  if (state.openPlan || state.openConcept || state.manualRoute) return;
+  const now = Date.now();
+  const differs = state.decisions.filter((item) => item.decision !== "candidate" && statusTagDue(item));
+  const due = differs.filter((item) => (statusTagRetryAt.get(orderKey(item.order)) || 0) <= now);
+  // Refused a moment ago and waiting for their half hour: still not right.
+  let refused = differs.length - due.length;
+  statusTagRun = (async () => {
+    for (let start = 0; start < due.length; start += STATUS_TAG_BATCH) {
+      const batch = due.slice(start, start + STATUS_TAG_BATCH);
+      const response = await backendFetch(`${CONFIG.apiBaseUrl}/orders/status-tags`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orders: batch.map((item) => ({ orderKey: orderKey(item.order), status: statusTagOf(item) })) }),
+      }).catch(() => null);
+      if (!response?.ok) return "statustags in Shopify niet bijgewerkt";
+      const { results = [] } = await response.json().catch(() => ({}));
+      let later = false;
+      for (const result of results) {
+        if (result.ok) {
+          statusTagRetryAt.delete(result.orderKey);
+          for (const order of state.allOrders) if (orderKey(order) === result.orderKey) order.planningTags = result.tags;
+        } else if (result.later) {
+          later = true;
+        } else if (!result.gone) {
+          refused += 1;
+          statusTagRetryAt.set(result.orderKey, Date.now() + STATUS_TAG_RETRY_MS);
+        }
+      }
+      // Shopify asked for a pause: the rest goes after a later refresh.
+      if (later) break;
+    }
+    return refused ? `${refused} statustag${refused === 1 ? "" : "s"} niet gelukt in Shopify` : "";
+  })();
+  try {
+    showStatusTagTrouble(await statusTagRun);
+  } finally {
+    statusTagRun = null;
+  }
+}
+
+// Said after the refresh time, until a later round goes well.
+function showStatusTagTrouble(text) {
+  if (state.statusTagTrouble === text) return;
+  state.statusTagTrouble = text;
+  if (state.lastFetchOk && state.syncLine) showSync(withStatusTagTrouble(state.syncLine));
+}
+
+function withStatusTagTrouble(text) {
+  return state.statusTagTrouble ? `${text} · ${state.statusTagTrouble}` : text;
+}
+
+async function afterPlannerRefresh(tagsReady) {
+  await moveForcedIncludes();
+  if (tagsReady) await syncStatusTags();
 }
 
 // Orders heading the same way share trips, so they are weighed together: each
@@ -2837,7 +2979,7 @@ function buildNoteConcepts() {
     // not what the planner already took in hand.
     if (!transportPlan(order) && !order.ownDeliveryTagged) continue;
     if (!order.addressComplete || !hasKnownPoint(order)) continue;
-    if (forcedIncludes.has(orderKey(order)) || plannedFor(order) || conceptFor(order) || state.heldKeys.has(orderKey(order))) continue;
+    if (isForcedOwn(order) || plannedFor(order) || conceptFor(order) || state.heldKeys.has(orderKey(order))) continue;
     const region = regionFor(order);
     const key = `${dag}|${region}`;
     if (!groups.has(key)) groups.set(key, { id: `opmerking-${dag}-${region.toLowerCase().replace(/[^a-z]+/g, "-")}`, date: dag, region, orders: [] });
@@ -3101,6 +3243,9 @@ async function refreshData(full = true) {
     button.disabled = true;
     button.textContent = tr("Bezig…");
   });
+  // The status tags in Shopify only go out from a round that saw everything
+  // afresh: the routes, the deliveries and every point.
+  let planFresh = false;
   try {
     const separator = CONFIG.dataUrl.includes("?") ? "&" : "?";
     const response = await backendFetch(`${CONFIG.dataUrl}${separator}t=${Date.now()}`, { cache: "no-store" });
@@ -3112,10 +3257,12 @@ async function refreshData(full = true) {
     if (seq !== refreshSeq) return;
 
     if (full) {
+      const asked = Date.now();
       const plan = await fetchPlan();
       if (seq !== refreshSeq) return;
       if (plan === null) throw new Error(tr("De ritten konden niet worden geladen"));
       state.plan = plan;
+      planFresh = (state.planFetchedAt || 0) >= asked;
       const history = await fetchHistory([...new Set(state.plan.flatMap(planKeys))]);
       if (seq !== refreshSeq) return;
       if (history) {
@@ -3151,7 +3298,7 @@ async function refreshData(full = true) {
     state.lastFetchOk = true;
     state.orders = state.allOrders.filter((order) => !(order.dueDate && order.dueDate < hideOrdersDueBefore));
     // Before rebuildPlanning, because the travel budgets are judged against these.
-    await fetchGeo(state.allOrders);
+    const allPoints = await fetchGeo(state.allOrders);
     state.driveMinutes = await fetchDriveMinutes(state.orders);
     if (seq !== refreshSeq) return;
     if (!state.role) applyRole(await fetchRole());
@@ -3161,7 +3308,12 @@ async function refreshData(full = true) {
     state.fetchError = "";
     const klok = new Intl.DateTimeFormat("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "Europe/Amsterdam" }).format(new Date());
     const bron = state.driveMinutes ? "gemeten rijtijden" : "geschatte rijtijden";
-    showSync(state.role === "driver" ? tr("Laatst ververst om {time}", { time: klok }) : `Laatst ververst om ${klok} · ${bron}`);
+    state.syncLine = state.role === "driver" ? tr("Laatst ververst om {time}", { time: klok }) : `Laatst ververst om ${klok} · ${bron}`;
+    showSync(state.role === "planner" ? withStatusTagTrouble(state.syncLine) : state.syncLine);
+    // Measured drive times that were asked for and did not come would weigh
+    // this round on estimates, and tag by those.
+    const tagsReady = full && planFresh && state.historyRound === seq && allPoints && (state.driveEstimateUnavailable || Boolean(state.driveMinutes));
+    if (state.role === "planner") afterPlannerRefresh(tagsReady).catch(() => {});
   } catch (error) {
     if (seq !== refreshSeq) return;
     state.lastFetchOk = false;
@@ -3279,6 +3431,7 @@ async function fetchPlan() {
     if ("driver" in payload) rememberDriver(payload.driver);
     state.ownCodes = Boolean(payload.ownCodes);
     state.planLoaded = true;
+    state.planFetchedAt = Date.now();
     return payload.routes || [];
   } catch {
     return state.planLoaded ? state.plan : null;
@@ -3521,8 +3674,11 @@ async function acceptAddition(kandidaat, button) {
 // address and never another lookup. The driver's phone holds no addresses but
 // those of its own stops; the other orders arrive with their point.
 async function fetchGeo(orders) {
-  if (!usesBackend) return;
+  if (!usesBackend) return true;
   const missing = [...new Set(orders.filter((order) => order.fullAddress && !order.point).map(orderAddress).filter((address) => address && !(address in state.geo)))];
+  // false when a batch went unanswered or the Worker left addresses for later:
+  // those are estimated this round, and may weigh differently next round.
+  let complete = true;
   // Forty at a time, matching the backend's limit per request.
   for (let start = 0; start < missing.length; start += 40) {
     try {
@@ -3533,16 +3689,22 @@ async function fetchGeo(orders) {
         // The planning waits for this before drawing; it must not wait forever.
         signal: AbortSignal.timeout(12000),
       });
-      if (!response.ok) continue;
-      const { results } = await response.json();
+      if (!response.ok) {
+        complete = false;
+        continue;
+      }
+      const { results, pending } = await response.json();
+      if (pending) complete = false;
       for (const [address, point] of Object.entries(results || {})) {
         if (point) state.geo[address] = { lat: point.lat, lon: point.lon };
       }
     } catch {
       // Timed out or offline: carry on with the next batch, estimate the rest.
+      complete = false;
       continue;
     }
   }
+  return complete;
 }
 
 // The newest deliveries for the history screen, and for each stop of the

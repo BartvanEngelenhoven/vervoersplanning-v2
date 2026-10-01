@@ -872,6 +872,142 @@ await test("Bezorgers: per bezorger een taal voor de telefoon", async () => {
   state.driverCode = null;
 });
 
+// ---------------------------------------------------------------------------
+// The status in Shopify: each open order's status as a tag on it there.
+// ---------------------------------------------------------------------------
+// The tag screen answers in the Worker's words: every order set as asked.
+function tagWorker(extra = {}) {
+  return worker({
+    "/orders/status-tags": (body) => [200, { ok: true, results: body.orders.map((asked) => ({ orderKey: asked.orderKey, ok: true, tags: asked.status ? [asked.status] : [] })) }],
+    "/routes/estimate": [501, { error: "Google Maps API key is not configured" }],
+    ...extra,
+  });
+}
+const settle = async () => {
+  for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+};
+
+await test("statustags: elke status zijn tag in Shopify; alleen wat afwijkt gaat naar de Worker, tien per keer", async () => {
+  clockAt("2026-09-29T08:00:00Z", "Europe/Amsterdam");
+  const mee = order("Doorn", 52.03, 5.32);
+  const wacht = vanafDag("Leersum", 52.01, 5.43, "2026-10-12");
+  const kijken = order("Zeist", 52.09, 5.23, { paid: false });
+  const pakket = order("Groningen", 53.22, 6.57, { shopDomain: "slowfeeder-specialist.myshopify.com", webshop: "De Slowfeeder Specialist", products: ["1x Slowfeeder hooinet"] });
+  const fvr = order("Wijk bij Duurstede", 51.97, 5.34, { extern: true });
+  const weg = order("Ede", 52.04, 5.66, { cancelled: true, planningTags: ["bezorgen"] });
+  const afhalen = order("Bennekom", 52.0, 5.67, { deliveryMethod: "pickup" });
+  const alGoed = order("Driebergen", 52.05, 5.28, { planningTags: ["bezorgen"] });
+  const dubbel = order("Maarn", 52.06, 5.37, { planningTags: ["bezorgen", "fvr"] });
+  scene({ role: "planner", orders: [mee, wacht, kijken, pakket, fvr, weg, afhalen, alGoed, dubbel] });
+  const tag = (item) => fn.statusTagOf(besluit(item));
+  assert.deepEqual([mee, wacht, kijken, pakket, fvr, weg, afhalen].map(tag), ["bezorgen", "wacht", "controleren", "dhl", "fvr", "", ""]);
+
+  const calls = tagWorker();
+  await fn.syncStatusTags();
+  const gestuurd = calls.filter((call) => call.path === "/orders/status-tags").flatMap((call) => Array.from(call.body.orders, (entry) => [entry.orderKey, entry.status]));
+  assert.deepEqual(gestuurd, [[key(mee), "bezorgen"], [key(wacht), "wacht"], [key(kijken), "controleren"], [key(pakket), "dhl"], [key(fvr), "fvr"], [key(weg), ""], [key(dubbel), "bezorgen"]], "afhalen zonder tag en wat al klopt, blijven weg");
+  // Known as set now: the next round has nothing to send.
+  calls.length = 0;
+  await fn.syncStatusTags();
+  assert.equal(calls.length, 0);
+
+  // Twenty-three to send: three requests, of ten, ten and three.
+  const veel = Array.from({ length: 23 }, (_, index) => order("Doorn", 52.03 + index / 1000, 5.32));
+  scene({ role: "planner", orders: veel });
+  const porties = tagWorker();
+  await fn.syncStatusTags();
+  assert.deepEqual(porties.map((call) => call.body.orders.length), [10, 10, 3]);
+});
+
+await test("statustags: niet met een rit of concept open, en alleen na een ronde die alles vers zag", async () => {
+  realClock();
+  const mee = order("Doorn", 52.03, 5.32);
+  scene({ role: "planner", orders: [mee] });
+  let calls = tagWorker();
+  state.manualRoute = { keys: [key(mee)], removed: new Set() };
+  await fn.syncStatusTags();
+  assert.equal(calls.length, 0, "met een selectie of open rit wegen pakketten anders");
+  state.manualRoute = null;
+  state.openPlan = { id: "rit-1", date: "2026-12-01" };
+  await fn.syncStatusTags();
+  assert.equal(calls.length, 0);
+  state.openPlan = null;
+
+  // A full refresh that saw everything afresh sends; one that did not, does not.
+  const ronde = async (answers, full = true) => {
+    // Without a point of its own, so its address goes to /geo.
+    const fresh = order("Doorn", 52.03, 5.32, { point: false });
+    calls = tagWorker({ "/orders": [200, [fresh]], ...answers });
+    state.driveEstimateUnavailable = false;
+    await fn.refreshData(full);
+    await settle();
+    return calls.some((call) => call.path === "/orders/status-tags");
+  };
+  assert.equal(await ronde({}), true, "alles vers: de tag gaat");
+  assert.equal(await ronde({}, false), false, "de lichte verversing van elke twee minuten: niet");
+  assert.equal(await ronde({ "/geo": [200, { results: {}, pending: 3 }] }), false, "adressen nog niet allemaal opgezocht");
+  assert.equal(await ronde({ "/geo": [500, { error: "PDOK" }] }), false, "PDOK gaf geen antwoord");
+  assert.equal(await ronde({ "/history": [500, { error: "weg" }] }), false, "de bezorgingen kwamen niet");
+  assert.equal(await ronde({ "/plan": [500, { error: "weg" }] }), false, "de ritten kwamen niet (de oude bleven staan)");
+  assert.equal(await ronde({ "/routes/estimate": [500, { error: "Google" }] }), false, "gemeten rijtijden gevraagd en niet gekomen");
+  state.role = "driver";
+  assert.equal(await ronde({}), false, "nooit vanaf de telefoon van een bezorger");
+  state.role = "planner";
+  state.driveEstimateUnavailable = true;
+});
+
+await test("statustags: wat Shopify weigert staat bij de verversingstijd, en wordt een half uur niet opnieuw gevraagd", async () => {
+  realClock();
+  const een = order("Doorn", 52.03, 5.32);
+  const twee = order("Leersum", 52.01, 5.43);
+  scene({ role: "planner", orders: [een, twee] });
+  state.syncLine = "Laatst ververst om 10:00:00 · geschatte rijtijden";
+  const calls = worker({ "/orders/status-tags": (body) => [200, { ok: true, results: body.orders.map((asked) => (asked.orderKey === key(een) ? { orderKey: asked.orderKey, ok: false, error: "nope" } : { orderKey: asked.orderKey, ok: true, tags: [asked.status] })) }] });
+  await fn.syncStatusTags();
+  assert.equal(element("#syncText").textContent, "Laatst ververst om 10:00:00 · geschatte rijtijden · 1 statustag niet gelukt in Shopify");
+  calls.length = 0;
+  await fn.syncStatusTags();
+  assert.equal(calls.length, 0, "niet meteen opnieuw");
+  assert.match(element("#syncText").textContent, /1 statustag niet gelukt/, "en het blijft gemeld");
+  // Shopify asked for a pause: the rest waits, nothing is reported as refused.
+  const drie = order("Zeist", 52.09, 5.23);
+  const vier = order("Maarn", 52.06, 5.37);
+  scene({ role: "planner", orders: [drie, vier] });
+  worker({ "/orders/status-tags": (body) => [200, { ok: true, results: body.orders.map((asked) => ({ orderKey: asked.orderKey, ok: false, later: true })) }] });
+  await fn.syncStatusTags();
+  assert.equal(element("#syncText").textContent, "Laatst ververst om 10:00:00 · geschatte rijtijden");
+  state.syncLine = "";
+});
+
+await test("Toch zelf bezorgen gaat naar de Worker, zodat elk scherm hetzelfde zegt; wat de browser nog had, verhuist één keer", async () => {
+  realClock();
+  const onbetaald = order("Doorn", 52.03, 5.32, { paid: false });
+  scene({ role: "planner", orders: [onbetaald] });
+  assert.equal(besluit(onbetaald).decision, "review");
+  const calls = worker({ "/orders/shipping": (body) => [200, { ok: true, orderKey: body.orderKey, own: body.own, extern: false }] });
+  fn.refreshData = async () => fn.rebuildPlanning();
+  assert.equal(await fn.forceInclude(onbetaald), true);
+  assert.deepEqual(calls.at(-1).body, { orderKey: key(onbetaald), own: true });
+  assert.equal(besluit(onbetaald).decision, "include");
+  assert.equal(planning.forcedIncludes.size, 0, "niet meer in deze browser");
+  await fn.clearForceInclude(onbetaald);
+  assert.deepEqual(calls.at(-1).body, { orderKey: key(onbetaald), own: false });
+  assert.equal(besluit(onbetaald).decision, "review");
+
+  // Left in this browser from before: an open order moves, the rest goes.
+  const nogOpen = order("Leersum", 52.01, 5.43, { paid: false });
+  const opDhl = order("Zeist", 52.09, 5.23, { extern: true });
+  scene({ role: "planner", orders: [nogOpen, opDhl] });
+  for (const item of [nogOpen, opDhl]) planning.forcedIncludes.add(key(item));
+  planning.forcedIncludes.add(`${DRS}:#AL-BEZORGD`);
+  calls.length = 0;
+  await fn.moveForcedIncludes();
+  assert.deepEqual(Array.from(calls, (call) => call.body), [{ orderKey: key(nogOpen), own: true }]);
+  assert.equal(planning.forcedIncludes.size, 0);
+  assert.equal(fn.localStorage.getItem("vervoersplanning.forceInclude.v2"), "[]");
+  assert.equal(nogOpen.forcedOwn, true);
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);

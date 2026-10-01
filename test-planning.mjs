@@ -8,7 +8,7 @@ import vm from "node:vm";
 export function loadPlanning({ v3 = true } = {}) {
   let src = fs.readFileSync(new URL("./app.js", import.meta.url), "utf8");
   src = src.replace("ritregelsV3: false", `ritregelsV3: ${v3}`).replace("ritregelsV3: true", `ritregelsV3: ${v3}`);
-  src += "\n;globalThis.__planning = { state, CONFIG, transportRules };";
+  src += "\n;globalThis.__planning = { state, CONFIG, transportRules, forcedIncludes };";
 
   const elements = new Map();
   const stub = () => {

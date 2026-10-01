@@ -83,6 +83,9 @@ const shop = {
     this.mails = [];
     this.calls = 0;
     this.failNext = null;
+    this.failTagFor = null;
+    this.throttle = false;
+    this.statusCalls = [];
   },
   add(gid, lines = 1, extra = {}) {
     this.orders.set(gid, { fulfilled: false, remaining: lines, tags: new Set(), note: "", fulfillments: [], ...extra });
@@ -151,6 +154,17 @@ function fakeShopify(body) {
     return { data: { fulfillmentCancel: { fulfillment: { id: variables.id, status: "CANCELLED" }, userErrors: [] } } };
   }
 
+  // The planning's status tag: its other tags off and the new one on, in one call.
+  if (/StatusTag/.test(query)) {
+    if (shop.throttle) return { errors: [{ message: "Throttled", extensions: { code: "THROTTLED" } }] };
+    shop.statusCalls.push(variables);
+    const order = shop.orders.get(variables.id);
+    if (!order) return { errors: [{ message: "Invalid global id" }] };
+    const added = variables.add ? { tagsAdd: { node: null, userErrors: shop.failTagFor === variables.id ? [{ field: null, message: "nope" }] : [] } } : {};
+    for (const tag of variables.remove) order.tags.delete(tag);
+    if (shop.failTagFor !== variables.id) for (const tag of variables.add || []) order.tags.add(tag);
+    return { data: { tagsRemove: { node: null, userErrors: [] }, ...added } };
+  }
   if (/tagsAdd/.test(query)) {
     if (shop.failTagFor === variables.id) {
       return { data: { tagsAdd: { node: null, userErrors: [{ field: null, message: "nope" }] } } };
@@ -1678,6 +1692,122 @@ await test("afwijzen als concept: de Worker onthoudt het per order, alleen de pl
   assert.equal((await zet(PLANNER, false)).status, 200);
   assert.ok(!("noteConceptOff" in (await call(env, "GET", "/orders", { key: PLANNER })).data.find((order) => order.id === a.order.id)));
 });
+
+await test("toch zelf bezorgen: bewaard in de Worker, voor elk scherm hetzelfde, en het sluit DHL/FVR uit", async () => {
+  const env = makeEnv();
+  const a = await seedOrder(env, DSP, "#DSP980", { line_items: [{ title: "Slowfeeder hooinet klein", quantity: 1, grams: 500 }] });
+  const zet = (key, body) => call(env, "POST", "/orders/shipping", { key, body });
+  const lees = async () => (await call(env, "GET", "/orders", { key: PLANNER })).data.find((order) => order.id === a.order.id);
+  assert.equal((await zet(DRIVER, { orderKey: a.key, own: true })).status, 403, "alleen de planner");
+  assert.equal((await zet(PLANNER, { orderKey: a.key, extern: true })).status, 200);
+  const gezet = await zet(PLANNER, { orderKey: a.key, own: true });
+  assert.deepEqual([gezet.status, gezet.data.own, gezet.data.extern], [200, true, false]);
+  let order = await lees();
+  assert.equal(order.forcedOwn, true);
+  assert.ok(!order.extern, "zelf bezorgen vervangt DHL/FVR");
+  assert.ok(!("forcedOwn" in (await call(env, "GET", "/orders", { key: DRIVER })).data.find((item) => item.id === a.order.id)), "de telefoon hoort het niet");
+  // A webhook rewrites the order record; the choice stays.
+  await webhook(env, DSP, { ...a.raw, note: "Andere notitie", updated_at: new Date(Date.now() + 1000).toISOString() });
+  assert.equal((await lees()).forcedOwn, true);
+  // And the other way round: the "−" in a proposal replaces it.
+  await zet(PLANNER, { orderKey: a.key, extern: true });
+  order = await lees();
+  assert.deepEqual([order.extern, order.forcedOwn], [true, undefined]);
+  // Automatisch advies: the planning decides again.
+  await zet(PLANNER, { orderKey: a.key, own: true });
+  assert.equal((await zet(PLANNER, { orderKey: a.key, own: false })).status, 200);
+  order = await lees();
+  assert.deepEqual([order.extern, order.forcedOwn], [undefined, undefined]);
+  assert.equal(shop.orders.get(a.order.shopifyOrderId).tags.size, 0, "Shopify onaangeroerd");
+});
+
+await test("statustags: de planner zet de status als tag in Shopify, één tegelijk, en de rest van de tags blijft", async () => {
+  const env = makeEnv();
+  const a = await seedOrder(env, DRS, "#DRS990");
+  const b = await seedOrder(env, DSP, "#DSP991");
+  shop.orders.get(a.order.shopifyOrderId).tags.add("eigen bezorging");
+  shop.orders.get(a.order.shopifyOrderId).tags.add("VIP");
+  const zet = (key, orders) => call(env, "POST", "/orders/status-tags", { key, body: { orders } });
+  assert.equal((await zet(DRIVER, [{ orderKey: a.key, status: "fvr" }])).status, 403, "alleen de planner");
+  assert.equal((await zet(undefined, [{ orderKey: a.key, status: "fvr" }])).status, 401);
+
+  const eerste = await zet(PLANNER, [{ orderKey: a.key, status: "bezorgen" }, { orderKey: b.key, status: "dhl" }]);
+  assert.equal(eerste.status, 200);
+  assert.deepEqual(eerste.data.results, [{ orderKey: a.key, ok: true, tags: ["bezorgen"] }, { orderKey: b.key, ok: true, tags: ["dhl"] }]);
+  assert.deepEqual([...shop.orders.get(a.order.shopifyOrderId).tags].sort(), ["Planning: Bezorgen", "VIP", "eigen bezorging"]);
+  assert.deepEqual([...shop.orders.get(b.order.shopifyOrderId).tags], ["Planning: DHL"]);
+  assert.equal(eerste.fetches, 2, "één Shopify-aanroep per order");
+  // On the record at once, and what the planner's screen reads.
+  const orders = (await call(env, "GET", "/orders", { key: PLANNER })).data;
+  assert.deepEqual(orders.find((order) => order.id === a.order.id).planningTags, ["bezorgen"]);
+  assert.ok(!("planningTags" in (await call(env, "GET", "/orders", { key: DRIVER })).data[0]), "niet naar de telefoon");
+
+  // A new status: the old tag off, the new one on; nothing else touched.
+  await zet(PLANNER, [{ orderKey: a.key, status: "controleren" }]);
+  assert.deepEqual([...shop.orders.get(a.order.shopifyOrderId).tags].sort(), ["Planning: Controleren", "VIP", "eigen bezorging"]);
+  assert.deepEqual(shop.statusCalls.at(-1).remove, ["Planning: Bezorgen", "Planning: FVR", "Planning: DHL", "Planning: Wacht op datum"]);
+  // No status (cancelled, picked up): the planning's tags come off, the rest stays.
+  await zet(PLANNER, [{ orderKey: a.key, status: "" }]);
+  assert.deepEqual([...shop.orders.get(a.order.shopifyOrderId).tags].sort(), ["VIP", "eigen bezorging"]);
+  assert.equal(shop.statusCalls.at(-1).add, undefined);
+  assert.deepEqual((await env.PLANNING_ORDERS.get(`order:${a.key}`, "json")).planningTags, []);
+
+  // Shopify's webhook reads the tags back the same way, whatever the case.
+  await webhook(env, DSP, { ...b.raw, tags: "VIP, planning: wacht op datum", updated_at: new Date(Date.now() + 1000).toISOString() });
+  assert.deepEqual((await env.PLANNING_ORDERS.get(`order:${b.key}`, "json")).planningTags, ["wacht"]);
+
+  // Wrong input is turned away per order; the rest goes ahead.
+  const fout = await zet(PLANNER, [{ orderKey: "evil.myshopify.com:#1", status: "fvr" }, { orderKey: b.key, status: "verzonnen" }, { orderKey: `${DRS}:#DRS404`, status: "fvr" }, { orderKey: b.key, status: "fvr" }]);
+  assert.deepEqual(fout.data.results.map((result) => [result.ok, Boolean(result.error), Boolean(result.gone)]), [[false, true, false], [false, true, false], [false, false, true], [true, false, false]]);
+});
+
+await test("statustags: Shopify weigert er één, of vraagt om pauze; de rest wacht op een volgende ronde", async () => {
+  const env = makeEnv();
+  const a = await seedOrder(env, DRS, "#DRS992");
+  const b = await seedOrder(env, DRS, "#DRS993");
+  const c = await seedOrder(env, DRS, "#DRS994");
+  const zet = (orders) => call(env, "POST", "/orders/status-tags", { key: PLANNER, body: { orders } });
+  shop.failTagFor = a.order.shopifyOrderId;
+  const geweigerd = await zet([{ orderKey: a.key, status: "fvr" }, { orderKey: b.key, status: "fvr" }]);
+  assert.equal(geweigerd.data.results[0].ok, false);
+  assert.equal(geweigerd.data.results[0].error, "nope");
+  assert.equal(geweigerd.data.results[1].ok, true, "de volgende gaat gewoon door");
+  assert.equal((await env.PLANNING_ORDERS.get(`order:${a.key}`, "json")).planningTags.length, 0, "niet als gezet onthouden");
+  shop.failTagFor = null;
+  shop.throttle = true;
+  const pauze = await zet([{ orderKey: a.key, status: "fvr" }, { orderKey: c.key, status: "fvr" }]);
+  assert.deepEqual(pauze.data.results.map((result) => result.later), [true, true]);
+  assert.equal(pauze.fetches, 1, "na de pauze geen aanroepen meer");
+  // At most ten a request.
+  shop.throttle = false;
+  const veel = await zet(Array.from({ length: 14 }, () => ({ orderKey: b.key, status: "dhl" })));
+  assert.equal(veel.data.results.length, 10);
+});
+
+await test("statustags: een geannuleerde order houdt zijn vervaldatum, en een vergeten klant gaat helemaal weg", async () => {
+  const env = makeEnv();
+  const a = await seedOrder(env, DRS, "#DRS995");
+  await zet0(env, a.key, "fvr");
+  const geannuleerd = await webhook(env, DRS, { ...a.raw, cancelled_at: new Date().toISOString(), tags: "Planning: FVR", updated_at: new Date(Date.now() + 1000).toISOString() });
+  assert.equal(geannuleerd.status, 200);
+  const before = env.PLANNING_ORDERS.entry ? env.PLANNING_ORDERS.entry(`order:${a.key}`)?.expiration : null;
+  if (env.PLANNING_ORDERS.entry) assert.ok(before > Date.now() / 1000, "een geannuleerde order loopt af");
+  await zet0(env, a.key, "");
+  assert.deepEqual([...shop.orders.get(a.order.shopifyOrderId).tags], [], "de tag gaat eraf");
+  if (env.PLANNING_ORDERS.entry) assert.equal(env.PLANNING_ORDERS.entry(`order:${a.key}`)?.expiration, before, "loopt nog steeds af");
+  // Erased on request: the planner's choices about it go too.
+  await call(env, "POST", "/orders/shipping", { key: PLANNER, body: { orderKey: a.key, own: true } });
+  await call(env, "POST", "/orders/note-concept", { key: PLANNER, body: { orderKey: a.key, off: true } });
+  const weg = await call(env, "POST", "/store/forget", { key: PLANNER, body: { shopDomain: DRS, id: a.order.id } });
+  assert.equal(weg.status, 200);
+  assert.equal(await env.PLANNING_ORDERS.get(`shipping:${a.key}`), null);
+  assert.equal(await env.PLANNING_ORDERS.get(`concept-off:${a.key}`), null);
+});
+
+async function zet0(env, orderKey, status) {
+  const answer = await call(env, "POST", "/orders/status-tags", { key: PLANNER, body: { orders: [{ orderKey, status }] } });
+  assert.equal(answer.data.results[0].ok, true, JSON.stringify(answer.data));
+}
 
 globalThis.fetch = realFetch;
 let failed = 0;

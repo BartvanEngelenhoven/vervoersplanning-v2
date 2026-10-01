@@ -53,8 +53,23 @@ assert.deepEqual(mapShopifyOrder(deliveryOrder, "slowfeeder-specialist.myshopify
   refunded: false,
   country: "NL",
   ownDeliveryTagged: true,
+  planningTags: [],
   shopifyUpdatedAt: "",
 });
+
+// The planning's own status tags are read back by status, and change nothing
+// else: not pickup, not own delivery, not an agreed moment.
+const SDP = "slowfeeder-specialist.myshopify.com";
+for (const [tag, status] of [["Planning: Bezorgen", "bezorgen"], ["Planning: FVR", "fvr"], ["Planning: DHL", "dhl"], ["Planning: Controleren", "controleren"], ["Planning: Wacht op datum", "wacht"]]) {
+  const mapped = mapShopifyOrder({ ...deliveryOrder, tags: `VIP, ${tag}`, shipping_lines: [{ title: "Verzenden" }] }, SDP);
+  assert.deepEqual(mapped.planningTags, [status], tag);
+  assert.equal(mapped.deliveryMethod, "delivery", tag);
+  assert.equal(mapped.requiresVanRoekelDelivery, false, tag);
+  assert.equal(mapped.ownDeliveryTagged, false, tag);
+  assert.equal(mapped.deliveryAppointmentLocked, false, tag);
+}
+assert.deepEqual(mapShopifyOrder({ ...deliveryOrder, tags: "planning: fvr,Planning: DHL" }, SDP).planningTags, ["fvr", "dhl"], "two at once are both seen, whatever the case");
+assert.deepEqual(mapShopifyOrder({ ...deliveryOrder, tags: "Planning: FVR-retour, Planning, FVR" }, SDP).planningTags, [], "only the planning's own tags count");
 
 const pickupOrder = {
   id: 124,

@@ -252,6 +252,10 @@ async function route(request, env) {
     return setOrderNoteConcept(request, env);
   }
 
+  if (request.method === "POST" && url.pathname === "/orders/status-tags") {
+    return setStatusTags(request, env);
+  }
+
   if (request.method === "GET" && url.pathname === "/orders") {
     return getOrders(request, env);
   }
@@ -486,9 +490,15 @@ async function getOrders(request, env) {
     keys.map((key) => env.PLANNING_ORDERS.get(key.name, "json"))
   )).filter(Boolean).map(withNoteDates);
   orders.sort((a, b) => (a.dueDate || "9999-12-31").localeCompare(b.dueDate || "9999-12-31"));
-  // Taken out of a proposal by the planner: goes with DHL or FVR, not the van.
-  const extern = new Set((await listAll(env, SHIPPING_PREFIX)).map((key) => key.name.slice(SHIPPING_PREFIX.length)));
-  if (extern.size) orders = orders.map((order) => (extern.has(`${order.shopDomain}:${order.id}`) ? { ...order, extern: true } : order));
+  // The planner's choice of carrier: taken out of a proposal goes with DHL or
+  // FVR, not the van; "Toch zelf bezorgen" goes with the van.
+  const choices = new Map((await listAll(env, SHIPPING_PREFIX)).map((key) => [key.name.slice(SHIPPING_PREFIX.length), key.metadata?.own ? "own" : "extern"]));
+  if (choices.size) {
+    orders = orders.map((order) => {
+      const choice = choices.get(`${order.shopDomain}:${order.id}`);
+      return choice === "own" ? { ...order, forcedOwn: true } : choice ? { ...order, extern: true } : order;
+    });
+  }
   // Turned down as a concept in the agenda: planned like any other order.
   const offConcept = new Set((await listAll(env, CONCEPT_OFF_PREFIX)).map((key) => key.name.slice(CONCEPT_OFF_PREFIX.length)));
   if (offConcept.size) orders = orders.map((order) => (offConcept.has(`${order.shopDomain}:${order.id}`) ? { ...order, noteConceptOff: true } : order));
@@ -656,7 +666,7 @@ async function forgetCustomerOrder(request, env) {
     const delivered = await env.PLANNING_ORDERS.get(`delivered:${key}`, "json");
     if (!order && !delivered) continue;
     found = true;
-    const keys = [`order:${key}`, `delivered:${key}`, `${ANNOUNCED_PREFIX}${key}`, `${REPORTING_PREFIX}${key}`, `${REPORT_SEEN_PREFIX}${key}`, `${REPORT_UNSURE_PREFIX}${key}`, `${SHIPPING_PREFIX}${key}`];
+    const keys = [`order:${key}`, `delivered:${key}`, `${ANNOUNCED_PREFIX}${key}`, `${REPORTING_PREFIX}${key}`, `${REPORT_SEEN_PREFIX}${key}`, `${REPORT_UNSURE_PREFIX}${key}`, `${SHIPPING_PREFIX}${key}`, `${CONCEPT_OFF_PREFIX}${key}`];
     for (const record of [order, delivered?.order]) if (record?.fullAddress || record?.city) keys.push(geoKeyForOrder(record));
     for (const store of [env.PLANNING_ORDERS, env.OLD_KV].filter(Boolean)) {
       for (const name of new Set(keys)) {
@@ -669,27 +679,37 @@ async function forgetCustomerOrder(request, env) {
   return json({ ok: true, found, removed: [...removed] }, 200, env);
 }
 
-// The planner taking an order out of a proposal with the "−": it goes with DHL
-// or FVR, not with the van, until the planner puts it back. Kept apart from the
-// order record, which every Shopify webhook writes anew, and never sent to
-// Shopify. Gone by itself after 120 days, long after the order has shipped.
+// The planner overruling the planning's choice of carrier. The "−" in a
+// proposal: it goes with DHL or FVR, not with the van, until put back. "Toch
+// zelf bezorgen" (own: true, in the key's metadata): it goes with the van. That
+// one was kept in the browser it was chosen in, so the laptop said Meenemen
+// where the phone said DHL; now that the status goes to Shopify as a tag, the
+// two screens would take turns rewriting it. One key, so the two choices
+// exclude each other. Kept apart from the order record, which every Shopify
+// webhook writes anew. Gone by itself after 120 days, long after the order has
+// shipped.
 const SHIPPING_PREFIX = "shipping:";
+
+function knownOrderKey(orderKey) {
+  const split = orderKey.indexOf(":");
+  return split > 0 && KNOWN_SHOPS.includes(orderKey.slice(0, split)) && /^#[\w-]+$/.test(orderKey.slice(split + 1));
+}
 
 async function setOrderShipping(request, env) {
   const denied = plannerOnly(request, env);
   if (denied) return denied;
   const payload = await request.json().catch(() => ({}));
   const orderKey = String(payload.orderKey || "");
-  const split = orderKey.indexOf(":");
-  if (split < 0 || !KNOWN_SHOPS.includes(orderKey.slice(0, split)) || !/^#[\w-]+$/.test(orderKey.slice(split + 1))) {
-    return json({ error: "Onbekende order." }, 400, env);
-  }
-  if (payload.extern) {
-    await env.PLANNING_ORDERS.put(`${SHIPPING_PREFIX}${orderKey}`, JSON.stringify({ extern: true, at: new Date().toISOString() }), { expirationTtl: 120 * DAY_SECONDS });
-  } else {
-    await env.PLANNING_ORDERS.delete(`${SHIPPING_PREFIX}${orderKey}`);
-  }
-  return json({ ok: true, orderKey, extern: Boolean(payload.extern) }, 200, env);
+  if (!knownOrderKey(orderKey)) return json({ error: "Onbekende order." }, 400, env);
+  const key = `${SHIPPING_PREFIX}${orderKey}`;
+  const at = new Date().toISOString();
+  const extern = Boolean(payload.extern);
+  const own = !extern && Boolean(payload.own);
+  if (extern) await env.PLANNING_ORDERS.put(key, JSON.stringify({ extern: true, at }), { expirationTtl: 120 * DAY_SECONDS, metadata: { extern: true } });
+  else if (own) await env.PLANNING_ORDERS.put(key, JSON.stringify({ own: true, at }), { expirationTtl: 120 * DAY_SECONDS, metadata: { own: true } });
+  // "Terug naar de planning" and "Automatisch advies" alike: the planning decides again.
+  else await env.PLANNING_ORDERS.delete(key);
+  return json({ ok: true, orderKey, extern, own }, 200, env);
 }
 
 // Turned down as a concept in the agenda ("Afwijzen"): an order whose note
@@ -702,10 +722,7 @@ async function setOrderNoteConcept(request, env) {
   if (denied) return denied;
   const payload = await request.json().catch(() => ({}));
   const orderKey = String(payload.orderKey || "");
-  const split = orderKey.indexOf(":");
-  if (split < 0 || !KNOWN_SHOPS.includes(orderKey.slice(0, split)) || !/^#[\w-]+$/.test(orderKey.slice(split + 1))) {
-    return json({ error: "Onbekende order." }, 400, env);
-  }
+  if (!knownOrderKey(orderKey)) return json({ error: "Onbekende order." }, 400, env);
   if (payload.off) {
     await env.PLANNING_ORDERS.put(`${CONCEPT_OFF_PREFIX}${orderKey}`, JSON.stringify({ off: true, at: new Date().toISOString() }), { expirationTtl: 120 * DAY_SECONDS });
   } else {
@@ -1201,6 +1218,113 @@ async function setOwnDelivery(request, env) {
   const { failed } = await tagKeysOwnDelivery(env, [`${shopDomain}:${displayOrderId}`]);
   if (failed.length) return json({ error: "Shopify kon de tag 'eigen bezorging' niet zetten. Probeer het opnieuw." }, 502, env);
   return json({ ok: true, id: displayOrderId, tag: "eigen bezorging" }, 200, env);
+}
+
+// ---------------------------------------------------------------------------
+// The planning's status on the order in Shopify, as a tag: "Planning: FVR".
+// The planner's screen works the status out (the Worker does not plan) and
+// sends where it differs from the tag Shopify shows; this puts it there. One
+// at a time: the new tag goes on, the planning's other tags come off. Nothing
+// else on the order is touched, "eigen bezorging" included, and Shopify mails
+// nobody about a tag. None of these may contain "eigen bezorging", "van
+// roekel", "afhalen" or "ophalen": mapShopifyOrder reads those in the tags.
+// ---------------------------------------------------------------------------
+const STATUS_TAGS = {
+  bezorgen: "Planning: Bezorgen",
+  fvr: "Planning: FVR",
+  dhl: "Planning: DHL",
+  controleren: "Planning: Controleren",
+  wacht: "Planning: Wacht op datum",
+};
+// One Shopify call per order, ten orders a request: well inside the fifty calls
+// a request may make, and short enough to finish. The screen sends the rest in
+// turns.
+const STATUS_TAG_BATCH = 10;
+const STATUS_TAG_TIME_MS = 20_000;
+
+const SET_STATUS_TAG = `
+  mutation SetStatusTag($id: ID!, $add: [String!]!, $remove: [String!]!) {
+    tagsRemove(id: $id, tags: $remove) { userErrors { field message } }
+    tagsAdd(id: $id, tags: $add) { userErrors { field message } }
+  }
+`;
+const CLEAR_STATUS_TAG = `
+  mutation ClearStatusTag($id: ID!, $remove: [String!]!) {
+    tagsRemove(id: $id, tags: $remove) { userErrors { field message } }
+  }
+`;
+
+// Which of the planning's tags an order carries in Shopify, by status.
+function statusTagsIn(tags) {
+  const present = new Set(String(tags || "").split(",").map((tag) => tag.trim().toLowerCase()).filter(Boolean));
+  return Object.keys(STATUS_TAGS).filter((status) => present.has(STATUS_TAGS[status].toLowerCase()));
+}
+
+async function setStatusTags(request, env) {
+  const denied = plannerOnly(request, env);
+  if (denied) return denied;
+  const payload = await request.json().catch(() => ({}));
+  const asked = (Array.isArray(payload.orders) ? payload.orders : []).slice(0, STATUS_TAG_BATCH);
+  const started = Date.now();
+  const tokens = new Map();
+  const results = [];
+  let pause = false;
+  for (const entry of asked) {
+    const orderKey = String(entry?.orderKey || "");
+    const status = String(entry?.status || "");
+    if (!knownOrderKey(orderKey) || (status && !Object.hasOwn(STATUS_TAGS, status))) {
+      results.push({ orderKey, ok: false, error: "Onbekende order of status." });
+      continue;
+    }
+    // Shopify asked for a pause or did not answer, or this has run long
+    // enough: the rest comes with a later refresh.
+    if (pause || Date.now() - started > STATUS_TAG_TIME_MS) {
+      results.push({ orderKey, ok: false, later: true });
+      continue;
+    }
+    const recordKey = `order:${orderKey}`;
+    const order = await env.PLANNING_ORDERS.get(recordKey, "json");
+    if (!order?.shopifyOrderId) {
+      results.push({ orderKey, ok: false, gone: true });
+      continue;
+    }
+    if (!tokens.has(order.shopDomain)) tokens.set(order.shopDomain, await shopifyAdminToken(env, order.shopDomain));
+    const token = tokens.get(order.shopDomain);
+    if (!token) {
+      results.push({ orderKey, ok: false, error: "Geen Shopify-koppeling voor deze winkel." });
+      continue;
+    }
+    const tag = status ? STATUS_TAGS[status] : "";
+    const remove = Object.values(STATUS_TAGS).filter((name) => name !== tag);
+    let refused = [];
+    try {
+      const result = await shopifyGraphql(order.shopDomain, token, tag ? SET_STATUS_TAG : CLEAR_STATUS_TAG, tag ? { id: order.shopifyOrderId, add: [tag], remove } : { id: order.shopifyOrderId, remove });
+      refused = [...(result.data?.tagsRemove?.userErrors || []), ...(result.data?.tagsAdd?.userErrors || [])];
+    } catch (error) {
+      // No answer, or Shopify's budget for the moment spent: the same awaits
+      // every next order, so they wait together. Any other no is this order's.
+      if (!error?.answered || /throttled/i.test(String(error.message))) {
+        pause = true;
+        results.push({ orderKey, ok: false, later: true });
+      } else {
+        results.push({ orderKey, ok: false, error: "Shopify weigerde de tag." });
+      }
+      continue;
+    }
+    if (refused.length) {
+      results.push({ orderKey, ok: false, error: String(refused[0].message || "Shopify weigerde de tag.").slice(0, 200) });
+      continue;
+    }
+    const tags = status ? [status] : [];
+    // On the record at once, so the next refresh does not send it again before
+    // Shopify's webhook brings the same. Read again first: a webhook may have
+    // written it meanwhile. A cancelled order's record runs out a fortnight
+    // after the cancellation and is left alone: written anew it would stay.
+    const fresh = await env.PLANNING_ORDERS.get(recordKey, "json");
+    if (fresh && !fresh.cancelled) await env.PLANNING_ORDERS.put(recordKey, JSON.stringify({ ...fresh, planningTags: tags }));
+    results.push({ orderKey, ok: true, tags });
+  }
+  return json({ ok: true, results }, 200, env);
 }
 
 async function appendOrderPlanningNote(shopDomain, token, shopifyOrderId, lines) {
@@ -2413,7 +2537,13 @@ async function shopifyGraphql(shopDomain, token, query, variables) {
     signal: AbortSignal.timeout(15000),
   });
   const data = await response.json();
-  if (!response.ok || data.errors) throw new Error(JSON.stringify(data.errors || data).slice(0, 300));
+  if (!response.ok || data.errors) {
+    const error = new Error(JSON.stringify(data.errors || data).slice(0, 300));
+    // Shopify answered, and said no: unlike a call that got no answer. Too
+    // busy (429) or down (5xx) is a no for now, not for this order.
+    error.answered = response.status !== 429 && response.status < 500;
+    throw error;
+  }
   return data;
 }
 
@@ -3182,6 +3312,9 @@ export function mapShopifyOrder(order, shopDomain = "") {
     // Tagged in Shopify as delivered by the van, by the planning or by hand. A
     // parcel tagged so is skipped by whoever prints the DHL labels.
     ownDeliveryTagged: /(^|,)\s*eigen bezorging\s*(,|$)/.test(tags),
+    // The planning's status as Shopify shows it ("Planning: FVR"), so the
+    // planner's screen only sends what differs.
+    planningTags: statusTagsIn(order.tags),
     shopifyUpdatedAt: shopifyTime(order.updated_at),
   });
 }
