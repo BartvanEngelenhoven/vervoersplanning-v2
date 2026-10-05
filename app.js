@@ -598,7 +598,7 @@ function renderRules() {
     ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Anders via DHL.`],
     ["Niet met de bus", "Wat niet met de bus kan, gaat met een vervoerder: rijplaten met FVR, slowfeeders met DHL. Rijdt er een rit vlak langs, dan gaat hij toch mee als de rit er hooguit een uur langer van wordt."],
     ["Datums in de opmerking", "Staat er in de opmerking van een order een dag, dan gaat die voor de dag van de webshop. 'Bezorging 7 oktober' is op die dag; 'uiterlijk' of 'voor' een laatste dag; 'vanaf', 'na' of 'niet voor' een eerste; 'tussen 5 en 9 oktober' of 'week 41' een periode; 'niet op' of 'niet thuis' een dag die niet kan. Een order met één vaste dag staat meteen als concept op die dag in de agenda; Inplannen maakt er een rit van. Een order die pas vanaf een dag mag, of binnen een periode, wacht en komt de werkdag ervoor in de voorstellen. Wat de planning niet zeker kan plaatsen ('dinsdag', 'volgende week', twee dagen die botsen), staat onder Controleren."],
-    ["Uit een voorstel gehaald", "Met het min-teken haal je een order uit een voorstel. Hij gaat dan met FVR (rijplaten) of DHL (slowfeeders) en komt niet meer in een voorstel. Onder Orders zet Terug naar de planning hem terug."],
+    ["Uit een voorstel gehaald", "Met het min-teken haal je een order uit een voorstel, of onder Orders met Met DHL of Met FVR. Hij gaat dan met FVR (rijplaten) of DHL (slowfeeders) en komt niet meer in een voorstel. Onder Orders zet Terug naar de planning hem terug."],
     ["Al het andere", `Gaat via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit ${formatMinutes(CONFIG.packageDetourMinutes)} langer van worden. Zo'n pakket krijgt bij het inplannen in Shopify de tag 'eigen bezorging', zodat het niet ook met DHL meegaat.`],
     ["Net erover", v3
       ? `Zit een groep orders tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan staat hij als rit onder Controleren: met één klik inplannen, of eerst een order eruit halen.`
@@ -1957,6 +1957,12 @@ function renderOrders() {
     const order = state.allOrders.find((item) => orderKey(item) === button.dataset.orderKey);
     button.addEventListener("click", () => setExternal(order, false, button));
   });
+  document.querySelectorAll(".send-extern").forEach((button) => {
+    const order = state.allOrders.find((item) => orderKey(item) === button.dataset.orderKey);
+    button.addEventListener("click", () => {
+      if (order && window.confirm(`${order.id} met ${carrierOf(order)} versturen? Hij komt dan niet meer in een voorstel. Terugzetten kan met Terug naar de planning.`)) setExternal(order, true, button);
+    });
+  });
   document.querySelectorAll(".clear-force-include").forEach((button) => {
     const order = state.orders.find((item) => orderKey(item) === button.dataset.orderKey);
     button.addEventListener("click", () => clearForceInclude(order));
@@ -2049,8 +2055,16 @@ function manualActionButton(item, key, isForced) {
   const terug = item.order.noteConceptOff && noteDayOf(item.order) && !isForced ? `<button class="button subtle-action note-concept-back" type="button" data-order-key="${key}">Weer als concept in de agenda</button>` : "";
   if (terug) return `${terug}${item.decision === "include" ? "" : `<button class="button manual-action force-include" type="button" data-order-key="${key}">Toch zelf bezorgen</button>`}`;
   if (isForced) return `<button class="button subtle-action clear-force-include" type="button" data-order-key="${key}">Automatisch advies</button>`;
-  if (item.decision === "include") return "";
-  return `<button class="button manual-action force-include" type="button" data-order-key="${key}">Toch zelf bezorgen</button>`;
+  if (item.decision === "include") return sendOutButton(item, key);
+  return `${sendOutButton(item, key)}<button class="button manual-action force-include" type="button" data-order-key="${key}">Toch zelf bezorgen</button>`;
+}
+
+// The other way round from "Toch zelf bezorgen": an order the planning would
+// take along, or leaves to the planner, goes with DHL or FVR after all. The same
+// as the "−" in a proposal, so "Terug naar de planning" undoes it.
+function sendOutButton(item, key) {
+  if (!["include", "review", "wait"].includes(item.decision)) return "";
+  return `<button class="button subtle-action send-extern" type="button" data-order-key="${key}">Met ${carrierOf(item.order)}</button>`;
 }
 
 function renderRoutes() {
@@ -2437,7 +2451,8 @@ async function setExternal(order, extern, button = null) {
     if (button) button.disabled = false;
     return;
   }
-  for (const item of state.allOrders) if (orderKey(item) === orderKey(order)) item.extern = extern;
+  // One record on the Worker holds either choice, so this one replaces "Toch zelf bezorgen".
+  for (const item of state.allOrders) if (orderKey(item) === orderKey(order)) Object.assign(item, { extern }, extern ? { forcedOwn: false } : {});
   rebuildPlanning();
 }
 

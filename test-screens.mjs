@@ -1008,6 +1008,23 @@ await test("Toch zelf bezorgen gaat naar de Worker, zodat elk scherm hetzelfde z
   assert.equal(nogOpen.forcedOwn, true);
 });
 
+await test("Met DHL of Met FVR: een order die mee zou gaan of onder Controleren staat, gaat toch met de vervoerder", async () => {
+  realClock();
+  const onbetaald = order("Doorn", 52.03, 5.32, { paid: false });
+  scene({ role: "planner", orders: [onbetaald] });
+  const item = besluit(onbetaald);
+  assert.equal(item.decision, "review");
+  const carrier = fn.carrierOf(onbetaald);
+  assert.match(fn.manualActionButton(item, key(onbetaald), false), new RegExp(`send-extern[^>]*>Met ${carrier}<`));
+  const calls = worker({ "/orders/shipping": (body) => [200, { ok: true, orderKey: body.orderKey, extern: body.extern }] });
+  onbetaald.forcedOwn = true;
+  await fn.setExternal(onbetaald, true);
+  assert.deepEqual(calls.at(-1).body, { orderKey: key(onbetaald), extern: true });
+  assert.equal(onbetaald.forcedOwn, false, "één keuze tegelijk, zoals op de Worker");
+  assert.equal(besluit(onbetaald).external, true);
+  assert.doesNotMatch(fn.manualActionButton(besluit(onbetaald), key(onbetaald), false), /send-extern/);
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);
