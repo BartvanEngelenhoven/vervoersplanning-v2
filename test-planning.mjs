@@ -182,13 +182,29 @@ test("een ingeplande order komt niet nog eens in een voorstel en leent geen budg
   assert.ok(erbij.some((kandidaat) => kandidaat.item.order.id === b.id));
 });
 
-test("een pakket naast een rit gaat mee, maar nooit voorbij 5:45", () => {
+test("een pakket gaat altijd met DHL, ook naast een rit; een ruif is nu ook een pakket", () => {
   const plaat = order("Veenendaal", 52.03, 5.56);
   const pakket = order("Rhenen", 51.96, 5.57, { shop: DSP, products: ["1x Pure Psyllium - Vlozaad"] });
-  const uitkomst = plan(v3, [plaat, pakket]);
-  assert.equal(uitkomst.decision(pakket), "include");
-  assert.equal(uitkomst.routes.length, 1);
-  for (const route of plan(v3, [plaat, pakket]).routes) assert.ok(route.totalMinutes <= 345);
+  const losseRuif = order("Ede", 52.04, 5.66, { shop: DSP, products: ["1x Vierkante slowfeeder ruif 120 x 120 cm"] });
+  for (const regels of [v2, v3]) {
+    const uitkomst = plan(regels, [plaat, pakket, losseRuif]);
+    assert.equal(uitkomst.decision(pakket), "dhl");
+    assert.equal(uitkomst.decision(losseRuif), "dhl");
+    assert.equal(uitkomst.routes.length, 1);
+  }
+});
+
+test("een XXL bak buiten zijn budget lift mee als de rit hooguit een half uur langer wordt, nooit voorbij 5:45", () => {
+  const xxl = ["1x Slowfeeder XXL (1 kuub) GRIJS"];
+  const plaat = order("Zwolle", 52.51, 6.09);
+  const dichtbij = order("Hattem", 52.47, 6.06, { shop: DSP, products: xxl });
+  const omweg = order("Emmen", 52.78, 6.90, { shop: DSP, products: xxl });
+  for (const regels of [v2, v3]) {
+    const uitkomst = plan(regels, [plaat, dichtbij, omweg]);
+    assert.equal(uitkomst.decision(dichtbij), "include", `Hattem ligt op de route: ${uitkomst.reason(dichtbij)}`);
+    assert.equal(uitkomst.decision(omweg), "dhl", "Emmen kost meer dan een half uur");
+    for (const route of uitkomst.routes) assert.ok(route.totalMinutes <= 345);
+  }
 });
 
 test("een getagd pakket in geen rit staat op Controleren, niet stil bij DHL", () => {
@@ -280,7 +296,7 @@ test("de bezorger krijgt een concept-order niet aangeboden", () => {
 });
 
 const dagGrens = 345;
-const ruif = ["1x Vierkante slowfeeder ruif 120 x 120 cm"];
+const ruif = hooihuisje;
 
 test("een richting met meer dan een dag werk wordt meer dan één rit", () => {
   const geijsteren = order("Geijsteren", 51.56, 6.03);
@@ -365,7 +381,7 @@ test("een pakket dat al in een eigen rit zit, komt er niet nog een keer bij", ()
   }
 });
 
-test("Kan er makkelijk bij biedt een pakket alleen aan als de rit hooguit een uur langer wordt", () => {
+test("Kan er makkelijk bij biedt geen gewoon pakket aan", () => {
   const veenendaal = order("Veenendaal", 52.03, 5.56);
   const utrecht = order("Utrecht", 52.09, 5.12, { shop: DSP, products: ["1x Slowfeeder hooinet"] });
   const renswoude = order("Renswoude", 52.07, 5.54, { shop: DSP, products: ["1x Slowfeeder hooinet"] });
@@ -377,8 +393,9 @@ test("Kan er makkelijk bij biedt een pakket alleen aan als de rit hooguit een uu
     const aangeboden = fn.nearbySuggestions().map((entry) => entry.order.id);
     const opRit = state.routes[0].orders.map((item) => item.id);
     state.manualRoute = null;
-    assert.ok(!aangeboden.includes(utrecht.id), "Utrecht kost meer dan een uur");
-    assert.ok(!aangeboden.includes(renswoude.id) || !opRit.includes(renswoude.id), "wat al meerijdt, wordt niet nog eens aangeboden");
+    assert.ok(!aangeboden.includes(utrecht.id), "pakketten gaan met DHL");
+    assert.ok(!aangeboden.includes(renswoude.id), "ook vlak langs de rit");
+    assert.ok(!opRit.includes(renswoude.id));
   }
 });
 
@@ -402,15 +419,17 @@ test("nieuwe regels: een buur over de windrichting die een ander eruit zou duwen
   assert.equal(uitkomst.decision(hoogeveen), "include");
 });
 
-test("nieuwe regels: een rit net over budget staat heel onder Controleren, met de ruif waarmee hij gewogen is", () => {
-  const zwolle = order("Zwolle", 52.51, 6.09, { shop: DSP, products: ruif });
-  const drachten = order("Drachten", 53.11, 6.10);
-  const uitkomst = plan(v3, [zwolle, drachten]);
-  assert.equal(uitkomst.decision(drachten), "review");
-  const controle = uitkomst.reviewRoutes.find((route) => route.orders.includes(drachten));
-  assert.ok(controle, "Drachten staat in een rit onder Controleren");
-  assert.ok(controle.orders.includes(zwolle), "met de ruif erbij");
-  assert.ok(!uitkomst.routes.some((route) => route.orders.includes(zwolle)), "de ruif staat niet ook nog als los voorstel");
+test("nieuwe regels: een rit net over budget staat heel onder Controleren, met het hooihuisje waarmee hij gewogen is", () => {
+  // The hay house unloads for 90 minutes, so it sits closer to Ede than the
+  // ruif in Zwolle did (October 2026, when the ruif became a DHL parcel).
+  const apeldoorn = order("Apeldoorn", 52.21, 5.97, { shop: DSP, products: hooihuisje });
+  const hardenberg = order("Hardenberg", 52.57, 6.60);
+  const uitkomst = plan(v3, [apeldoorn, hardenberg]);
+  assert.equal(uitkomst.decision(hardenberg), "review", uitkomst.reason(hardenberg));
+  const controle = uitkomst.reviewRoutes.find((route) => route.orders.includes(hardenberg));
+  assert.ok(controle, "Hardenberg staat in een rit onder Controleren");
+  assert.ok(controle.orders.includes(apeldoorn), "met het hooihuisje erbij");
+  assert.ok(!uitkomst.routes.some((route) => route.orders.includes(apeldoorn)), "het hooihuisje staat niet ook nog als los voorstel");
 });
 
 test("Kan er nog bij zet een nieuwe stop nooit tussen stops die vandaag al bezorgd zijn", () => {

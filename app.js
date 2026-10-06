@@ -10,9 +10,10 @@ const CONFIG = {
   // Drive times are straight-line estimates, so a trip that lands just over
   // budget is within the noise. Up to this much over, the planner decides.
   budgetTolerance: 0.2,
-  // A DHL parcel rides along when a planned route grows no more than this,
-  // unloading included. It never justifies a trip of its own.
-  packageDetourMinutes: 60,
+  // An XXL bak past its own budget rides along when a planned route grows no
+  // more than this, unloading included. Plain parcels never ride along: since
+  // October 2026 they always go with DHL (Bart's rule).
+  xxlDetourMinutes: 30,
   maxRouteMinutes: 330,
   nearlyOverMinutes: 15,
   // Orders on either side of a compass line pool their budgets when they lie
@@ -52,20 +53,10 @@ const transportRules = {
   xxl: { label: "XXL bak", budgetMinutes: 60, overflow: "dhl" },
 };
 
-// The Slowfeeder collection that always goes by own transport, whatever the
-// distance, matched on the distinctive start of each title. Seven entries cover
-// eight products: both round feeders begin the same way. Renaming one of these
-// in Shopify quietly drops it to DHL, so this list and that collection have to
-// be kept in step.
-const alwaysOwnTransportProducts = [
-  "vierkante slowfeeder ruif",
-  "slowfeeder hooihuisje",
-  "haybell hooistolp",
-  "vierkante slowfeeder hooiruif",
-  "ronde ruif met slowfeedernet",
-  "compacte vierkante slowfeeder hooiruif",
-  "patura klima",
-];
+// Of the slowfeeders only the hay house always goes by own transport, whatever
+// the distance (Bart, October 2026). The ruiven, the Haybell and the Patura Klima
+// were on this list until then; they now go with DHL like any parcel.
+const alwaysOwnTransportProducts = ["hooihuisje", "hoihuisje"];
 // "Toch zelf bezorgen" as this browser kept it until October 2026. The Worker
 // keeps the choice now (forcedOwn on the order), so every screen says the same;
 // what is still here moves there once (moveForcedIncludes) and goes.
@@ -594,12 +585,12 @@ function renderRules() {
   const dagGrens = formatMinutes(CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes);
   const kaarten = [
     ["Rijplaten", `Altijd eigen bezorging ${budget(transportRules.rijplaten)}. Orders in dezelfde rit tellen hun tijd bij elkaar op, dus samen mogen ze verder${v3 ? `. Liggen twee orders vlak bij elkaar maar net aan weerszijden van een windrichting (binnen ${CONFIG.neighbourPoolKm} km), dan tellen ze toch samen` : ""}.`],
-    ["Grote slowfeeders", `${alwaysOwnTransportProducts.length} producttitels uit de vaste lijst gaan altijd zelf, ${budget(transportRules.alwaysOwn)}.${v3 ? " Rijplaten en XXL bakken dezelfde kant op rijden mee als de extra rijtijd binnen hun eigen budget past; het hooihuisje maakt hun budget niet groter." : ""}`],
-    ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Anders via DHL.`],
-    ["Niet met de bus", "Wat niet met de bus kan, gaat met een vervoerder: rijplaten met FVR, slowfeeders met DHL. Rijdt er een rit vlak langs, dan gaat hij toch mee als de rit er hooguit een uur langer van wordt."],
+    ["Hooihuisje", `Gaat altijd zelf, ${budget(transportRules.alwaysOwn)}.${v3 ? " Rijplaten en XXL bakken dezelfde kant op rijden mee als de extra rijtijd binnen hun eigen budget past; het hooihuisje maakt hun budget niet groter." : ""}`],
+    ["XXL bakken", `Eigen bezorging ${budget(transportRules.xxl)}, ook weer met de tijd van andere orders erbij opgeteld. Verder weg gaat hij alleen mee als een rit er hooguit ${formatMinutes(CONFIG.xxlDetourMinutes)} langer van wordt. Anders via DHL.`],
+    ["Niet met de bus", "Wat niet met de bus kan, gaat met een vervoerder: rijplaten met FVR, slowfeeders met DHL."],
     ["Datums in de opmerking", "Staat er in de opmerking van een order een dag, dan gaat die voor de dag van de webshop. 'Bezorging 7 oktober' is op die dag; 'uiterlijk' of 'voor' een laatste dag; 'vanaf', 'na' of 'niet voor' een eerste; 'tussen 5 en 9 oktober' of 'week 41' een periode; 'niet op' of 'niet thuis' een dag die niet kan. Een order met één vaste dag staat meteen als concept op die dag in de agenda; Inplannen maakt er een rit van. Een order die pas vanaf een dag mag, of binnen een periode, wacht en komt de werkdag ervoor in de voorstellen. Wat de planning niet zeker kan plaatsen ('dinsdag', 'volgende week', twee dagen die botsen), staat onder Controleren."],
     ["Uit een voorstel gehaald", "Met het min-teken haal je een order uit een voorstel, of onder Orders met Met DHL of Met FVR. Hij gaat dan met FVR (rijplaten) of DHL (slowfeeders) en komt niet meer in een voorstel. Onder Orders zet Terug naar de planning hem terug."],
-    ["Al het andere", `Gaat via DHL, tenzij er een rit vlak langs rijdt: dan mag de rit er hooguit ${formatMinutes(CONFIG.packageDetourMinutes)} langer van worden. Zo'n pakket krijgt bij het inplannen in Shopify de tag 'eigen bezorging', zodat het niet ook met DHL meegaat.`],
+    ["Al het andere", "Slowfeeder-pakketten gaan altijd met DHL, ook als er een rit vlak langs rijdt. Wil je er toch een zelf bezorgen, kies dan Toch zelf bezorgen: hij krijgt dan in Shopify de tag 'eigen bezorging', zodat hij niet ook met DHL meegaat."],
     ["Net erover", v3
       ? `Zit een groep orders tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan staat hij als rit onder Controleren: met één klik inplannen, of eerst een order eruit halen.`
       : `Zit een rit tot ${Math.round(CONFIG.budgetTolerance * 100)}% boven het budget, dan komen de orders bij Controleren te staan in plaats van dat ze afvallen.`],
@@ -609,7 +600,7 @@ function renderRules() {
     ["Aankondiging", state.announceLive
       ? "Om 16:00 de dag voor een ingeplande rit gaan de betaalde orders in Shopify op verzonden, met de verzendmail aan de klant. Bezorgd melden stuurt daarna geen tweede mail."
       : "Staat op proef. Om 16:00 de dag voor een ingeplande rit schrijft het systeem in de agenda op welke orders het zou aankondigen, maar er gaat niets naar Shopify en niets naar klanten."],
-    ["Lengte van een dag", `Ritten starten en eindigen op ${CONFIG.depot}. Orders dezelfde kant op worden geknipt in ritten van hooguit ${dagGrens}, en elke rit moet passen binnen de budgetten van zijn eigen orders; zo komen er zoveel ritten als er werk is. Boven ${formatMinutes(CONFIG.maxRouteMinutes)} volgt een waarschuwing. Pakketten liften mee zolang de rit onder ${dagGrens} blijft.`],
+    ["Lengte van een dag", `Ritten starten en eindigen op ${CONFIG.depot}. Orders dezelfde kant op worden geknipt in ritten van hooguit ${dagGrens}, en elke rit moet passen binnen de budgetten van zijn eigen orders; zo komen er zoveel ritten als er werk is. Boven ${formatMinutes(CONFIG.maxRouteMinutes)} volgt een waarschuwing. Een XXL bak lift alleen mee zolang de rit onder ${dagGrens} blijft.`],
     ["Buitenland", "Een adres in België wordt geschat uit de postcode. Een adres in een ander land staat onder Controleren: daar is de rijtijd niet te schatten. Kies je Toch zelf bezorgen, dan wordt het een eigen rit met de melding Rijtijd onbekend."],
   ];
   holder.innerHTML = kaarten.map(([titel, tekst]) => `<article><b>${titel}</b><p>${escapeHtml(tekst)}</p></article>`).join("");
@@ -1986,7 +1977,7 @@ function groupedOrderSections(items) {
     ["review", "Controleren", "Betaling, afspraak, adres, een onduidelijke dag in de opmerking, of net boven het budget: jij beslist"],
     ["wait", "Wacht op datum", "Volgens de opmerking pas later: ze komen de werkdag ervoor in de voorstellen"],
     ["fvr", "FVR", "Rijplaten die niet met de bus kunnen: buiten het budget, of door de planner uit een voorstel gehaald"],
-    ["dhl", "DHL", "Slowfeeders die niet met de bus gaan: niet op de vaste lijst, een XXL bak buiten zijn budget, of door de planner uit een voorstel gehaald"],
+    ["dhl", "DHL", "Slowfeeders die niet met de bus gaan: alle pakketten, een XXL bak buiten zijn budget, of door de planner uit een voorstel gehaald"],
     ["exclude", "Niet meenemen", "Geannuleerd, terugbetaald, afgehaald of al verzonden"],
   ];
   return groups
@@ -2937,9 +2928,11 @@ function addNearbyPackages() {
   // A parcel already on a hand-made route is a stop of it: merged in a second
   // time it showed twice, with two Bezorgd buttons and 25 minutes too many.
   const onRoute = new Set(state.routes.flatMap((route) => route.orders.map(orderKey)));
-  // Parcels only: rijplaten past their budget (FVR) are offered on a planned
-  // route instead, weighed against their own budget, as before.
-  const parcels = state.decisions.filter((entry) => (entry.decision === "dhl" && (!entry.plan || entry.plan === transportRules.xxl)) || entry.taggedParcel);
+  // XXL bakken past their budget only: plain parcels always go with DHL, and
+  // rijplaten past their budget (FVR) are offered on a planned route instead,
+  // weighed against their own budget, as before. A parcel tagged own delivery
+  // by hand was the planner's choice, and still rides along.
+  const parcels = state.decisions.filter((entry) => (entry.decision === "dhl" && entry.plan === transportRules.xxl) || entry.taggedParcel);
   for (const item of parcels) {
     const order = item.order;
     if (!order.addressComplete || !order.paid || order.deliveryAppointmentLocked) continue;
@@ -2958,7 +2951,7 @@ function addNearbyPackages() {
       if (route.unknownPoint) return;
       const merged = routeSummary(route.region, optimizedStopOrder([...route.orders, order]));
       const grows = merged.totalMinutes - route.totalMinutes;
-      if (grows > CONFIG.packageDetourMinutes || merged.totalMinutes > dayLimit) return;
+      if (grows > CONFIG.xxlDetourMinutes || merged.totalMinutes > dayLimit) return;
       if (!best || grows < best.grows) best = { index, grows, merged };
     });
     if (!best) continue;
@@ -4270,11 +4263,11 @@ function additionFor(orders, order, from = 0) {
   return { position, extra: merged.totalMinutes - basis.totalMinutes, extraDrive: merged.driveMinutes - basis.driveMinutes, totaal: merged.totalMinutes, load: merged.load, loadKnown: merged.loadKnown };
 }
 
-// What may join is what the rules would let join: a parcel when the route grows
-// by at most an hour, unloading included; a rijplaten order or XXL bak when the
-// extra driving stays within its own budget, as in a new route; a hay house
-// always. Every order used to be held to the parcel's hour, and a rijplaten
-// order an hour and a half's drive away was never offered.
+// What may join is what the rules would let join: a rijplaten order or XXL bak
+// when the extra driving stays within its own budget, as in a new route; an XXL
+// bak past it when the route grows by at most half an hour, unloading included;
+// a hay house always. A plain parcel goes with DHL and is not offered, unless
+// the planner tagged it own delivery.
 function fitsAsAddition(fit, order, decision) {
   if (fit.totaal > CONFIG.maxRouteMinutes + CONFIG.nearlyOverMinutes) return false;
   if (fit.loadKnown && fit.load > CONFIG.vehicleCapacityKg) return false;
@@ -4282,7 +4275,8 @@ function fitsAsAddition(fit, order, decision) {
   // An XXL bak past its budget travels as a parcel would. Rijplaten past theirs
   // (FVR) still pay their own way, as when they were called "te ver".
   if (plan && !(plan === transportRules.xxl && decision === "dhl")) return fit.extraDrive <= plan.budgetMinutes;
-  return fit.extra <= CONFIG.packageDetourMinutes;
+  if (!plan && !order.ownDeliveryTagged) return false;
+  return fit.extra <= CONFIG.xxlDetourMinutes;
 }
 
 // ---------------------------------------------------------------------------
