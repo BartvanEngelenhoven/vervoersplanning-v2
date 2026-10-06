@@ -178,9 +178,13 @@ function decide(order) {
 
 function applyManualDecision(order, automatic) {
   if (!isForcedOwn(order) || order.extern) return automatic;
-  if (order.cancelled || order.fulfilled || order.refunded || order.deliveryMethod === "pickup") return automatic;
+  if (order.cancelled || order.fulfilled || order.refunded) return automatic;
   // Chosen by hand, but not without an address to drive to.
   if (!order.addressComplete) return automatic;
+  // A pickup the van fetches from the customer after all (Bert, October 2026:
+  // "deze moeten wij zelf afhalen"). Shopify still calls it a pickup, so no
+  // shipping mail goes out for it.
+  if (order.deliveryMethod === "pickup") return { decision: "include", forced: true, reason: "Wij halen hem zelf op bij de klant (Zelf ophalen)" };
   return { decision: "include", forced: true, reason: "Handmatig meegenomen (Toch zelf bezorgen)" };
 }
 
@@ -2040,7 +2044,11 @@ function selectedOrdersList() {
 
 function manualActionButton(item, key, isForced) {
   if (item.decision === "planned" || item.decision === "concept") return "";
-  if (item.order.cancelled || item.order.fulfilled || item.order.refunded || item.order.deliveryMethod === "pickup") return "";
+  if (item.order.cancelled || item.order.fulfilled || item.order.refunded) return "";
+  if (item.order.deliveryMethod === "pickup") {
+    if (isForced) return `<button class="button subtle-action clear-force-include" type="button" data-order-key="${key}">Automatisch advies</button>`;
+    return item.order.addressComplete ? `<button class="button manual-action force-include" type="button" data-order-key="${key}">Zelf ophalen</button>` : "";
+  }
   if (item.order.extern) return `<button class="button manual-action clear-extern" type="button" data-order-key="${key}">Terug naar de planning</button>`;
   // Turned down as a concept in the agenda: it can go back there, next to the usual choice.
   const terug = item.order.noteConceptOff && noteDayOf(item.order) && !isForced ? `<button class="button subtle-action note-concept-back" type="button" data-order-key="${key}">Weer als concept in de agenda</button>` : "";
@@ -2688,6 +2696,12 @@ function saveForcedIncludes() {
 async function forceInclude(order) {
   if (!order) return false;
   if (!ensureOperatorKey()) return false;
+  if (order.deliveryMethod === "pickup") {
+    if (!window.confirm(`${order.id} zelf ophalen bij de klant? Hij komt dan in de planning als een stop van de bus.`)) return false;
+    if (!(await saveOwnChoice(order, true))) return false;
+    await refreshData();
+    return true;
+  }
   const tag = needsOwnDeliveryTag(order);
   if (!window.confirm(tag
     ? `${order.id} toch zelf bezorgen? Hij krijgt in Shopify de tag 'eigen bezorging', zodat hij niet ook met DHL meegaat.`

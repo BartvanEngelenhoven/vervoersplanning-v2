@@ -1025,6 +1025,22 @@ await test("Met DHL of Met FVR: een order die mee zou gaan of onder Controleren 
   assert.doesNotMatch(fn.manualActionButton(besluit(onbetaald), key(onbetaald), false), /send-extern/);
 });
 
+await test("Zelf ophalen: een afhaalorder die wij bij de klant ophalen, komt in de planning", async () => {
+  realClock();
+  const ophalen = order("Doorn", 52.03, 5.32, { deliveryMethod: "pickup" });
+  scene({ role: "planner", orders: [ophalen] });
+  assert.equal(besluit(ophalen).decision, "exclude");
+  assert.match(fn.manualActionButton(besluit(ophalen), key(ophalen), false), /force-include[^>]*>Zelf ophalen</);
+  const calls = worker({ "/orders/shipping": (body) => [200, { ok: true, orderKey: body.orderKey, own: body.own, extern: false }] });
+  fn.refreshData = async () => fn.rebuildPlanning();
+  assert.equal(await fn.forceInclude(ophalen), true);
+  assert.deepEqual(calls.map((call) => call.path), ["/orders/shipping"], "geen tag eigen bezorging");
+  assert.equal(besluit(ophalen).decision, "include");
+  assert.match(besluit(ophalen).reason, /zelf op/);
+  await fn.clearForceInclude(ophalen);
+  assert.equal(besluit(ophalen).decision, "exclude");
+});
+
 let failed = 0;
 for (const [status, name, error] of results) {
   console.log(`${status === "ok" ? "✓" : "✗"} ${name}`);
