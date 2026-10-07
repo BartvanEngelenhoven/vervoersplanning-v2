@@ -4552,7 +4552,7 @@ function renderConcepts() {
   }
   if (!holder) return;
   if (!state.concepts.length && !uitOpmerking.length) {
-    holder.innerHTML = '<p class="empty">Nog geen concepten. Kies bij een rit op Vandaag <b>Opslaan als concept</b>. Orders waarvan de opmerking een vaste dag noemt, komen hier vanzelf.</p>';
+    holder.innerHTML = '<p class="empty">Nog geen concepten. Kies bij een rit op Home <b>Opslaan als concept</b>. Orders waarvan de opmerking een vaste dag noemt, komen hier vanzelf.</p>';
     return;
   }
   const vandaag = dateFromIso(isoDay(new Date()));
