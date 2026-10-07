@@ -1437,6 +1437,38 @@ await test("bezorgers: de planner maakt ze aan, elk met een eigen code, en allee
   assert.deepEqual((await call(env, "GET", "/whoami", { key: PLANNER })).data, { role: "planner" });
 });
 
+await test("bekijk als bezorger: de planner ziet precies het scherm van die bezorger, en kan daarbij niets veranderen", async () => {
+  const env = makeEnv();
+  const sanne = await addDriver(env, "Sanne");
+  const joost = await addDriver(env, "Joost");
+  const a = await seedPlaced(env, DRS, "#DRS950", { city: "Doorn", zip: "3941 BX", lat: 52.03, lon: 5.32 });
+  const b = await seedPlaced(env, DRS, "#DRS951", { city: "Zeist", zip: "3701 AA", lat: 52.09, lon: 5.23 });
+  const plant = async (name, keys, driverId) => (await call(env, "POST", "/plan/assign", { key: PLANNER, body: { date: amsterdamDay(0), name, orderKeys: keys, driverId } })).data.route;
+  const vanSanne = await plant("Doorn", [a.key], sanne.id);
+  await plant("Zeist", [b.key], joost.id);
+
+  const meekijken = { "x-view-as": sanne.id };
+  const zelf = (await call(env, "GET", "/plan", { key: sanne.code })).data;
+  const mee = (await call(env, "GET", "/plan", { key: PLANNER, headers: meekijken })).data;
+  assert.deepEqual(mee.routes.map((route) => route.id), [vanSanne.id], "alleen de ritten van Sanne");
+  assert.deepEqual(mee.driver, zelf.driver);
+  assert.deepEqual(mee.stops.map((stop) => stop.id), zelf.stops.map((stop) => stop.id));
+  assert.ok(!("drivers" in mee), "geen codes in dit scherm");
+  assert.deepEqual((await call(env, "GET", "/whoami", { key: PLANNER, headers: meekijken })).data, { role: "driver", driver: { id: sanne.id, name: "Sanne", lang: "nl" } });
+  const orders = (await call(env, "GET", "/orders", { key: PLANNER, headers: meekijken })).data;
+  assert.ok(orders.every((order) => !("phone" in order)), "zoals de telefoon het krijgt");
+
+  const bezorgd = await call(env, "POST", "/actions/mark-delivered", { key: PLANNER, headers: meekijken, body: { id: a.order.id, shopDomain: DRS, shopifyOrderId: a.order.shopifyOrderId } });
+  assert.equal(bezorgd.status, 403);
+  assert.match(bezorgd.data.error, /meekijken/);
+  assert.equal(await env.PLANNING_ORDERS.get(`delivered:${a.key}`), null, "niets gemeld");
+
+  assert.equal((await call(env, "GET", "/plan", { key: PLANNER, headers: { "x-view-as": "bestaat-niet" } })).status, 404);
+  assert.equal((await call(env, "GET", "/plan", { key: joost.code, headers: meekijken })).data.driver.id, joost.id, "een bezorger kan niet bij een ander meekijken");
+  assert.equal((await call(env, "GET", "/plan", { headers: meekijken })).status, 401, "zonder code niets");
+  assert.ok("drivers" in (await call(env, "GET", "/plan", { key: PLANNER })).data, "zonder de kop gewoon de planner");
+});
+
 await test("een bezorger ziet alleen de eigen ritten, en kan niets met die van een ander", async () => {
   const env = makeEnv();
   const sanne = await addDriver(env, "Sanne");

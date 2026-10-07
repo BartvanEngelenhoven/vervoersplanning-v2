@@ -68,6 +68,16 @@ const roleStorageKey = "vervoersplanning.role.v1";
 // Which driver the code belongs to, so the phone says "Welkom Sanne" before, or
 // without, a connection. null: the shared code from before drivers had names.
 const driverStorageKey = "vervoersplanning.driver.v1";
+// "Bekijk als bezorger": a tab opened from Bezorgers with ?meekijken=<id> shows
+// that driver's screen, read-only, with the planner's own code. Nothing about
+// the role is stored there, so the planner's other tabs stay the planner's.
+const viewAsDriverId = (() => {
+  try {
+    return new URLSearchParams(window.location.search).get("meekijken") || "";
+  } catch {
+    return "";
+  }
+})();
 // One-off clean-up of leftovers from before the planning went live: orders due
 // before this date stay out of sight here. Shopify is untouched and the records
 // are still in the store, so this is undone by removing the date. An order due
@@ -618,6 +628,11 @@ async function fetchRole() {
   if (!usesBackend) return "planner";
   try {
     const response = await backendFetch(`${CONFIG.apiBaseUrl}/whoami`, { cache: "no-store" });
+    if (viewAsDriverId && response.status === 404) {
+      window.alert("Deze bezorger bestaat niet meer.");
+      stopViewingAs();
+      return null;
+    }
     if (!response.ok) return null;
     const who = await response.json();
     if (who.role === "driver") rememberDriver(who.driver || null);
@@ -641,6 +656,11 @@ function storedDriver() {
 function rememberDriver(driver) {
   const before = driverLang();
   state.driver = driver && driver.name ? { id: String(driver.id || ""), name: String(driver.name), lang: driver.lang === "bg" ? "bg" : "nl" } : null;
+  renderViewAsBar();
+  if (viewAsDriverId) {
+    if (driverLang() !== before) applyDriverLang();
+    return;
+  }
   try {
     localStorage.setItem(driverStorageKey, JSON.stringify(state.driver));
   } catch {
@@ -650,7 +670,7 @@ function rememberDriver(driver) {
 }
 
 function applyRole(role) {
-  if (role) {
+  if (role && !viewAsDriverId) {
     try {
       localStorage.setItem(roleStorageKey, role);
     } catch {
@@ -3223,7 +3243,7 @@ async function backendFetch(url, options = {}) {
   const send = () =>
     fetch(url, {
       ...options,
-      headers: { ...(options.headers || {}), "x-operator-key": storedOperatorKey() },
+      headers: { ...(options.headers || {}), "x-operator-key": storedOperatorKey(), ...(viewAsDriverId ? { "x-view-as": viewAsDriverId } : {}) },
     });
 
   let response = await send();
@@ -4026,6 +4046,11 @@ function telHref(number) {
 }
 
 function logout() {
+  // Looking along: the code here is the planner's, and must not be forgotten.
+  if (viewAsDriverId) {
+    stopViewingAs();
+    return;
+  }
   if (!window.confirm(tr("Uitloggen op dit apparaat? De code wordt hier vergeten; op andere apparaten blijft alles zoals het is."))) return;
   try {
     localStorage.removeItem(operatorKeyStorageKey);
@@ -4061,12 +4086,14 @@ function renderDriversPage() {
           <option value="nl"${driver.lang === "bg" ? "" : " selected"}>Nederlands</option>
           <option value="bg"${driver.lang === "bg" ? " selected" : ""}>Български (Bulgaars)</option>
         </select></label>
+        <button class="button subtle-action driver-view-as" type="button" data-driver="${escapeHtml(driver.id)}">Bekijk als bezorger</button>
         <button class="button subtle-action driver-renew" type="button" data-driver="${escapeHtml(driver.id)}">Nieuwe code</button>
         <button class="button subtle-action driver-remove" type="button" data-driver="${escapeHtml(driver.id)}">Verwijderen</button>
       </div>
     </article>`;
   }).join("") : '<p class="empty">Nog geen bezorgers. Voeg ze hieronder toe; elke bezorger krijgt meteen een eigen code.</p>';
   const find = (button) => drivers.find((driver) => driver.id === button.dataset.driver);
+  holder.querySelectorAll(".driver-view-as").forEach((button) => button.addEventListener("click", () => viewAsDriver(find(button))));
   holder.querySelectorAll(".driver-renew").forEach((button) => button.addEventListener("click", () => renewDriverCode(find(button), button)));
   holder.querySelectorAll(".driver-remove").forEach((button) => button.addEventListener("click", () => removeDriver(find(button), button)));
   // Shown on asking only, and forgotten on reload, so it is not on screen for
@@ -4082,6 +4109,38 @@ function renderDriversPage() {
     driverAction("/drivers/lang", { id: select.dataset.driver, lang: select.value });
   }));
   renderDriverCode();
+}
+
+function viewAsDriver(driver) {
+  if (!driver) return;
+  const url = new URL(window.location.href);
+  url.search = `?meekijken=${encodeURIComponent(driver.id)}`;
+  url.hash = "";
+  window.open(url.toString(), "_blank", "noopener");
+}
+
+// The bar on top of a tab that looks along as a driver. In Dutch, whatever the
+// driver's language: the one reading it is the planner.
+function renderViewAsBar() {
+  if (!viewAsDriverId) return;
+  let bar = document.querySelector("#viewAsBar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "viewAsBar";
+    bar.className = "view-as-bar";
+    document.body.prepend(bar);
+    document.body.classList.add("viewing-as");
+  }
+  const naam = state.driver?.name ? escapeHtml(state.driver.name) : "een bezorger";
+  bar.innerHTML = `<span>Je kijkt mee als <b>${naam}</b>. Alleen kijken: knoppen als Bezorgd doen hier niets, en ${naam} merkt er niets van.</span>
+    <button class="button" type="button">Stop met meekijken</button>`;
+  bar.querySelector("button").addEventListener("click", stopViewingAs);
+}
+
+function stopViewingAs() {
+  window.close();
+  // A tab the browser will not close goes back to the planner's own screen.
+  window.location.href = window.location.pathname;
 }
 
 function upcomingRoutesOf(driverId) {
@@ -4621,7 +4680,7 @@ renderRules();
 // The role this code had last time, straight away: a driver's phone opens on the
 // driver's screen even before, or without, a connection to ask again.
 try {
-  const knownRole = storedOperatorKey() ? localStorage.getItem(roleStorageKey) : null;
+  const knownRole = storedOperatorKey() && !viewAsDriverId ? localStorage.getItem(roleStorageKey) : null;
   if (knownRole === "driver") state.driver = storedDriver();
   if (knownRole === "driver" || knownRole === "planner") applyRole(knownRole);
 } catch {

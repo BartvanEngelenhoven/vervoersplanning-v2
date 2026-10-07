@@ -226,6 +226,11 @@ async function handleRequest(request, requestEnv) {
     env[CALLER] = await identify(request, env);
     const braked = await codeBrake(request, env);
     if (braked) return braked;
+    // Looking along as a driver is looking only: nothing is changed in their name.
+    if (env[CALLER].viewAs && request.method !== "GET" && request.method !== "OPTIONS") {
+      return json({ error: `Je kijkt mee als ${env[CALLER].driver.name}. Daarbij kun je niets veranderen; stop eerst met meekijken.` }, 403, env);
+    }
+    if (env[CALLER].viewAsGone) return json({ error: DRIVER_GONE }, 404, env);
     return await route(request, env);
   } catch (error) {
     // Without this a thrown error comes back as a bare 500 with no CORS
@@ -2616,7 +2621,16 @@ async function identify(request, env) {
   const provided = request.headers.get("x-operator-key") || "";
   if (!provided) return { role: null };
   const planner = String(env.OPERATOR_KEY || "");
-  if (planner && timingSafeEqual(planner, provided)) return { role: "planner" };
+  if (planner && timingSafeEqual(planner, provided)) {
+    // "Bekijk als bezorger": the planner sees a driver's screen exactly as the
+    // Worker gives it to that driver, without their code and without them
+    // noticing. Only GET goes through (handleRequest), so it is read-only.
+    const viewAs = request.headers.get("x-view-as") || "";
+    if (!viewAs) return { role: "planner" };
+    const driver = (await readDrivers(env)).find((entry) => entry.id === viewAs);
+    if (!driver) return { role: "planner", viewAsGone: true };
+    return { role: "driver", viewAs: true, driver: { id: driver.id, name: driver.name, lang: DRIVER_LANGS.includes(driver.lang) ? driver.lang : "nl" } };
+  }
   const shared = String(env.DRIVER_KEY || "");
   if (shared && timingSafeEqual(shared, provided)) return { role: "driver", driver: null };
   const code = normalizeDriverCode(provided);
@@ -3565,6 +3579,6 @@ function corsHeaders(env) {
     "access-control-allow-origin": origin,
     vary: "Origin",
     "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "content-type, x-shopify-hmac-sha256, x-operator-key",
+    "access-control-allow-headers": "content-type, x-shopify-hmac-sha256, x-operator-key, x-view-as",
   };
 }

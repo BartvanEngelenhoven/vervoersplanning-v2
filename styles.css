@@ -735,3 +735,7 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
 .driver-lang { display: flex; align-items: center; gap: .4rem; margin: 0; }
 .driver-lang span { margin: 0; }
 .driver-lang select { min-height: 42px; font: inherit; font-size: .9rem; }
+
+/* "Bekijk als bezorger": a bar that says whose screen this is, and that it is for looking only. */
+.view-as-bar { position: sticky; top: 0; z-index: 50; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem; padding: .7rem 1rem; background: #7a3fb0; color: white; font-size: .95rem; }
+.view-as-bar .button { min-height: 40px; border: 0; background: white; color: #4b2370; font-weight: 800; }
