@@ -1391,7 +1391,7 @@ async function addDriver(env, name) {
   return { ...answer.data.driver, code: answer.data.code };
 }
 
-await test("bezorgers: de planner maakt ze aan, elk met een eigen code, en alleen een hash blijft bewaard", async () => {
+await test("bezorgers: de planner maakt ze aan, elk met een eigen code, en alleen de planner kan die terugzien", async () => {
   const env = makeEnv();
   assert.equal((await call(env, "GET", "/plan", { key: DRIVER })).data.ownCodes, false, "voor er bezorgers zijn, hoeft de oude code nergens om te vragen");
   const sanne = await addDriver(env, "Sanne");
@@ -1414,8 +1414,19 @@ await test("bezorgers: de planner maakt ze aan, elk met een eigen code, en allee
   const plan = (await call(env, "GET", "/plan", { key: PLANNER })).data;
   assert.deepEqual(plan.drivers.map((driver) => driver.name), ["Sanne", "Joost", "Daan", markup.name]);
   assert.ok(plan.drivers.every((driver) => driver.id && driver.codeSetAt && !("codeHash" in driver)), "geen hash naar het scherm");
-  const stored = JSON.stringify(await env.PLANNING_ORDERS.get("drivers", "json"));
-  assert.ok(!stored.includes(sanne.code) && !stored.includes(sanne.code.replaceAll("-", "")), "de code zelf wordt nergens bewaard");
+  assert.equal(plan.drivers.find((driver) => driver.id === sanne.id).code, sanne.code, "de planner ziet de code terug");
+  const vanSanne = (await call(env, "GET", "/plan", { key: sanne.code })).data;
+  assert.ok(!JSON.stringify(vanSanne).includes(joost.code) && !("drivers" in vanSanne), "een bezorger ziet geen codes");
+  assert.ok(!JSON.stringify((await call(env, "GET", "/plan", { key: DRIVER })).data).includes(sanne.code), "de oude gedeelde code ook niet");
+  const nieuw = (await call(env, "POST", "/drivers/code", { key: PLANNER, body: { id: joost.id } })).data;
+  assert.equal(nieuw.drivers.find((driver) => driver.id === joost.id).code, nieuw.code, "een nieuwe code is meteen terug te zien");
+  joost.code = nieuw.code;
+  // Made before October 2026: only the hash was kept.
+  const record = await env.PLANNING_ORDERS.get("drivers", "json");
+  delete record.drivers.find((driver) => driver.id === sanne.id).code;
+  await env.PLANNING_ORDERS.put("drivers", JSON.stringify(record));
+  assert.equal((await call(env, "GET", "/plan", { key: PLANNER })).data.drivers.find((driver) => driver.id === sanne.id).code, null);
+  assert.equal((await call(env, "GET", "/whoami", { key: sanne.code })).data.driver?.name, "Sanne", "en zo'n oude code werkt gewoon");
 
   const who = await call(env, "GET", "/whoami", { key: sanne.code });
   assert.deepEqual(who.data, { role: "driver", driver: { id: sanne.id, name: "Sanne", lang: "nl" } });

@@ -2652,9 +2652,12 @@ async function writeDrivers(env, drivers) {
   await putWithRetry(env, DRIVERS_KEY, JSON.stringify({ drivers, updatedAt: new Date().toISOString() }));
 }
 
-// What the planner's screen may know of the drivers: never the hash.
+// What the planner's screen may know of the drivers: never the hash, but the
+// code itself, so the planner can look it up again (Bart, October 2026). Only
+// the planner's code gets this list. A code made before then was kept as a
+// hash only: null, until the planner makes a new one.
 function publicDrivers(drivers) {
-  return drivers.map((driver) => ({ id: driver.id, name: driver.name, codeSetAt: driver.codeSetAt || null, lang: DRIVER_LANGS.includes(driver.lang) ? driver.lang : "nl" }));
+  return drivers.map((driver) => ({ id: driver.id, name: driver.name, codeSetAt: driver.codeSetAt || null, code: typeof driver.code === "string" ? driver.code : null, lang: DRIVER_LANGS.includes(driver.lang) ? driver.lang : "nl" }));
 }
 
 // "" for no driver, the id of a driver who exists, or null for one who does not
@@ -2709,7 +2712,7 @@ async function addDriver(request, env) {
   if (drivers.length >= MAX_DRIVERS) return json({ error: `Meer dan ${MAX_DRIVERS} bezorgers kan niet.` }, 400, env);
   const code = newDriverCode();
   const now = new Date().toISOString();
-  const driver = { id: crypto.randomUUID(), name, codeHash: await sha256Hex(code), codeSetAt: now, createdAt: now };
+  const driver = { id: crypto.randomUUID(), name, codeHash: await sha256Hex(code), code: formatDriverCode(code), codeSetAt: now, createdAt: now };
   const next = [...drivers, driver];
   await writeDrivers(env, next);
   return json({ driver: { id: driver.id, name }, code: formatDriverCode(code), drivers: publicDrivers(next) }, 200, env);
@@ -2726,6 +2729,7 @@ async function renewDriverCode(request, env) {
   if (!driver) return json({ error: DRIVER_GONE }, 404, env);
   const code = newDriverCode();
   driver.codeHash = await sha256Hex(code);
+  driver.code = formatDriverCode(code);
   driver.codeSetAt = new Date().toISOString();
   await writeDrivers(env, drivers);
   return json({ driver: { id: driver.id, name: driver.name }, code: formatDriverCode(code), drivers: publicDrivers(drivers) }, 200, env);

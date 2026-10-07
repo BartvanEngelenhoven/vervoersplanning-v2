@@ -25,7 +25,7 @@ Wat de site in Shopify verandert:
 ## Codes en rollen
 
 - **De planner** logt in met `OPERATOR_KEY`, een Worker-secret. Opent alles.
-- **Elke bezorger** logt in met een eigen code. De planner voegt bezorgers toe onder *Bezorgers* in het menu; de Worker maakt dan een code van twaalf tekens (zonder 0, o, 1, l en i) en laat die één keer zien. Bewaard wordt alleen een hash, in het record `drivers`. *Nieuwe code* maakt de oude meteen ongeldig; *Verwijderen* ook. Hoofdletters, spaties en streepjes maken bij het intypen niet uit.
+- **Elke bezorger** logt in met een eigen code. De planner voegt bezorgers toe onder *Bezorgers* in het menu; de Worker maakt dan een code van twaalf tekens (zonder 0, o, 1, l en i) en laat die zien. In het record `drivers` staan een hash (om mee in te loggen) en sinds oktober 2026 ook de code zelf, zodat de planner hem onder *Toon code* kan terugzien; alleen de plannerscode krijgt die te zien. *Nieuwe code* maakt de oude meteen ongeldig; *Verwijderen* ook. Hoofdletters, spaties en streepjes maken bij het intypen niet uit.
 - Bij het inplannen kiest de planner wie de rit rijdt (of *Later kiezen*); in de agenda kan dat daarna nog veranderen. De rit krijgt dan `driverId`.
 - **Taal**: per bezorger Nederlands of Bulgaars (`lang` in `drivers`, te kiezen onder *Bezorgers*). De schermen van die bezorger staan dan in het Bulgaars (`DRIVER_WORDS` in `app.js`, met de Nederlandse tekst als sleutel), en de Worker geeft die bezorger zijn meldingen in het Bulgaars (`say` in `backend-worker.js`). Wat mensen typten en productnamen blijven zoals ze zijn.
 
@@ -46,7 +46,7 @@ Wat de Worker bewaart (sinds 28 september 2026 in één Durable Object met een e
 | `plan:` | ingeplande rit: ordernummers, notities | tot 60 dagen na de ritdatum |
 | `plan-announce:` | verslag van de aankondiging | 60 dagen |
 | `geo:` | adres met coördinaat | 90 dagen (een adres dat niet gevonden werd: 7 dagen) |
-| `drivers` | voornaam van elke bezorger en een hash van de code | tot de planner de bezorger verwijdert |
+| `drivers` | voornaam van elke bezorger, een hash van de code en de code zelf (voor de planner) | tot de planner de bezorger verwijdert |
 
 Wie gegevens te zien krijgt:
 

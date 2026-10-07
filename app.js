@@ -4039,7 +4039,8 @@ function logout() {
 
 // ---------------------------------------------------------------------------
 // Bezorgers: the planner's list of drivers. Each has a code of their own, which
-// the Worker makes and shows once, to pass on; a new one stops the old one.
+// the Worker makes; the planner can show it again behind "Toon code". A new one
+// stops the old one.
 // ---------------------------------------------------------------------------
 function renderDriversPage() {
   const holder = document.querySelector("#driverList");
@@ -4049,7 +4050,12 @@ function renderDriversPage() {
     const ritten = upcomingRoutesOf(driver.id);
     return `<article class="driver-card">
       <div><h2>${escapeHtml(driver.name)}</h2>
-        <p>${ritten ? `${ritten} ${ritten === 1 ? "rit" : "ritten"} in de agenda` : "Geen ritten in de agenda"}${driver.codeSetAt ? ` · code gemaakt ${formatDateTime(driver.codeSetAt)}` : ""}</p></div>
+        <p>${ritten ? `${ritten} ${ritten === 1 ? "rit" : "ritten"} in de agenda` : "Geen ritten in de agenda"}${driver.codeSetAt ? ` · code gemaakt ${formatDateTime(driver.codeSetAt)}` : ""}</p>
+        ${driver.code
+          ? (state.codesShown?.has(driver.id)
+            ? `<p class="driver-card-code"><span>Code:</span> <b>${escapeHtml(driver.code)}</b> <button class="link-button driver-code-hide" type="button" data-driver="${escapeHtml(driver.id)}">Verberg</button></p>`
+            : `<p><button class="link-button driver-code-show" type="button" data-driver="${escapeHtml(driver.id)}">Toon code</button></p>`)
+          : '<p class="driver-card-nocode">Deze code is van voor oktober en niet bewaard. Maak een nieuwe code om hem hier te kunnen zien.</p>'}</div>
       <div class="driver-card-actions">
         <label class="driver-lang"><span>Taal op de telefoon</span><select class="driver-lang-select" data-driver="${escapeHtml(driver.id)}">
           <option value="nl"${driver.lang === "bg" ? "" : " selected"}>Nederlands</option>
@@ -4063,6 +4069,14 @@ function renderDriversPage() {
   const find = (button) => drivers.find((driver) => driver.id === button.dataset.driver);
   holder.querySelectorAll(".driver-renew").forEach((button) => button.addEventListener("click", () => renewDriverCode(find(button), button)));
   holder.querySelectorAll(".driver-remove").forEach((button) => button.addEventListener("click", () => removeDriver(find(button), button)));
+  // Shown on asking only, and forgotten on reload, so it is not on screen for
+  // whoever looks over the planner's shoulder.
+  holder.querySelectorAll(".driver-code-show, .driver-code-hide").forEach((button) => button.addEventListener("click", () => {
+    state.codesShown = state.codesShown || new Set();
+    if (button.classList.contains("driver-code-show")) state.codesShown.add(button.dataset.driver);
+    else state.codesShown.delete(button.dataset.driver);
+    renderDriversPage();
+  }));
   holder.querySelectorAll(".driver-lang-select").forEach((select) => select.addEventListener("change", () => {
     select.disabled = true;
     driverAction("/drivers/lang", { id: select.dataset.driver, lang: select.value });
@@ -4089,7 +4103,7 @@ function renderDriverCode() {
   box.innerHTML = `<p>De code voor <b>${naam}</b>:</p>
     <p class="driver-code-value">${escapeHtml(shown.code)}</p>
     <p>Geef deze code door aan ${naam}. Open op de telefoon <b>specialistenplanning.pages.dev</b> en vul de code één keer in; de telefoon onthoudt hem. Hoofdletters, spaties en streepjes maken niet uit.</p>
-    <p class="driver-code-once">Je ziet deze code alleen nu. Kwijt? Maak dan een nieuwe.</p>
+    <p class="driver-code-once">Je kunt deze code later terugzien onder Toon code bij ${naam}.</p>
     <div class="driver-code-actions">
       <button class="button primary driver-code-copy" type="button">Kopieer code</button>
       <button class="button subtle-action driver-code-done" type="button">Klaar</button>

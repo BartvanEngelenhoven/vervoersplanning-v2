@@ -676,6 +676,9 @@ a.driver-maps { display: flex; justify-content: center; min-height: 52px; margin
 .driver-card h2 { margin: 0; font-size: 1.1rem; overflow-wrap: anywhere; }
 .driver-card p { margin: .15rem 0 0; color: var(--muted); font-size: .88rem; }
 .driver-card-actions { display: flex; flex-wrap: wrap; gap: .45rem; }
+.driver-card .link-button { padding: 0; border: 0; background: none; color: var(--brand-2); font: inherit; font-weight: 800; text-decoration: underline; cursor: pointer; }
+.driver-card-code b { color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 1rem; letter-spacing: .03em; }
+.driver-card-nocode { color: var(--warn) !important; }
 .driver-card-actions .button { min-height: 42px; }
 .driver-add { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .6rem; max-width: 760px; margin-top: 1rem;
   padding: .9rem 1rem; border: 1px dashed var(--line); border-radius: 12px; background: #fbfcfa; }
