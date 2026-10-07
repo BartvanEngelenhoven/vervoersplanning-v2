@@ -110,8 +110,11 @@ h2 { margin-bottom: 0; font-size: 1.35rem; letter-spacing: -.025em; }
 .route-color-7 { --route: #c9447f; }
 .map-route-picker button[class*="route-color-"] { border-left: 8px solid var(--route); }
 .map-route-picker button[class*="route-color-"].active { border-color: var(--route); background: var(--route); color: white; }
-.map-route-summary.route-colored { border-left: 8px solid var(--route); }
+/* The chosen route's details: not a card like the route buttons above, so it
+   does not read as one more route. A line above, a label, the title in colour. */
+.map-route-summary.route-colored { margin-top: .35rem; padding: .9rem .1rem .2rem; border: 0; border-top: 2px solid var(--line); border-radius: 0; background: none; }
 .map-route-summary.route-colored b { color: var(--route); }
+.map-route-detail-label { color: var(--muted); font-size: .72rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .map-route-summary { display: grid; gap: .45rem; padding: .8rem; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
 .map-route-summary b, .map-route-summary span { display: block; }
 .map-route-summary span { color: var(--muted); font-size: .85rem; }

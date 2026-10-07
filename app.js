@@ -1759,6 +1759,7 @@ function renderPlanningMap() {
   holder.querySelector(".map-side").innerHTML = `
     <div class="map-route-picker">${routeButtons}</div>
     <div class="map-route-summary route-colored ${routeColor(activeMapRouteIndex)}">
+      <small class="map-route-detail-label">Details van de gekozen rit</small>
       <b>${escapeHtml(routeTitle(route, activeMapRouteIndex))}: ${escapeHtml(routeLabel(route))}</b>
       <span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span>
       <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open groot in Google Maps</a>
