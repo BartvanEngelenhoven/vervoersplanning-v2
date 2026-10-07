@@ -1692,6 +1692,13 @@ function renderPlanningOverview() {
   showRoutesButton.classList.toggle("active", planningView === "routes");
 }
 
+// One colour per route on the map's list, so the planner sees at a glance how
+// many there are, and the summary under it keeps the colour of the route shown.
+// Classes, not a style attribute: the page's CSP allows no inline styles.
+function routeColor(index) {
+  return `route-color-${index % 8}`;
+}
+
 function renderPlanningMap() {
   const holder = document.querySelector("#mapView");
   if (!holder) return;
@@ -1706,7 +1713,7 @@ function renderPlanningMap() {
   }
   activeMapRouteIndex = Math.min(activeMapRouteIndex, routes.length - 1);
   const route = routes[activeMapRouteIndex];
-  const routeButtons = routes.map((item, index) => `<button class="${index === activeMapRouteIndex ? "active" : ""}" type="button" data-route-index="${index}">
+  const routeButtons = routes.map((item, index) => `<button class="${routeColor(index)}${index === activeMapRouteIndex ? " active" : ""}" type="button" data-route-index="${index}">
     ${escapeHtml(routeTitle(item, index))}: ${escapeHtml(routeLabel(item))} · ${formatMinutes(item.totalMinutes)}
   </button>`).join("");
   const stops = route.orders.map((order, index) => `<li>
@@ -1751,7 +1758,7 @@ function renderPlanningMap() {
   holder.querySelector(".google-map-card iframe").title = `Google Maps route ${routeLabel(route)}`;
   holder.querySelector(".map-side").innerHTML = `
     <div class="map-route-picker">${routeButtons}</div>
-    <div class="map-route-summary">
+    <div class="map-route-summary route-colored ${routeColor(activeMapRouteIndex)}">
       <b>${escapeHtml(routeTitle(route, activeMapRouteIndex))}: ${escapeHtml(routeLabel(route))}</b>
       <span>${route.orders.length} stops · rijden ${formatMinutes(route.driveMinutes)} · afleveren ${formatMinutes(route.deliveryMinutes)} · totaal ${formatMinutes(route.totalMinutes)}</span>
       <a class="button ghost" href="${googleMapsUrl(route.orders)}" target="_blank" rel="noreferrer">Open groot in Google Maps</a>
